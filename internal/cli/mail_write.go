@@ -16,6 +16,7 @@ import (
 	"github.com/lennert/emlcal/internal/mime"
 	"github.com/lennert/emlcal/internal/model"
 	"github.com/lennert/emlcal/internal/output"
+	"github.com/lennert/emlcal/internal/provider"
 	"github.com/lennert/emlcal/internal/sync"
 )
 
@@ -436,6 +437,18 @@ func mailSubmit(cmd *cobra.Command, app *App, c *mailComposed, kind sync.OpKind)
 	}
 	res, err := eng.Apply(cmd.Context(), c.account.Name, op)
 	if err != nil {
+		// Submissions are single-attempt: the engine cannot tell a lost reply
+		// from a request that never left, so it refuses to retry rather than
+		// risk sending twice. Say so, or the exit-4 transport error reads as
+		// "queued somewhere".
+		if provider.IsOffline(err) {
+			what := "message not sent"
+			if kind == sync.OpDraft {
+				what = "draft not stored"
+			}
+			return output.Errorf(output.ExitOffline,
+				"%s: %w — nothing was queued (a send is never retried automatically); run the command again when you are back online", what, err)
+		}
 		return err
 	}
 	id := res.RemoteID
@@ -489,7 +502,11 @@ func mailDraftCmd(app *App) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "draft",
 		Short: "Store a draft on the server",
-		Args:  cobra.NoArgs,
+		Long: `Store a draft on the server, optionally as a reply (--reply <id>).
+
+Like send, this is not queued when the provider is unreachable: it fails with
+exit 4 and stores nothing.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := mailCompose(cmd, app, &f, f.reply)
 			if err != nil {
@@ -512,7 +529,11 @@ func mailSendCmd(app *App) *cobra.Command {
 		Use:   "send",
 		Short: "Send a message",
 		Long: `Send a new message, a reply (--reply <id>), or an existing draft
-(--draft <id>). --dry-run prints the exact RFC 822 bytes and sends nothing.`,
+(--draft <id>). --dry-run prints the exact RFC 822 bytes and sends nothing.
+
+Unlike mark/move/archive/trash, a send is not queued when the provider is
+unreachable: it fails with exit 4 and nothing is submitted, because a retry
+could deliver the message twice. Run it again once you are back online.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if f.draft != "" {
@@ -578,7 +599,11 @@ func mailReplyCmd(app *App) *cobra.Command {
 		Short: "Reply to a message",
 		Long: `Reply to a message from the account that received it. The original is
 quoted below your text and the thread headers are set, so the reply lands in
-the same conversation. --all keeps the other recipients.`,
+the same conversation. --all keeps the other recipients.
+
+Offline this fails with exit 4 and sends nothing rather than queueing, since
+a retried submission could arrive twice. The original is marked answered only
+once the reply has actually gone out.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := mailCompose(cmd, app, &f, args[0])
