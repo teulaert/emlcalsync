@@ -575,7 +575,7 @@ emlcal mail search "<fts query>" [same filters]     FTS5 syntax: AND OR NOT "phr
 emlcal mail read <id> [--full] [--html] [--raw] [--headers]
 emlcal mail thread <id>                              all messages, oldest first, stripped bodies
 emlcal mail attachment list <id>
-emlcal mail attachment get <id> <part|filename> [-o path]   (fetches remote if raw_complete=0)
+emlcal mail attachment get <id> <part|filename> [-O path]   (fetches remote if raw_complete=0; -o is the format flag)
 
 MAIL — write (gate behind confirmation)
 emlcal mail mark <id>... --read|--unread|--flag|--unflag

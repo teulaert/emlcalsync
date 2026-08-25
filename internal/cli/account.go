@@ -120,6 +120,7 @@ func coreAddAccount(app *App, prov model.Provider, name, email string, tokenStdi
 		Email:            email,
 		IncludeSpamTrash: true,
 		Calendars:        []string{"*"},
+		Concurrency:      config.DefaultConcurrency,
 	}
 	switch prov {
 	case model.ProviderFastmail:
