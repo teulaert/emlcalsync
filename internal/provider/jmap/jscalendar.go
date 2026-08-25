@@ -1,6 +1,8 @@
 package jmap
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -840,10 +842,21 @@ func participantsUnchanged(base *jsEvent, ev *model.Event) bool {
 	return maps.Equal(want, got)
 }
 
-// participantKey derives a stable participant id from an address. JSCalendar
-// wants opaque ids; using the lowercased address keeps updates idempotent.
+// participantKey derives a stable participant id from an address.
+//
+// RFC 8984 §1.4.1 keys participants by Id, which is limited to at most 255
+// characters from the URL-safe base64 alphabet (A-Z, a-z, 0-9, '-', '_') and
+// may not start with '-'. A mail address is not a valid Id — '@' and '.' alone
+// rule it out, and the id also lands in JMAP patch paths — so the address is
+// hashed instead: the first 22 base64url characters of SHA-256 over the
+// lowercased address, which is 132 bits and collision-free in practice.
+//
+// The mapping is one-way, so reads never rely on it: participants are matched
+// by their sendTo/email values (see jsParticipant.address), and an update
+// keeps the server's own keys whenever the participant set is unchanged.
 func participantKey(email string) string {
-	return strings.ToLower(strings.TrimSpace(email))
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(email))))
+	return base64.RawURLEncoding.EncodeToString(sum[:])[:22]
 }
 
 func sortedKeys[V any](m map[string]V) []string {

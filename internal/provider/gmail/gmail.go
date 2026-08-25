@@ -113,11 +113,14 @@ const (
 	// batchModify accepts at most 1000 ids per call.
 	maxModifyIDs = 1000
 
-	// defaultBatchURL is rootUrl + the documented default batch path
-	// "/batch/<api>/<version>" for the Gmail API
-	// (https://developers.google.com/gmail/api/guides/batch). The API's
-	// discovery document gives rootUrl "https://gmail.googleapis.com/"; the
-	// old global endpoint on www.googleapis.com is deprecated.
+	// defaultBatchURL is the Gmail API's rootUrl plus the batch path
+	// "/batch/<api>/<version>" documented in
+	// https://developers.google.com/gmail/api/guides/batch. The discovery
+	// document (https://gmail.googleapis.com/$discovery/rest?version=v1)
+	// gives rootUrl "https://gmail.googleapis.com/" and batchPath "batch";
+	// both /batch and /batch/gmail/v1 are served on that host, and the longer
+	// one is what the guide and the client libraries use. The old global
+	// endpoint on www.googleapis.com is deprecated.
 	defaultBatchURL = "https://gmail.googleapis.com/batch/gmail/v1"
 )
 

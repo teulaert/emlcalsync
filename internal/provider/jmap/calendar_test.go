@@ -529,6 +529,100 @@ func TestCreateEvent(t *testing.T) {
 	}
 }
 
+// TestParticipantKeyIsAValidJSCalendarID: RFC 8984 Ids are URL-safe base64
+// characters only, so a raw mail address cannot be one.
+func TestParticipantKeyIsAValidJSCalendarID(t *testing.T) {
+	key := participantKey("Alice.Smith+tag@example.com")
+	if len(key) != 22 {
+		t.Errorf("key %q is %d characters, want 22", key, len(key))
+	}
+	if strings.HasPrefix(key, "-") {
+		t.Errorf("key %q starts with '-', which RFC 8984 §1.4.1 forbids", key)
+	}
+	for _, r := range key {
+		ok := r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' ||
+			r == '-' || r == '_'
+		if !ok {
+			t.Fatalf("key %q contains %q, outside the Id alphabet", key, r)
+		}
+	}
+	// Stable, and insensitive to case and surrounding space.
+	if got := participantKey("  ALICE.smith+TAG@Example.COM "); got != key {
+		t.Errorf("key is not canonical: %q vs %q", got, key)
+	}
+	if participantKey("bob@example.com") == key {
+		t.Error("different addresses share a key")
+	}
+}
+
+// TestCreateEventParticipantKeys: the keys written to the server are hashes,
+// and reading the event back still matches participants by address.
+func TestCreateEventParticipantKeys(t *testing.T) {
+	f := newFakeServer(t)
+	seedCalendars(f)
+	cal := f.client(t).Calendar()
+
+	ev := &model.Event{
+		Title:     "Lunch",
+		Start:     time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC),
+		End:       time.Date(2026, 5, 4, 13, 0, 0, 0, time.UTC),
+		Timezone:  "UTC",
+		Organizer: model.Address{Name: "Me", Email: testEmail},
+		Attendees: []model.Attendee{
+			{Name: "You", Email: "You@Example.com", Response: model.PartAccepted},
+		},
+	}
+	got, err := cal.CreateEvent(testCtx(t), "cal-1", ev)
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+
+	create := f.captured("CalendarEvent/set")[0]["create"].(map[string]any)["new"].(map[string]any)
+	parts, _ := create["participants"].(map[string]any)
+	if len(parts) != 2 {
+		t.Fatalf("participants = %v", parts)
+	}
+	for _, want := range []string{participantKey(testEmail), participantKey("you@example.com")} {
+		if _, ok := parts[want]; !ok {
+			t.Errorf("participant key %q missing from %v", want, sortedMapKeys(parts))
+		}
+	}
+	for k := range parts {
+		if strings.Contains(k, "@") {
+			t.Errorf("participant key %q is a mail address, not a JSCalendar Id", k)
+		}
+	}
+
+	// The address is what reads match on, so the round trip is unaffected.
+	if got.Organizer.Email != testEmail {
+		t.Errorf("organizer = %+v", got.Organizer)
+	}
+	if len(got.Attendees) != 1 {
+		t.Fatalf("attendees = %+v", got.Attendees)
+	}
+	var you *model.Attendee
+	for i := range got.Attendees {
+		if strings.EqualFold(got.Attendees[i].Email, "you@example.com") {
+			you = &got.Attendees[i]
+		}
+	}
+	if you == nil || you.Response != model.PartAccepted {
+		t.Errorf("attendee round trip = %+v", got.Attendees)
+	}
+
+	// RSVP patches the key the server holds, whatever it is.
+	if err := cal.Respond(testCtx(t), "cal-1", got.RemoteID, model.PartDeclined); err != nil {
+		t.Fatalf("Respond: %v", err)
+	}
+	back, err := cal.fetchModelEvent(testCtx(t), testAccount, "cal-1", got.RemoteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.MyResponse != model.PartDeclined {
+		t.Errorf("MyResponse after Respond = %q", back.MyResponse)
+	}
+}
+
 func TestCreateEventAllDay(t *testing.T) {
 	f := newFakeServer(t)
 	seedCalendars(f)

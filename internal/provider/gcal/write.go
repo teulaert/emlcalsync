@@ -12,10 +12,12 @@ import (
 )
 
 // sendUpdatesAll is the value of the sendUpdates query parameter that makes
-// Google mail an invitation, update or cancellation to every guest. The
-// parameter is shared by events.insert, events.patch/update and events.delete;
-// its other values are "externalOnly" and "none", and omitting it falls back
-// to the deprecated sendNotifications default, which sends nothing.
+// Google mail an invitation, update or cancellation to every guest.
+// events.insert, events.patch and events.delete all take it, with the same
+// values ("all", "externalOnly", "none") and the same default: nothing is
+// sent. Google warns against "none" — it can keep events from syncing to
+// external calendars — so this package only ever chooses between "all" and
+// leaving the parameter off.
 //
 // Without it a guest never hears that they were invited, that the meeting
 // moved or that it was called off, which is the single most visible way a
