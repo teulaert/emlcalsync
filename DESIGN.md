@@ -730,7 +730,7 @@ internal/
 |---|---|---|
 | Go version | 1.23+ | range-over-func iterators, stable `slices`/`maps` |
 | SQLite | `modernc.org/sqlite` | pure Go → static binary, FTS5 included, trivial cross-compile for Omarchy; swap to `mattn/go-sqlite3` behind a build tag if FTS perf ever matters |
-| Queries | `sqlc` | typed, checked at build time, no ORM |
+| Queries | hand-written `database/sql` | typed scan helpers, no codegen tool needed |
 | Gmail / GCal | `google.golang.org/api` | first-party, batch support, retry |
 | OAuth | `golang.org/x/oauth2` | token refresh, loopback flow |
 | JMAP | hand-rolled (or `go-jmap`) | JSON in/out; see 6.2 |
@@ -789,7 +789,7 @@ to change now; several are hard to change after the first backfill.
    surprising for shell pipelines that expect text (`| grep`). `-o plain`
    exists for that.
 10. **`text_body` stored in full**, quote-stripping at display time.
-11. **Go + modernc SQLite + cobra + sqlc.**
+11. **Go + modernc SQLite + cobra; hand-written typed queries (no sqlc — one build-time tool fewer).**
 12. **Phase order: Fastmail before Gmail.**
 
 Answers (2026-08-25):
@@ -807,3 +807,51 @@ Answers (2026-08-25):
   `general.default_account` is set.
 - **Quote stripping** ships with English and Dutch patterns (German and
   French included at no extra cost, off the critical path).
+
+---
+
+## 16. Implementation notes (as built, 2026-08-25)
+
+Deviations and additions relative to the sections above, recorded after the
+first full build and the two adversarial reviews (`docs/reviews/`).
+
+- **Queries** are hand-written `database/sql` code; sqlc was dropped.
+- **Outbox** has a `failed_at` column (migration `0002`). A write the provider
+  *rejects* (non-transport error) is rolled back in the index and marked
+  permanently failed; it never retries. Sends/drafts queue only on a
+  demonstrably pre-request failure (dial/DNS/connection refused →
+  `provider.IsPreRequestFailure`); an ambiguous failure (timeout after the
+  request went out, 5xx) is permanent so a message can never be sent twice.
+  `mail send` therefore exits 6 (queued) or 4 (not sent, run again).
+- **`send --draft`** sends the draft's raw bytes and then trashes the draft
+  (providers return the draft's *message* id from `CreateDraft`).
+- **JMAP enumeration** uses `anchor`/`anchorOffset` paging (cursor is a JSON
+  `{"anchor","n"}`) so deletions during a backfill cannot skip messages;
+  `recurrenceOverrides` on JMAP events become exception rows; participant ids
+  are base64url(sha256(email)); the calendars capability falls back to any
+  `*:calendars` URN the session advertises.
+- **Gmail** never retries `messages.send`/`drafts.create`; batch endpoint is
+  `https://gmail.googleapis.com/batch/gmail/v1`. **GCal** writes pass
+  `sendUpdates=all` when the event has other attendees.
+- **`raw_max_size`**: oversized messages are stored as envelope-only stubs
+  (`raw_complete = 0`, subject "(not fetched: N MB)") and completed on demand
+  by `mail read --raw/--html` or `mail attachment get`.
+- **Store guards**: an empty mailbox list from a provider is refused rather
+  than wiping memberships; resurrected messages are re-indexed in full.
+- **Secrets**: Fastmail token in `secrets/<name>.fastmail.token`; Google
+  token in `secrets/<name>.gmail.json`; the Google OAuth client in
+  `secrets/google-client.json` (`emlcal account google-client`) or env
+  `EMLCAL_GOOGLE_CLIENT_ID`/`_SECRET`. `EMLCAL_JMAP_SESSION_URL` overrides the
+  Fastmail session URL (tests, self-hosted JMAP).
+- **Flags**: `mail attachment get … -O path` (`-o` is the global format flag).
+- **Testing**: `internal/provider/fake` (in-memory providers) backs the sync
+  and CLI unit tests; `internal/testutil/jmapfake` + `e2e/` drive the real
+  binary through a fake JMAP server, including push via `sync --watch`.
+  `EMLCAL_REVIEW=1 go test -run TestReview ./internal/...` runs the review
+  probes that are still open.
+
+### Still to verify against live accounts
+
+See `docs/reviews/2026-08-25-providers.md` (checklist at the end). Highest
+risk: Fastmail's actual JMAP calendars capability URN and `anchor` paging
+support; Gmail threading of replies; GCal RSVP delivery.
