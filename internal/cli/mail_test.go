@@ -710,17 +710,35 @@ func TestMailSendExistingDraft(t *testing.T) {
 	}
 }
 
-// A send is not idempotent, so the engine does not queue it for retry: an
-// offline submission fails with exit 4 and leaves the draft where it was.
+// A send that failed before any request bytes left the machine is safe to
+// replay, so it is queued in the outbox (exit 6) and the draft stays put.
+func TestMailSendDraftKeepsDraftWhenQueued(t *testing.T) {
+	env := mailSeed(t)
+	env.Mail["work"].FailNext(1) // pre-request failure: no connection at all
+
+	_, errs, code := env.Run("mail", "send", "--draft", "work:m-old")
+	if code != 6 {
+		t.Fatalf("queued send --draft exit = %d, want 6\nstderr: %s", code, errs)
+	}
+	if n := len(env.Mail["work"].Sent()); n != 0 {
+		t.Errorf("sent = %d, want 0 (the send is still queued)", n)
+	}
+	if _, boxes, _ := env.Mail["work"].Lookup("m-old"); mailContains(boxes, "TRASH") {
+		t.Errorf("queued send trashed the draft before it went out: %v", boxes)
+	}
+}
+
+// A send whose connection dropped mid-request may already have arrived, so the
+// engine retires it instead of retrying: exit 4, nothing queued, draft intact.
 func TestMailSendDraftKeepsDraftWhenOffline(t *testing.T) {
 	env := mailSeed(t)
-	env.Mail["work"].FailNext(1)
+	env.Mail["work"].FailNextAmbiguous(1)
 
 	_, errs, code := env.Run("mail", "send", "--draft", "work:m-old")
 	if code != 4 {
-		t.Fatalf("offline send --draft exit = %d, want 4\nstderr: %s", code, errs)
+		t.Fatalf("ambiguous send --draft exit = %d, want 4\nstderr: %s", code, errs)
 	}
-	if !strings.Contains(errs, "not sent") || !strings.Contains(errs, "nothing was queued") {
+	if !strings.Contains(errs, "not sent") || !strings.Contains(errs, "not queued") {
 		t.Errorf("offline error does not say the send did not happen: %s", errs)
 	}
 	if n := len(env.Mail["work"].Sent()); n != 0 {
@@ -731,22 +749,34 @@ func TestMailSendDraftKeepsDraftWhenOffline(t *testing.T) {
 	}
 }
 
-func TestMailReplyOffline(t *testing.T) {
-	env := mailSeed(t)
-	env.Mail["work"].FailNext(1)
+// Whether the reply is queued or retired, it has not been delivered, so the
+// original must not be marked answered.
+func TestMailReplyOfflineDoesNotAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arm  func(t *testing.T, env *testEnv)
+		exit int
+	}{
+		{"queued", func(_ *testing.T, env *testEnv) { env.Mail["work"].FailNext(1) }, 6},
+		{"retired", func(_ *testing.T, env *testEnv) { env.Mail["work"].FailNextAmbiguous(1) }, 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := mailSeed(t)
+			tc.arm(t, env)
 
-	_, errs, code := env.Run("mail", "reply", "work:m-unread", "--body", "thanks")
-	if code != 4 {
-		t.Fatalf("offline reply exit = %d, want 4\nstderr: %s", code, errs)
-	}
-	// The original must not be marked answered when nothing went out.
-	if flags, _, _ := env.Mail["work"].Lookup("m-unread"); flags.Answered {
-		t.Errorf("original marked answered after a failed reply")
-	}
-	rows := mailList(t, env, "list", "--account", "work")
-	for _, r := range rows {
-		if r.ID == "work:m-unread" && r.Answered {
-			t.Errorf("original answered locally after a failed reply: %+v", r)
-		}
+			_, errs, code := env.Run("mail", "reply", "work:m-unread", "--body", "thanks")
+			if code != tc.exit {
+				t.Fatalf("offline reply exit = %d, want %d\nstderr: %s", code, tc.exit, errs)
+			}
+			if flags, _, _ := env.Mail["work"].Lookup("m-unread"); flags.Answered {
+				t.Errorf("original marked answered after an undelivered reply")
+			}
+			rows := mailList(t, env, "list", "--account", "work")
+			for _, r := range rows {
+				if r.ID == "work:m-unread" && r.Answered {
+					t.Errorf("original answered locally after an undelivered reply: %+v", r)
+				}
+			}
+		})
 	}
 }

@@ -203,13 +203,12 @@ func TestReviewRejectedSendIsRetried(t *testing.T) {
 }
 
 // TestReviewOfflineSendIsNotResent: an offline failure from a send that may
-// already have reached the server is retired too — re-running it would submit
-// the message twice. Only a failure from before the request (no provider
-// client) stays queued.
+// already have reached the server is retired — re-running it would submit the
+// message twice.
 func TestReviewOfflineSendIsNotResent(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
-	h.mail.FailNext(1) // an offline error from Send itself
+	h.mail.FailNextAmbiguous(1) // the connection dropped mid-request
 	res, err := h.eng.Apply(ctx, "work", Op{Kind: OpSend, Raw: mailRaw(t, "hello", "hi")})
 	if err == nil {
 		t.Fatal("Apply returned no error")
@@ -222,7 +221,7 @@ func TestReviewOfflineSendIsNotResent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if item.FailedAt == nil {
-		t.Fatalf("offline send row = %+v, want permanently failed", item)
+		t.Fatalf("ambiguous send row = %+v, want permanently failed", item)
 	}
 	rep, err := h.eng.RetryOutbox(ctx, "work")
 	if err != nil {
@@ -236,6 +235,88 @@ func TestReviewOfflineSendIsNotResent(t *testing.T) {
 	h.mail.mu.Unlock()
 	if sent != 0 {
 		t.Fatalf("provider saw %d sends", sent)
+	}
+}
+
+// TestReviewOfflineSendIsQueued: composing offline and sending when the
+// network comes back is the whole point of the outbox (DESIGN §12), so a send
+// that provably never left the machine stays pending and drains on retry.
+func TestReviewOfflineSendIsQueued(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	h.mail.FailNext(1) // no route to the server: nothing was sent
+	res, err := h.eng.Apply(ctx, "work", Op{Kind: OpSend, Raw: mailRaw(t, "hello", "hi")})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !res.Queued {
+		t.Fatal("a send that never left the machine was not queued")
+	}
+	item, err := h.st.GetOutbox(ctx, res.OutboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.FailedAt != nil || item.DoneAt != nil {
+		t.Fatalf("queued send row = %+v, want still pending", item)
+	}
+	h.mail.mu.Lock()
+	sent := len(h.mail.sentRaw)
+	h.mail.mu.Unlock()
+	if sent != 0 {
+		t.Fatalf("provider saw %d sends while offline", sent)
+	}
+
+	// Back online: the queued send goes out exactly once.
+	rep, err := h.eng.RetryOutbox(ctx, "work")
+	if err != nil {
+		t.Fatalf("RetryOutbox: %v", err)
+	}
+	if rep.Done != 1 {
+		t.Fatalf("retry report = %+v, want one done", rep)
+	}
+	h.mail.mu.Lock()
+	sent = len(h.mail.sentRaw)
+	h.mail.mu.Unlock()
+	if sent != 1 {
+		t.Fatalf("provider saw %d sends after the retry, want 1", sent)
+	}
+	pending, err := h.st.ListOutbox(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("%d rows still pending", len(pending))
+	}
+}
+
+// TestReviewQueuedSendRetiredOnAmbiguousRetry: a queued send whose retry hits
+// an ambiguous failure must not be tried a third time.
+func TestReviewQueuedSendRetiredOnAmbiguousRetry(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	h.mail.FailNext(1)
+	res, err := h.eng.Apply(ctx, "work", Op{Kind: OpSend, Raw: mailRaw(t, "hello", "hi")})
+	if err != nil || !res.Queued {
+		t.Fatalf("Apply: err=%v queued=%v", err, res.Queued)
+	}
+
+	h.mail.FailNextAmbiguous(1)
+	rep, err := h.eng.RetryOutbox(ctx, "work")
+	if err == nil {
+		t.Fatal("RetryOutbox returned no error for a retired send")
+	}
+	if rep.Attempted != 1 || rep.Failed != 1 {
+		t.Fatalf("retry report = %+v, want one attempted failure", rep)
+	}
+	item, err := h.st.GetOutbox(ctx, res.OutboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.FailedAt == nil {
+		t.Fatalf("send row after an ambiguous retry = %+v, want permanently failed", item)
+	}
+	if rep, err = h.eng.RetryOutbox(ctx, "work"); err != nil || rep.Attempted != 0 {
+		t.Fatalf("second pass: err=%v attempted=%d, want it left alone", err, rep.Attempted)
 	}
 }
 

@@ -12,6 +12,8 @@ package provider
 import (
 	"context"
 	"errors"
+	"net"
+	"syscall"
 	"time"
 
 	"github.com/lennert/emlcal/internal/model"
@@ -138,3 +140,45 @@ type Pusher interface {
 // IsOffline reports whether err represents a transport-level failure
 // (implementations wrap such errors with model.ErrOffline).
 func IsOffline(err error) bool { return errors.Is(err, model.ErrOffline) }
+
+// ErrNotConnected marks a failure that happened before any request bytes were
+// sent: no network, no session, no client. Wrap it (with %w, alongside
+// model.ErrOffline) whenever an implementation knows the request never left the
+// machine — it is what lets the sync engine queue a non-idempotent write like a
+// send instead of reporting it as possibly-half-done.
+var ErrNotConnected = errors.New("not connected")
+
+// IsPreRequestFailure reports whether err demonstrably happened before any
+// request bytes reached the server, which makes retrying it safe even for a
+// write that must not run twice.
+//
+// It is deliberately conservative: only a failure to establish the connection
+// counts. A timeout, an EOF, a reset, a 5xx or a cancelled context can all mean
+// the request arrived and the answer was lost, so they report false and the
+// caller must treat the write as possibly-done.
+//
+// Note that this can only see what the error chain preserves. An
+// implementation that formats its cause with %v instead of %w flattens the
+// chain, and every failure from it looks ambiguous — which errs toward not
+// retrying, never toward sending twice.
+func IsPreRequestFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrNotConnected) {
+		return true
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		return true
+	}
+	// *url.Error unwraps to whatever the transport returned, so a dial failure
+	// behind an HTTP client is reached by the same As.
+	var op *net.OpError
+	if errors.As(err, &op) && op.Op == "dial" {
+		return true
+	}
+	return errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH)
+}

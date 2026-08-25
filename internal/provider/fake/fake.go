@@ -15,10 +15,19 @@ import (
 	"github.com/lennert/emlcal/internal/provider"
 )
 
-// ErrOffline is what the fake returns when FailNext is armed: a transport
-// failure, which provider.IsOffline recognises.
+// ErrOffline is what the fake returns when FailNext is armed: a failure to
+// reach the server at all, which provider.IsOffline recognises and
+// provider.IsPreRequestFailure classifies as "the request never went out", so
+// a queued write is safe to retry.
 func ErrOffline(what string) error {
-	return fmt.Errorf("fake: %s: dial tcp: %w", what, model.ErrOffline)
+	return fmt.Errorf("fake: %s: dial tcp: %w: %w", what, provider.ErrNotConnected, model.ErrOffline)
+}
+
+// ErrOfflineAmbiguous is a transport failure that happened after the request
+// was on the wire: the server may or may not have acted on it. It is offline
+// but not a pre-request failure, so a non-idempotent write must not be retried.
+func ErrOfflineAmbiguous(what string) error {
+	return fmt.Errorf("fake: %s: read tcp: connection reset by peer: %w", what, model.ErrOffline)
 }
 
 // ---------------------------------------------------------------------------
@@ -62,8 +71,10 @@ type Mail struct {
 	pageSize int
 	// expire arms the next Changes call to report an expired state.
 	expire bool
-	// failNext makes the next n provider calls fail as offline.
+	// failNext makes the next n provider calls fail as offline (pre-request).
 	failNext int
+	// failNextAmbiguous makes the next n calls fail after the request went out.
+	failNextAmbiguous int
 	// onEnumerate runs at the start of every Enumerate call (1-based count).
 	onEnumerate func(call int)
 	enumCalls   int
@@ -180,11 +191,20 @@ func (f *Mail) InjectStateExpired() {
 	f.expire = true
 }
 
-// FailNext makes the next n provider calls fail as offline.
+// FailNext makes the next n provider calls fail as offline, before the request
+// leaves the machine.
 func (f *Mail) FailNext(n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failNext = n
+}
+
+// FailNextAmbiguous makes the next n provider calls fail the way a connection
+// that drops mid-request does: the server may already have acted on it.
+func (f *Mail) FailNextAmbiguous(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failNextAmbiguous = n
 }
 
 func (f *Mail) SetPageSize(n int) {
@@ -213,6 +233,10 @@ func (f *Mail) fail() error {
 	if f.failNext > 0 {
 		f.failNext--
 		return ErrOffline("mail")
+	}
+	if f.failNextAmbiguous > 0 {
+		f.failNextAmbiguous--
+		return ErrOfflineAmbiguous("mail")
 	}
 	return nil
 }

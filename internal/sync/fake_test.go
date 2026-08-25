@@ -12,10 +12,17 @@ import (
 	"github.com/lennert/emlcal/internal/provider"
 )
 
-// errOffline is what the fake returns when FailNext is armed: a transport
-// failure, which provider.IsOffline recognises.
+// errOffline is what the fake returns when FailNext is armed: a failure to
+// reach the server at all, which provider.IsOffline recognises and
+// provider.IsPreRequestFailure classifies as "the request never went out".
 func errOffline(what string) error {
-	return fmt.Errorf("fake: %s: dial tcp: %w", what, model.ErrOffline)
+	return fmt.Errorf("fake: %s: dial tcp: %w: %w", what, provider.ErrNotConnected, model.ErrOffline)
+}
+
+// errOfflineAmbiguous is a transport failure from after the request was on the
+// wire: offline, but the server may already have acted on it.
+func errOfflineAmbiguous(what string) error {
+	return fmt.Errorf("fake: %s: read tcp: connection reset by peer: %w", what, model.ErrOffline)
 }
 
 // ---------------------------------------------------------------------------
@@ -59,8 +66,10 @@ type fakeMail struct {
 	pageSize int
 	// expire arms the next Changes call to report an expired state.
 	expire bool
-	// failNext makes the next n provider calls fail as offline.
+	// failNext makes the next n provider calls fail as offline (pre-request).
 	failNext int
+	// failNextAmbiguous makes the next n calls fail after the request went out.
+	failNextAmbiguous int
 	// onEnumerate runs at the start of every Enumerate call (1-based count).
 	onEnumerate func(call int)
 	enumCalls   int
@@ -177,11 +186,20 @@ func (f *fakeMail) InjectStateExpired() {
 	f.expire = true
 }
 
-// FailNext makes the next n provider calls fail as offline.
+// FailNext makes the next n provider calls fail as offline, before the request
+// leaves the machine.
 func (f *fakeMail) FailNext(n int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failNext = n
+}
+
+// FailNextAmbiguous makes the next n provider calls fail the way a connection
+// that drops mid-request does: the server may already have acted on it.
+func (f *fakeMail) FailNextAmbiguous(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failNextAmbiguous = n
 }
 
 func (f *fakeMail) SetPageSize(n int) {
@@ -210,6 +228,10 @@ func (f *fakeMail) fail() error {
 	if f.failNext > 0 {
 		f.failNext--
 		return errOffline("mail")
+	}
+	if f.failNextAmbiguous > 0 {
+		f.failNextAmbiguous--
+		return errOfflineAmbiguous("mail")
 	}
 	return nil
 }

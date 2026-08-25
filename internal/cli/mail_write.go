@@ -437,17 +437,18 @@ func mailSubmit(cmd *cobra.Command, app *App, c *mailComposed, kind sync.OpKind)
 	}
 	res, err := eng.Apply(cmd.Context(), c.account.Name, op)
 	if err != nil {
-		// Submissions are single-attempt: the engine cannot tell a lost reply
-		// from a request that never left, so it refuses to retry rather than
-		// risk sending twice. Say so, or the exit-4 transport error reads as
-		// "queued somewhere".
+		// A submission that failed before the request left the machine comes
+		// back queued (Queued=true, no error). Reaching here with a transport
+		// error means the connection dropped mid-request, so the engine will
+		// not replay it: the server may already have the message. Say that,
+		// or the exit-4 error reads as "queued somewhere, will go out later".
 		if provider.IsOffline(err) {
 			what := "message not sent"
 			if kind == sync.OpDraft {
 				what = "draft not stored"
 			}
 			return output.Errorf(output.ExitOffline,
-				"%s: %w — nothing was queued (a send is never retried automatically); run the command again when you are back online", what, err)
+				"%s: %w — the connection dropped mid-request, so it was not queued for retry (the provider may already have it); check your sent mail before sending again", what, err)
 		}
 		return err
 	}
@@ -504,8 +505,8 @@ func mailDraftCmd(app *App) *cobra.Command {
 		Short: "Store a draft on the server",
 		Long: `Store a draft on the server, optionally as a reply (--reply <id>).
 
-Like send, this is not queued when the provider is unreachable: it fails with
-exit 4 and stores nothing.`,
+Like send, this is queued offline (exit 6) only when the request never left
+the machine; a connection that dropped mid-request is not retried (exit 4).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := mailCompose(cmd, app, &f, f.reply)
@@ -531,9 +532,10 @@ func mailSendCmd(app *App) *cobra.Command {
 		Long: `Send a new message, a reply (--reply <id>), or an existing draft
 (--draft <id>). --dry-run prints the exact RFC 822 bytes and sends nothing.
 
-Unlike mark/move/archive/trash, a send is not queued when the provider is
-unreachable: it fails with exit 4 and nothing is submitted, because a retry
-could deliver the message twice. Run it again once you are back online.`,
+Offline, a send is queued in the outbox (exit 6) only when the request never
+left the machine, so replaying it is safe. If the connection dropped while the
+request was in flight the send is not retried (exit 4): the provider may
+already have the message, so check your sent mail before sending again.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if f.draft != "" {
@@ -601,8 +603,9 @@ func mailReplyCmd(app *App) *cobra.Command {
 quoted below your text and the thread headers are set, so the reply lands in
 the same conversation. --all keeps the other recipients.
 
-Offline this fails with exit 4 and sends nothing rather than queueing, since
-a retried submission could arrive twice. The original is marked answered only
+Offline the reply is queued (exit 6) when the request never left the machine,
+and not retried (exit 4) when the connection dropped mid-request, since the
+provider may already have it. Either way the original is marked answered only
 once the reply has actually gone out.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {

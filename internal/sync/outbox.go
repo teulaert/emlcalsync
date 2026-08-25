@@ -151,26 +151,26 @@ func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult
 	}
 }
 
-// retryable reports whether a failed write may safely be executed again.
+// retryable reports whether a failed write may safely be executed again, which
+// is the same question as whether the outbox may keep it pending.
 //
 // Anything the provider actively rejected is final — a retry produces the same
-// rejection. A transport failure normally is not: the request never got an
-// answer, so the outbox keeps it and drains it when the network comes back.
+// rejection. A transport failure normally is not: composing offline and
+// sending when the network comes back is the point of the outbox (DESIGN §12).
 //
-// Sends and drafts are the exception. They are not idempotent: an offline
-// error can just as well mean "the request went out and the reply was lost" as
-// "nothing left this machine", and re-running it would submit the message a
-// second time. So they are retried only when the failure is provably from
-// before the request was built (no client, no session) — otherwise the row is
-// marked failed with the error and the user decides whether to send again.
+// Sends and drafts narrow that. They are not idempotent, and an offline error
+// can mean either "nothing left this machine" or "the request went out and the
+// reply was lost". Only the first is safe to repeat, so they stay pending just
+// for a failure that provably happened before any request bytes were sent — no
+// route, no DNS, refused connection, no client at all. An ambiguous failure
+// (timeout, reset, EOF) retires the row with its error, and the user decides
+// whether to send again, because the alternative is delivering the message
+// twice.
 func retryable(op Op, err error) bool {
-	if !provider.IsOffline(err) {
-		return false
-	}
 	if op.Kind == OpSend || op.Kind == OpDraft {
-		return isPreRequest(err)
+		return provider.IsPreRequestFailure(err)
 	}
-	return true
+	return provider.IsOffline(err)
 }
 
 // failPermanently records a rejection the outbox must not retry.
@@ -578,25 +578,15 @@ func (op *Op) eventRemote() string {
 // ---------------------------------------------------------------------------
 // Execution
 
-// preRequestError marks a failure that happened before the write could leave
-// this machine — no provider client, no session, no token. It is the one kind
-// of transport failure that is safe to retry even for a non-idempotent op,
-// because nothing reached the server.
-type preRequestError struct{ err error }
-
-func (p preRequestError) Error() string { return p.err.Error() }
-func (p preRequestError) Unwrap() error { return p.err }
-
+// preRequest tags a *transport* failure to obtain a provider client. Nothing
+// has been sent at that point — there is no connection yet — so even a send may
+// be queued. Anything else (a missing token, a broken config) is not a
+// connection problem and is left alone so it is treated as a rejection.
 func preRequest(err error) error {
-	if err == nil {
-		return nil
+	if err == nil || !provider.IsOffline(err) {
+		return err
 	}
-	return preRequestError{err: err}
-}
-
-func isPreRequest(err error) bool {
-	var p preRequestError
-	return errors.As(err, &p)
+	return fmt.Errorf("%w: %w", provider.ErrNotConnected, err)
 }
 
 // execute pushes the op to the provider. It returns the remote id of anything
@@ -821,9 +811,12 @@ func (e *Engine) RetryOutbox(ctx context.Context, account string) (*OutboxReport
 
 		case !retryable(op, err):
 			// Rejected outright, or a send whose fate we cannot know: stop.
+			// Retiring a write is reported to the caller even when the cause
+			// was a transport failure — the write is dead and the user has to
+			// decide what to do about it, which a silent pass would hide.
 			rep.Failed++
 			e.failPermanently(ctx, it.ID, err)
-			if !provider.IsOffline(err) && firstErr == nil {
+			if firstErr == nil {
 				firstErr = err
 			}
 			e.log.Warn("outbox write given up on",
