@@ -792,14 +792,18 @@ to change now; several are hard to change after the first backfill.
 11. **Go + modernc SQLite + cobra + sqlc.**
 12. **Phase order: Fastmail before Gmail.**
 
-Open questions for you:
+Answers (2026-08-25):
 
-- How many accounts and roughly how many messages / GB in the largest? (Sizes
-  the worker pools and the disk estimate.)
-- Do you want Spam and Trash in the archive (`include_spam_trash = true` is my
-  default: an archive should be complete)?
-- Should `mail send` always require an explicit `--account`, or infer from
-  `--reply <id>` / a configured default? (I lean: infer for replies, require
-  otherwise.)
-- Any language other than English/Dutch whose quote-header patterns should be
-  in the stripper from day one?
+- **Size.** Expect 5–15 GB per mailbox. With several accounts, plan for
+  50–100 GB of blobs (zstd brings that down ~25 %). Worker pools as designed
+  (Gmail 4 batch requests, JMAP 8 downloads) are fine; the initial backfill
+  of a 15 GB Gmail box will take a few hours and is resumable.
+- **Spam and Trash are archived** (`include_spam_trash = true`). Purging is a
+  policy decision later: `emlcal gc --purge-deleted` and a future
+  `--purge-role junk,trash --older-than 90d`.
+- **Send account.** `mail reply <id>` sends from the account that received
+  the message (the id carries it). `--account` / `--from <address>` override
+  it. `mail send` without `--reply` requires `--account` unless
+  `general.default_account` is set.
+- **Quote stripping** ships with English and Dutch patterns (German and
+  French included at no extra cost, off the critical path).
