@@ -1,0 +1,8 @@
+From: truncated@example.com
+Subject: Truncated
+Content-Type: multipart/mixed; boundary="cut"
+
+--cut
+Content-Type: text/plain
+
+The body starts here and the message ends

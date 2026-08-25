@@ -1,0 +1,13 @@
+From: Newsletter <no-reply@list.example.com>
+To: subscriber@example.org
+Subject: Weekly digest
+Date: Tue, 11 Feb 2025 07:00:00 +0000
+Message-ID: <bulk-009@list.example.com>
+List-Id: Example Weekly <weekly.list.example.com>
+List-Unsubscribe: <https://list.example.com/u/1>
+Precedence: bulk
+Auto-Submitted: auto-generated
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This week in example.

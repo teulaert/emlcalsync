@@ -1,0 +1,40 @@
+From: Bob <bob@example.net>
+To: alice@example.org
+Subject: Photo
+Date: Wed, 5 Feb 2025 14:02:00 +0000
+Message-ID: <related-002@example.net>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed-2"
+
+--mixed-2
+Content-Type: multipart/related; boundary="rel-2"; type="multipart/alternative"
+
+--rel-2
+Content-Type: multipart/alternative; boundary="alt-2"
+
+--alt-2
+Content-Type: text/plain; charset=us-ascii
+
+Here is the photo.
+--alt-2
+Content-Type: text/html; charset=us-ascii
+
+<p>Here is the <b>photo</b>.</p><img src="cid:photo1@example.net">
+--alt-2--
+
+--rel-2
+Content-Type: image/png
+Content-ID: <photo1@example.net>
+Content-Disposition: inline; filename="pixel.png"
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==
+--rel-2--
+
+--mixed-2
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="report.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQgZmFrZSBwZGY=
+--mixed-2--

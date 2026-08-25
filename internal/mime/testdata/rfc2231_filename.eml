@@ -1,0 +1,21 @@
+From: files@example.com
+To: test@example.com
+Subject: Attachment with a long unicode name
+Date: Sun, 9 Feb 2025 16:45:00 +0100
+Message-ID: <rfc2231-006@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-6"
+
+--mix-6
+Content-Type: text/plain; charset=utf-8
+
+See attached.
+--mix-6
+Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+Content-Disposition: attachment;
+	filename*0*=utf-8''%C3%A9t%C3%A9%20jaarrekening%20;
+	filename*1*=2024%20definitief.xlsx
+Content-Transfer-Encoding: base64
+
+UEsDBCBmYWtlIHhsc3g=
+--mix-6--

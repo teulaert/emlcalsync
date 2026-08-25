@@ -33,19 +33,19 @@ import (
 
 // Parsed is the result of Parse.
 type Parsed struct {
-	MessageID  string // without <>
-	InReplyTo  string
-	References []string
-	Subject    string
-	From       model.Address
-	To         []model.Address
-	Cc         []model.Address
-	Bcc        []model.Address
-	ReplyTo    []model.Address
-	Date       time.Time // zero if missing/unparseable
-	ListID     string
+	MessageID     string // without <>
+	InReplyTo     string
+	References    []string
+	Subject       string
+	From          model.Address
+	To            []model.Address
+	Cc            []model.Address
+	Bcc           []model.Address
+	ReplyTo       []model.Address
+	Date          time.Time // zero if missing/unparseable
+	ListID        string
 	AutoSubmitted string
-	Precedence string
+	Precedence    string
 	// IsBulk is true for list mail / auto-submitted / bulk precedence.
 	IsBulk bool
 

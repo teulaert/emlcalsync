@@ -1,0 +1,20 @@
+From: Marketing <news@example.com>
+To: "Doe, Jane" <jane@example.org>
+Subject: Your invoice is ready
+Date: Tue, 04 Feb 2025 09:12:33 +0100
+Message-ID: <html-only-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt-1"
+
+--alt-1
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><head><style>p{color:red}</style></head><body>
+<div>Hi Jane,</div>
+<div>Your invoice is ready. <a href="https://billing.example.com/inv/42">View invoice</a>.</div>
+<table><tr><td>Amount</td><td>EUR 120,00</td></tr><tr><td>Due</td><td>2025-02-18</td></tr></table>
+<script>alert('no')</script>
+<p>Thanks,<br>Billing</p>
+</body></html>
+--alt-1--
