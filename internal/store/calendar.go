@@ -336,6 +336,23 @@ func (tx *Tx) MarkEventDeleted(ctx context.Context, calendarID int64, remote str
 	return nil
 }
 
+// DeleteEventRow removes an event row outright, occurrences included (the FK
+// cascades). This is not the "gone from the server" path — that is
+// MarkEventDeleted, which keeps the row — it is for undoing a local write that
+// never happened, e.g. the optimistically created event of a rejected
+// `cal add`. A remote id that is not there is not an error.
+func (s *Store) DeleteEventRow(ctx context.Context, calendarID int64, remote string) error {
+	return s.Tx(ctx, func(tx *Tx) error { return tx.DeleteEventRow(ctx, calendarID, remote) })
+}
+
+func (tx *Tx) DeleteEventRow(ctx context.Context, calendarID int64, remote string) error {
+	if _, err := tx.q.ExecContext(ctx,
+		`DELETE FROM events WHERE calendar_id = ? AND remote_id = ?`, calendarID, remote); err != nil {
+		return fmt.Errorf("store: delete event %s: %w", remote, err)
+	}
+	return nil
+}
+
 // GetEvent returns one event by public coordinates, or model.ErrNotFound.
 func (s *Store) GetEvent(ctx context.Context, accountID, calendarRemote, remote string) (*model.Event, error) {
 	return s.tx().GetEvent(ctx, accountID, calendarRemote, remote)

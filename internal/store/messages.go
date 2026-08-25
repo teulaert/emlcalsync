@@ -510,8 +510,12 @@ func (tx *Tx) MarkDeleted(ctx context.Context, accountID string, remotes []strin
 	return n, nil
 }
 
-// MarkUndeleted clears deleted_at (a message that came back). Mailbox
-// membership is restored by the next UpsertMessage/UpdateMessageState.
+// MarkUndeleted clears deleted_at (a message that came back). It restores
+// nothing else: MarkDeleted cleared the message's mailbox membership, so a row
+// resurrected this way is in no mailbox until an UpsertMessage or
+// UpdateMessageState files it again. Callers that already know where the
+// message lives should use UndeleteWithState instead — a message that is
+// un-deleted but unfiled is invisible in every mailbox listing.
 func (s *Store) MarkUndeleted(ctx context.Context, accountID string, remotes []string) (int, error) {
 	var n int
 	err := s.Tx(ctx, func(tx *Tx) error {
@@ -553,6 +557,33 @@ func (tx *Tx) MarkUndeleted(ctx context.Context, accountID string, remotes []str
 		}
 	}
 	return n, nil
+}
+
+// UndeleteWithState resurrects one message and files it in one step: it clears
+// deleted_at and applies flags plus mailboxRemotes the way UpdateMessageState
+// does. A nil mailboxRemotes leaves membership alone (which for a row that was
+// deleted means it stays in no mailbox); pass the enumeration's mailbox list to
+// rebuild the membership MarkDeleted cleared.
+// Returns model.ErrNotFound if the message is not indexed.
+func (s *Store) UndeleteWithState(ctx context.Context, accountID, remote string, flags model.Flags, mailboxRemotes []string) error {
+	return s.Tx(ctx, func(tx *Tx) error {
+		return tx.UndeleteWithState(ctx, accountID, remote, flags, mailboxRemotes)
+	})
+}
+
+func (tx *Tx) UndeleteWithState(ctx context.Context, accountID, remote string, flags model.Flags, mailboxRemotes []string) error {
+	res, err := tx.q.ExecContext(ctx,
+		`UPDATE messages SET deleted_at = NULL WHERE account_id = ? AND remote_id = ?`,
+		accountID, remote)
+	if err != nil {
+		return fmt.Errorf("store: undelete %s:%s: %w", accountID, remote, err)
+	}
+	if err := requireRow(res, "message %s:%s", accountID, remote); err != nil {
+		return err
+	}
+	// UpdateMessageState refreshes the thread summary, which is what makes the
+	// message count as live again.
+	return tx.UpdateMessageState(ctx, accountID, remote, flags, mailboxRemotes)
 }
 
 // ---------------------------------------------------------------------------
@@ -604,25 +635,56 @@ func (tx *Tx) GetMessageByID(ctx context.Context, id int64) (*model.Message, err
 	return &out[0], nil
 }
 
+// IndexState is what the index knows about one remote id.
+type IndexState struct {
+	// Exists is true when a row is present, deleted or not.
+	Exists bool
+	// RawComplete is true when the full raw bytes are archived (i.e. the row
+	// is not the envelope-only stub written for an oversize message).
+	RawComplete bool
+	// Deleted is true when the row is soft-deleted (deleted_at set), which
+	// also means MarkDeleted cleared its mailbox membership.
+	Deleted bool
+}
+
 // HasMessage reports whether a message is indexed and whether its raw bytes
-// were stored in full. Used by the backfill to skip work.
+// were stored in full. Used by the backfill to skip work. It says nothing
+// about deletion — use MessageIndexState when that matters.
 func (s *Store) HasMessage(ctx context.Context, accountID, remote string) (exists bool, rawComplete bool, err error) {
 	return s.tx().HasMessage(ctx, accountID, remote)
 }
 
 func (tx *Tx) HasMessage(ctx context.Context, accountID, remote string) (bool, bool, error) {
+	st, err := tx.MessageIndexState(ctx, accountID, remote)
+	return st.Exists, st.RawComplete, err
+}
+
+// MessageIndexState reports presence, completeness and deletion in one query,
+// so an enumeration can tell "already indexed, skip it" from "already indexed
+// but locally deleted, resurrect it".
+func (s *Store) MessageIndexState(ctx context.Context, accountID, remote string) (IndexState, error) {
+	return s.tx().MessageIndexState(ctx, accountID, remote)
+}
+
+func (tx *Tx) MessageIndexState(ctx context.Context, accountID, remote string) (IndexState, error) {
 	var complete int64
 	var blob sql.NullString
+	var deleted sql.NullInt64
 	err := tx.q.QueryRowContext(ctx,
-		`SELECT raw_complete, blob_sha256 FROM messages WHERE account_id = ? AND remote_id = ?`,
-		accountID, remote).Scan(&complete, &blob)
+		`SELECT raw_complete, blob_sha256, deleted_at FROM messages
+		  WHERE account_id = ? AND remote_id = ?`,
+		accountID, remote).Scan(&complete, &blob, &deleted)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, false, nil
+		return IndexState{}, nil
 	}
 	if err != nil {
-		return false, false, fmt.Errorf("store: has message %s:%s: %w", accountID, remote, err)
+		return IndexState{}, fmt.Errorf("store: has message %s:%s: %w", accountID, remote, err)
 	}
-	return true, complete != 0 && blob.Valid && blob.String != "", nil
+	return IndexState{
+		Exists:      true,
+		RawComplete: complete != 0 && blob.Valid && blob.String != "",
+		Deleted:     deleted.Valid,
+	}, nil
 }
 
 // ListRemoteIDs returns every remote id known for an account. Reconcile diffs

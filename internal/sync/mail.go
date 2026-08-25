@@ -88,6 +88,11 @@ type mailRun struct {
 	// rawMax is the effective raw_max_size in bytes; 0 = unlimited.
 	rawMax int64
 
+	// mbMu guards known/roles/unresolved and serialises the mailbox refresh.
+	// FetchRaw promises to call its callback serially, but the callback path
+	// reaches these maps and the engine should not corrupt its own state if a
+	// provider ever breaks that promise.
+	mbMu stdsync.Mutex
 	// known is the set of mailbox remote ids the index knows about, so an
 	// envelope naming an unfamiliar one can trigger a mailbox re-sync.
 	known map[string]bool
@@ -112,18 +117,38 @@ func (r *mailRun) loadMailboxes(ctx context.Context) error {
 
 // syncMailboxes re-fetches the mailbox list from the provider and stores it.
 func (r *mailRun) syncMailboxes(ctx context.Context) error {
+	r.mbMu.Lock()
+	defer r.mbMu.Unlock()
+	return r.syncMailboxesLocked(ctx)
+}
+
+func (r *mailRun) syncMailboxesLocked(ctx context.Context) error {
 	mbs, err := r.mp.Mailboxes(ctx)
 	if err != nil {
 		return fmt.Errorf("sync: %s: mailboxes: %w", r.account(), err)
 	}
 	if err := r.e.st.ReplaceMailboxes(ctx, r.account(), mbs); err != nil {
+		if errors.Is(err, store.ErrEmptyMailboxList) {
+			// An empty-but-not-an-error response would delete every mailbox and
+			// with it every message's membership. Keep what we have; the next
+			// pass asks again.
+			r.e.log.Warn("provider returned no mailboxes at all; keeping the stored list",
+				"account", r.account())
+			return nil
+		}
 		return err
 	}
-	r.setMailboxes(mbs)
+	r.setMailboxesLocked(mbs)
 	return nil
 }
 
 func (r *mailRun) setMailboxes(mbs []model.Mailbox) {
+	r.mbMu.Lock()
+	defer r.mbMu.Unlock()
+	r.setMailboxesLocked(mbs)
+}
+
+func (r *mailRun) setMailboxesLocked(mbs []model.Mailbox) {
 	known := make(map[string]bool, len(mbs))
 	roles := make(map[model.MailboxRole]string, len(mbs))
 	for _, m := range mbs {
@@ -142,7 +167,13 @@ func (r *mailRun) setMailboxes(mbs []model.Mailbox) {
 // the list has to be refreshed before the write, not after. Each unknown id
 // triggers at most one refresh — one permanently odd id cannot make every
 // batch re-fetch the mailbox list.
+//
+// The lock is held across the refresh, so two callers that both see the same
+// unknown id do one refresh between them, not two.
 func (r *mailRun) noteUnknown(ctx context.Context, groups ...[]string) {
+	r.mbMu.Lock()
+	defer r.mbMu.Unlock()
+
 	fresh := false
 	for _, g := range groups {
 		for _, mb := range g {
@@ -154,7 +185,7 @@ func (r *mailRun) noteUnknown(ctx context.Context, groups ...[]string) {
 	if !fresh {
 		return
 	}
-	if err := r.syncMailboxes(ctx); err != nil {
+	if err := r.syncMailboxesLocked(ctx); err != nil {
 		r.e.log.Warn("mailbox refresh failed", "account", r.account(), "err", err)
 		return
 	}
@@ -277,6 +308,55 @@ func (r *mailRun) writeBatch(ctx context.Context, batch []*pendingMsg, tail func
 	})
 }
 
+// resurrect brings back messages the index has marked deleted but the provider
+// still lists. Clearing deleted_at alone is not enough — MarkDeleted also
+// cleared the mailbox membership, and a message in no mailbox is invisible in
+// every listing — so the envelope's mailbox list is applied at the same time.
+// Envelopes without one (an oversize message whose provider gives no cheap
+// membership) are un-deleted anyway and left for the next envelope refresh.
+func (r *mailRun) resurrect(ctx context.Context, envs []provider.Envelope) error {
+	if len(envs) == 0 {
+		return nil
+	}
+	var unfiled []string
+	for _, part := range chunk(envs, indexBatch) {
+		groups := make([][]string, 0, len(part))
+		for _, env := range part {
+			groups = append(groups, env.Mailboxes)
+		}
+		r.noteUnknown(ctx, groups...)
+
+		part := part
+		err := r.e.st.Tx(ctx, func(tx *store.Tx) error {
+			for _, env := range part {
+				if len(env.Mailboxes) == 0 {
+					unfiled = append(unfiled, env.RemoteID)
+					continue
+				}
+				err := tx.UndeleteWithState(ctx, r.account(), env.RemoteID, env.Flags, nonNil(env.Mailboxes))
+				if errors.Is(err, model.ErrNotFound) {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	if len(unfiled) > 0 {
+		if _, err := r.e.st.MarkUndeleted(ctx, r.account(), unfiled); err != nil {
+			return err
+		}
+		r.e.log.Warn("resurrected messages the provider gave no mailbox list for; they stay unfiled until the next refresh",
+			"account", r.account(), "messages", len(unfiled))
+	}
+	return nil
+}
+
 // fetchIndex fetches ids from the provider and indexes them in transactions of
 // indexBatch messages. tail runs inside the same transaction as the final
 // batch, which is how the delta state is advanced atomically with the work it
@@ -305,10 +385,15 @@ func (r *mailRun) fetchIndex(ctx context.Context, ids []string, phase string, do
 			return err
 		}
 		if done != nil {
+			// flush runs on the FetchRaw callback's goroutine, so the counter
+			// goes under the same lock as the batch it belongs to.
+			mu.Lock()
 			*done += len(b)
+			n := *done
+			mu.Unlock()
 			r.e.emit(ProgressEvent{
 				Account: r.account(), Resource: resourceMail, Phase: phase,
-				Done: *done, Total: len(ids),
+				Done: n, Total: len(ids),
 			})
 		}
 		return nil
@@ -387,21 +472,39 @@ func (r *mailRun) backfill(ctx context.Context, bf *store.Backfill) (*ResourceRe
 
 		var fetch []string
 		var stubs []*pendingMsg
+		var resurrect []provider.Envelope
 		for _, env := range page {
-			exists, complete, err := r.e.st.HasMessage(ctx, r.account(), env.RemoteID)
+			st, err := r.e.st.MessageIndexState(ctx, r.account(), env.RemoteID)
 			if err != nil {
 				return rep, err
 			}
-			if exists && complete {
+			oversize := r.rawMax > 0 && env.Size > r.rawMax
+			if st.Exists && st.Deleted {
+				// The provider still lists a message we marked deleted. Getting
+				// deleted_at cleared is not enough: MarkDeleted also cleared the
+				// mailbox membership, so it has to be rebuilt or the message
+				// stays invisible in every listing.
+				if len(env.Mailboxes) > 0 || oversize {
+					resurrect = append(resurrect, env)
+				} else {
+					fetch = append(fetch, env.RemoteID) // the upsert un-deletes
+				}
 				continue
 			}
-			if r.rawMax > 0 && env.Size > r.rawMax {
-				if !exists {
+			if st.Exists && st.RawComplete {
+				continue
+			}
+			if oversize {
+				if !st.Exists {
 					stubs = append(stubs, r.stub(env))
 				}
 				continue
 			}
 			fetch = append(fetch, env.RemoteID)
+		}
+
+		if err := r.resurrect(ctx, resurrect); err != nil {
+			return rep, err
 		}
 
 		for _, b := range chunk(stubs, indexBatch) {
@@ -444,12 +547,17 @@ func (r *mailRun) backfill(ctx context.Context, bf *store.Backfill) (*ResourceRe
 		}
 	}
 
+	// Both writes go in one transaction: a crash between them would leave a
+	// finished backfill with no state, which restarts the whole enumeration
+	// with a fresh state token and throws away the original replay window.
 	now := time.Now()
 	bf.FinishedAt = &now
-	if err := r.e.st.SetBackfill(ctx, bf); err != nil {
-		return rep, err
-	}
-	if err := r.e.st.SetState(ctx, r.account(), resourceMail, bf.StateAtStart); err != nil {
+	if err := r.e.st.Tx(ctx, func(tx *store.Tx) error {
+		if err := tx.SetBackfill(ctx, bf); err != nil {
+			return err
+		}
+		return tx.SetState(ctx, r.account(), resourceMail, bf.StateAtStart)
+	}); err != nil {
 		return rep, err
 	}
 	rep.StateAfter = bf.StateAtStart
@@ -541,23 +649,47 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 		}
 	}
 
+	ef, canRefresh := r.mp.(envelopeFetcher)
+
 	order, ops := coalesce(ch)
-	var fetch, removed []string
+	var fetch, removed, refresh []string
 	var updated []provider.Envelope
 	for _, id := range order {
 		op := ops[id]
 		switch op.kind {
 		case opAdded:
-			if r.rawMax > 0 && op.env.Size > r.rawMax {
-				exists, _, err := r.e.st.HasMessage(ctx, r.account(), id)
+			if r.rawMax > 0 {
+				st, err := r.e.st.MessageIndexState(ctx, r.account(), id)
 				if err != nil {
 					return rep, err
 				}
-				if !exists {
+				// An existing envelope-only row is an earlier pass's decision
+				// that this message is over raw_max_size — the size the change
+				// list carries is only a hint, and Gmail's "added" records
+				// carry none at all.
+				oversize := op.env.Size > r.rawMax || (st.Exists && !st.RawComplete)
+				if oversize && !st.Exists {
 					if err := r.writeBatch(ctx, []*pendingMsg{r.stub(op.env)}, nil); err != nil {
 						return rep, err
 					}
 					rep.Added++
+					continue
+				}
+				if oversize {
+					// Gmail reports an ordinary label change on a large message
+					// as an "added" record, and downloading the whole thing for
+					// that would defeat raw_max_size. Refresh what changed
+					// instead: from the envelope when it carries the current
+					// state, otherwise through a cheap envelope fetch.
+					switch {
+					case len(op.env.Mailboxes) > 0:
+						updated = append(updated, op.env)
+					case canRefresh:
+						refresh = append(refresh, id)
+					default:
+						r.e.log.Debug("oversize message re-announced; leaving the stub as it is",
+							"account", r.account(), "message", id)
+					}
 					continue
 				}
 			}
@@ -585,11 +717,17 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 		return tx.SetState(ctx, r.account(), resourceMail, ch.NewState)
 	}
 
-	hasTail := len(updated) > 0 || len(removed) > 0
+	// The state may only be advanced by the *last* write of the pass. Ids the
+	// provider announced as added but could not produce are a real deletion for
+	// anything already indexed, and they are only known once the fetch has
+	// finished — so as soon as there is anything to fetch, the state moves in a
+	// later transaction, never with a fetch batch. A crash then replays the
+	// pass instead of losing the deletion.
 	var fetchTail func(*store.Tx) error
-	if !hasTail {
+	if len(fetch) == 0 && len(updated) == 0 && len(removed) == 0 && len(refresh) == 0 {
 		fetchTail = setState
 	}
+	stateAdvanced := fetchTail != nil
 
 	added := 0
 	gone, err := r.fetchIndex(ctx, fetch, KindDelta, &added, fetchTail)
@@ -598,15 +736,18 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 		r.finish(ctx, KindDelta, started, rep, err)
 		return rep, err
 	}
-	// Ids the provider reported as added but then could not produce are gone.
-	// These are only discovered after the fetch, so when the state has already
-	// been advanced with the last batch the deletions run after it. That is
-	// harmless: an id we never indexed makes MarkDeleted a no-op, and one we
-	// did will be reported as removed by the provider anyway.
 	removed = append(removed, gone...)
-	hasTail = len(updated) > 0 || len(removed) > 0
 
-	if hasTail {
+	if len(refresh) > 0 {
+		n, err := r.refreshEnvelopes(ctx, ef, refresh)
+		rep.Updated += n
+		if err != nil {
+			r.finish(ctx, KindDelta, started, rep, err)
+			return rep, err
+		}
+	}
+
+	if len(updated) > 0 || len(removed) > 0 {
 		if len(updated) > 0 {
 			groups := make([][]string, 0, len(updated))
 			for _, env := range updated {
@@ -637,6 +778,9 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 			if err != nil {
 				return rep, err
 			}
+			if last {
+				stateAdvanced = true
+			}
 		}
 		if len(removed) > 0 {
 			err := r.e.st.Tx(ctx, func(tx *store.Tx) error {
@@ -650,6 +794,14 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 			if err != nil {
 				return rep, err
 			}
+			stateAdvanced = true
+		}
+	}
+	if !stateAdvanced {
+		// Nothing carried the state along (a pass that only fetched, or only
+		// refreshed envelopes): move it now that all of the work is committed.
+		if err := r.e.st.Tx(ctx, setState); err != nil {
+			return rep, err
 		}
 	}
 
@@ -717,10 +869,16 @@ func (r *mailRun) reconcile(ctx context.Context, before string) (*ResourceReport
 		live[id] = true
 	}
 
+	// A provider that can hand back current flags/mailboxes without the body
+	// (Gmail) lets a resurrected message be refiled cheaply; one that cannot
+	// (JMAP) needs the envelope's own mailbox list, or a full re-index.
+	ef, canRefresh := r.mp.(envelopeFetcher)
+
 	remote := make(map[string]bool, len(localAll))
 	var fetch []string
 	var stubs []*pendingMsg
-	var existing, resurrect []string
+	var existing []string
+	var resurrect []provider.Envelope
 	cursor := ""
 
 	for {
@@ -740,7 +898,14 @@ func (r *mailRun) reconcile(ctx context.Context, before string) (*ResourceReport
 				}
 			default:
 				if !live[env.RemoteID] {
-					resurrect = append(resurrect, env.RemoteID)
+					// It came back. Whatever brings its mailbox membership back
+					// has to run too, or it is un-deleted and in no mailbox.
+					oversize := r.rawMax > 0 && env.Size > r.rawMax
+					if len(env.Mailboxes) == 0 && !canRefresh && !oversize {
+						fetch = append(fetch, env.RemoteID) // the upsert un-deletes
+						continue
+					}
+					resurrect = append(resurrect, env)
 				}
 				existing = append(existing, env.RemoteID)
 			}
@@ -759,10 +924,8 @@ func (r *mailRun) reconcile(ctx context.Context, before string) (*ResourceReport
 		}
 	}
 
-	if len(resurrect) > 0 {
-		if _, err := r.e.st.MarkUndeleted(ctx, r.account(), resurrect); err != nil {
-			return rep, err
-		}
+	if err := r.resurrect(ctx, resurrect); err != nil {
+		return rep, err
 	}
 
 	for _, b := range chunk(stubs, indexBatch) {
@@ -797,7 +960,7 @@ func (r *mailRun) reconcile(ctx context.Context, before string) (*ResourceReport
 
 	// Refresh flags/mailboxes for everything we already had, when the provider
 	// offers a cheap way to ask.
-	if ef, ok := r.mp.(envelopeFetcher); ok {
+	if canRefresh {
 		n, err := r.refreshEnvelopes(ctx, ef, existing)
 		rep.Updated += n
 		if err != nil {

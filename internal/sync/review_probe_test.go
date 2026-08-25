@@ -1,11 +1,15 @@
+// Regression tests for the adversarial review in
+// docs/reviews/2026-08-25-data-path.md. Every finding that was fixed asserts
+// the fixed behaviour outright — these are no longer gated behind
+// EMLCAL_REVIEW.
 package sync
 
 import (
 	"context"
 	"errors"
-	"os"
 	stdsync "sync"
 	"testing"
+	"time"
 
 	"github.com/lennert/emlcal/internal/config"
 	"github.com/lennert/emlcal/internal/model"
@@ -13,15 +17,32 @@ import (
 	"github.com/lennert/emlcal/internal/store"
 )
 
-// reviewFail reports a confirmed defect. Assertions only fail the build when
-// EMLCAL_REVIEW=1 so `go test ./...` stays green for everyone else.
-func reviewFail(t *testing.T, format string, args ...any) {
-	t.Helper()
-	if os.Getenv("EMLCAL_REVIEW") == "1" {
-		t.Errorf(format, args...)
-		return
-	}
-	t.Logf("[review] "+format, args...)
+// rejectCal accepts every read but refuses every write, the way a provider
+// does for a read-only (subscribed) calendar.
+type rejectCal struct{ f *fakeCalendar }
+
+func (c rejectCal) Calendars(ctx context.Context) ([]model.Calendar, error) {
+	return c.f.Calendars(ctx)
+}
+
+func (c rejectCal) EventChanges(ctx context.Context, calendarRemote, since string) (*provider.EventChanges, error) {
+	return c.f.EventChanges(ctx, calendarRemote, since)
+}
+
+func (c rejectCal) CreateEvent(ctx context.Context, calendarRemote string, ev *model.Event) (*model.Event, error) {
+	return nil, errRejected
+}
+
+func (c rejectCal) UpdateEvent(ctx context.Context, ev *model.Event) (*model.Event, error) {
+	return nil, errRejected
+}
+
+func (c rejectCal) DeleteEvent(ctx context.Context, calendarRemote, remoteID string) error {
+	return errRejected
+}
+
+func (c rejectCal) Respond(ctx context.Context, calendarRemote, remoteID string, resp model.Participation) error {
+	return errRejected
 }
 
 // errRejected is a permanent provider rejection (a 400/403), explicitly not an
@@ -50,15 +71,16 @@ func (r *rejectMail) Send(ctx context.Context, raw []byte, threadID string) (str
 	return "", errRejected
 }
 
-// TestReviewRejectedWriteLeavesIndexWrong: DESIGN §7.4 says a rejected write is
-// reported to the caller; nothing puts the optimistically patched index back.
+// TestReviewRejectedWriteLeavesIndexWrong: a write the provider rejects must
+// leave neither an optimistic patch in the index nor a pending outbox row.
+// Regression test for H1 + H2.
 func TestReviewRejectedWriteLeavesIndexWrong(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
 	rej := &rejectMail{fakeMail: h.mail}
 	h.fact.mail = rej
 
-	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one"), flags: model.Flags{Unread: true}})
+	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one"), flags: model.Flags{Unread: true}, mailboxes: []string{"INBOX"}})
 	h.sync(SyncOptions{Mail: true})
 
 	if got := h.message("m1").Flags; !got.Unread || got.Flagged {
@@ -84,48 +106,83 @@ func TestReviewRejectedWriteLeavesIndexWrong(t *testing.T) {
 		t.Fatalf("fake applied the write it claimed to reject: %+v", remote)
 	}
 
-	// The index kept the optimistic patch.
-	if got := h.message("m1").Flags; got.Flagged || !got.Unread {
-		reviewFail(t, "rejected write left the index wrong: local flags = %+v, provider = %+v", got, remote)
+	// ...and so does the index: the optimistic patch was rolled back.
+	m := h.message("m1")
+	if m.Flags.Flagged || !m.Flags.Unread {
+		t.Fatalf("rejected write left the index wrong: local flags = %+v, provider = %+v", m.Flags, remote)
+	}
+	if len(m.MailboxRemotes) != 1 || m.MailboxRemotes[0] != "INBOX" {
+		t.Fatalf("rollback lost the mailbox membership: %v", m.MailboxRemotes)
 	}
 
-	// And a later delta does not repair it: the provider has nothing to report.
+	// A later delta cannot repair it — the provider has nothing to report —
+	// which is exactly why the rollback has to happen at rejection time.
 	h.sync(SyncOptions{Mail: true})
 	if got := h.message("m1").Flags; got.Flagged || !got.Unread {
-		reviewFail(t, "a later delta did not repair the index: local flags = %+v, provider = %+v", got, remote)
+		t.Fatalf("index drifted after a later delta: local flags = %+v, provider = %+v", got, remote)
 	}
 
-	// The row is still pending, so `status` shows it and RetryOutbox re-runs it.
+	// The row is retired, not pending: `status` does not show it and
+	// RetryOutbox does not re-run it.
 	item, err := h.st.GetOutbox(ctx, res.OutboxID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item.DoneAt == nil {
-		reviewFail(t, "rejected outbox row %d is still pending (attempts=%d, err=%q)",
+	if item.FailedAt == nil {
+		t.Fatalf("rejected outbox row %d is still pending (attempts=%d, err=%q)",
 			item.ID, item.Attempts, item.LastError)
+	}
+	if item.DoneAt != nil {
+		t.Fatalf("rejected outbox row %d was marked done", item.ID)
+	}
+	if item.LastError == "" {
+		t.Fatal("a retired row must keep the error that retired it")
+	}
+	pending, err := h.st.ListOutbox(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("%d rows still pending", len(pending))
+	}
+	// ...but `outbox list --all` still shows it.
+	all, err := h.st.ListOutbox(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("outbox list --all returned %d rows, want 1", len(all))
 	}
 }
 
-// TestReviewRejectedSendIsRetried: a permanently rejected send is re-executed
-// by every RetryOutbox pass until maxOutboxAttempts.
+// TestReviewRejectedSendIsRetried: a permanently rejected send is executed
+// exactly once, however many retry passes run. Regression test for H2.
 func TestReviewRejectedSendIsRetried(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t)
 	rej := &rejectMail{fakeMail: h.mail}
 	h.fact.mail = rej
 
-	if _, err := h.eng.Apply(ctx, "work", Op{Kind: OpSend, Raw: mailRaw(t, "hello", "hi")}); !errors.Is(err, errRejected) {
+	res, err := h.eng.Apply(ctx, "work", Op{Kind: OpSend, Raw: mailRaw(t, "hello", "hi")})
+	if !errors.Is(err, errRejected) {
 		t.Fatalf("Apply err = %v, want the rejection", err)
 	}
 	if rej.sends != 1 {
 		t.Fatalf("sends after Apply = %d, want 1", rej.sends)
 	}
+	if res.Queued {
+		t.Fatal("a rejected send must not be reported as queued")
+	}
 
 	// Clear the in-memory backoff before each pass, the way a restarted daemon
 	// is: DESIGN says a fresh process retries everything once.
 	for i := 0; i < 3; i++ {
-		if _, err := h.eng.RetryOutbox(ctx, "work"); err == nil {
-			t.Fatalf("RetryOutbox pass %d returned no error", i)
+		rep, err := h.eng.RetryOutbox(ctx, "work")
+		if err != nil {
+			t.Fatalf("RetryOutbox pass %d: %v", i, err)
+		}
+		if rep.Attempted != 0 {
+			t.Fatalf("RetryOutbox pass %d attempted %d writes, want 0", i, rep.Attempted)
 		}
 		h.eng.retryMu.Lock()
 		for k := range h.eng.retryAt {
@@ -133,8 +190,88 @@ func TestReviewRejectedSendIsRetried(t *testing.T) {
 		}
 		h.eng.retryMu.Unlock()
 	}
-	if rej.sends > 1 {
-		reviewFail(t, "a permanently rejected send was executed %d times", rej.sends)
+	if rej.sends != 1 {
+		t.Fatalf("a permanently rejected send was executed %d times", rej.sends)
+	}
+	item, err := h.st.GetOutbox(ctx, res.OutboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.FailedAt == nil || item.DoneAt != nil {
+		t.Fatalf("rejected send row = %+v, want permanently failed", item)
+	}
+}
+
+// TestReviewOfflineSendIsNotResent: an offline failure from a send that may
+// already have reached the server is retired too — re-running it would submit
+// the message twice. Only a failure from before the request (no provider
+// client) stays queued.
+func TestReviewOfflineSendIsNotResent(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	h.mail.FailNext(1) // an offline error from Send itself
+	res, err := h.eng.Apply(ctx, "work", Op{Kind: OpSend, Raw: mailRaw(t, "hello", "hi")})
+	if err == nil {
+		t.Fatal("Apply returned no error")
+	}
+	if res.Queued {
+		t.Fatal("a send that may have gone out was queued for re-sending")
+	}
+	item, err := h.st.GetOutbox(ctx, res.OutboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.FailedAt == nil {
+		t.Fatalf("offline send row = %+v, want permanently failed", item)
+	}
+	rep, err := h.eng.RetryOutbox(ctx, "work")
+	if err != nil {
+		t.Fatalf("RetryOutbox: %v", err)
+	}
+	if rep.Attempted != 0 {
+		t.Fatalf("RetryOutbox attempted %d writes, want 0", rep.Attempted)
+	}
+	h.mail.mu.Lock()
+	sent := len(h.mail.sentRaw)
+	h.mail.mu.Unlock()
+	if sent != 0 {
+		t.Fatalf("provider saw %d sends", sent)
+	}
+}
+
+// TestReviewRejectedEventCreateIsRolledBack: a rejected `cal add` must not
+// leave its optimistic pending: event in the index.
+func TestReviewRejectedEventCreateIsRolledBack(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t)
+	// The engine caches provider clients, so the rejecting one has to be in
+	// place before the sync that materialises the calendar.
+	h.fact.cal = rejectCal{f: h.cal}
+	h.sync(SyncOptions{Calendar: true})
+
+	ev := &model.Event{
+		CalendarRemote: "primary", Title: "Standup",
+		Start: time.Now().Add(time.Hour), End: time.Now().Add(2 * time.Hour),
+	}
+	res, err := h.eng.Apply(ctx, "work", Op{Kind: OpEventCreate, CalendarRemote: "primary", Event: ev})
+	if err == nil {
+		t.Fatal("Apply returned no error")
+	}
+	if res.Queued {
+		t.Fatal("a rejected event create must not be queued")
+	}
+	if ev.RemoteID == "" {
+		t.Fatal("expected a placeholder remote id")
+	}
+	if _, err := h.st.GetEvent(ctx, "work", "primary", ev.RemoteID); !errors.Is(err, model.ErrNotFound) {
+		t.Fatalf("the optimistically created event survived the rejection: %v", err)
+	}
+	item, err := h.st.GetOutbox(ctx, res.OutboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.FailedAt == nil {
+		t.Fatalf("rejected event row = %+v, want permanently failed", item)
 	}
 }
 
@@ -170,17 +307,17 @@ func TestReviewReconcileUndeleteLosesMailboxes(t *testing.T) {
 
 	m := h.message("m1")
 	if m.DeletedAt != nil {
-		reviewFail(t, "reconcile did not resurrect a message that came back")
+		t.Fatal("reconcile did not resurrect a message that came back")
 	}
 	if len(m.MailboxRemotes) == 0 {
-		reviewFail(t, "reconcile resurrected m1 but left it in no mailbox: %v", m.MailboxRemotes)
+		t.Fatalf("reconcile resurrected m1 but left it in no mailbox: %v", m.MailboxRemotes)
 	}
 	inbox, err := h.st.ListMessages(ctx, store.MessageFilter{MailboxRole: string(model.RoleInbox)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(inbox) != 1 {
-		reviewFail(t, "resurrected message is invisible in the inbox listing (%d messages)", len(inbox))
+		t.Fatalf("resurrected message is invisible in the inbox listing (%d messages)", len(inbox))
 	}
 }
 
@@ -207,7 +344,7 @@ func TestReviewBackfillDoesNotUndelete(t *testing.T) {
 		h.t.Fatalf("expected a backfill, got %q", rep.Mail.Kind)
 	}
 	if h.message("m1").DeletedAt != nil {
-		reviewFail(t, "backfill re-enumerated m1 but left deleted_at set; it stays invisible")
+		t.Fatal("backfill re-enumerated m1 but left deleted_at set; it stays invisible")
 	}
 }
 
@@ -224,7 +361,7 @@ func TestReviewOversizeRefetchedWhenRowExists(t *testing.T) {
 		big[i] = 'x'
 	}
 	raw := append(mailRaw(t, "big", ""), big...)
-	h.mail.Add(&fakeMsg{id: "big1", raw: raw, size: int64(len(raw))})
+	h.mail.Add(&fakeMsg{id: "big1", raw: raw, size: int64(len(raw)), mailboxes: []string{"INBOX"}})
 	h.sync(SyncOptions{Mail: true})
 
 	m := h.message("big1")
@@ -234,11 +371,71 @@ func TestReviewOversizeRefetchedWhenRowExists(t *testing.T) {
 
 	// The provider reports it as added again (a label change on Gmail shows up
 	// in history as messagesAdded for that label).
-	h.mail.Add(&fakeMsg{id: "big1", raw: raw, size: int64(len(raw))})
+	h.mail.Add(&fakeMsg{id: "big1", raw: raw, size: int64(len(raw)), mailboxes: []string{"INBOX", "WORK"}})
 	h.sync(SyncOptions{Mail: true})
 
+	m = h.message("big1")
+	if m.RawComplete {
+		t.Fatal("delta downloaded a message above raw_max_size in full because a stub row existed")
+	}
+	// The point of not fetching is that the cheap state is refreshed instead,
+	// not that the row is left stale.
+	if !contains(m.MailboxRemotes, "WORK") {
+		t.Fatalf("the stub's mailboxes were not refreshed: %v", m.MailboxRemotes)
+	}
+	if !contains(m.MailboxRemotes, "INBOX") {
+		t.Fatalf("refreshing the stub dropped a mailbox it was in: %v", m.MailboxRemotes)
+	}
+}
+
+// gmailish reports "added" the way the Gmail history API does: an id and a
+// thread, with no size, flags or labels. The oversize guard cannot read a size
+// from that, so the existing stub row is what has to stop the re-fetch.
+type gmailish struct{ *fakeMail }
+
+func (g gmailish) Changes(ctx context.Context, since string) (*provider.Changes, error) {
+	ch, err := g.fakeMail.Changes(ctx, since)
+	if err != nil {
+		return nil, err
+	}
+	for i := range ch.Added {
+		ch.Added[i] = provider.Envelope{
+			RemoteID: ch.Added[i].RemoteID,
+			ThreadID: ch.Added[i].ThreadID,
+		}
+	}
+	return ch, nil
+}
+
+// TestReviewOversizeRefetchedWithoutSizeHint is the same finding on a provider
+// whose change list carries no size: the stub row must still stop the fetch,
+// and the flags/mailboxes come from a cheap envelope fetch instead.
+func TestReviewOversizeRefetchedWithoutSizeHint(t *testing.T) {
+	h := newHarness(t)
+	limit := config.Size(1000)
+	h.cfg.Accounts[0].RawMaxSize = &limit
+	h.fact.mail = gmailish{fakeMail: h.mail}
+
+	big := make([]byte, 4000)
+	for i := range big {
+		big[i] = 'x'
+	}
+	raw := append(mailRaw(t, "big", ""), big...)
+	h.mail.Add(&fakeMsg{id: "big1", raw: raw, size: int64(len(raw)), mailboxes: []string{"INBOX"}})
+	h.sync(SyncOptions{Mail: true})
 	if h.message("big1").RawComplete {
-		reviewFail(t, "delta downloaded a message above raw_max_size in full because a stub row existed")
+		t.Fatal("precondition: oversize message was fetched in full during backfill")
+	}
+
+	h.mail.Add(&fakeMsg{id: "big1", raw: raw, size: int64(len(raw)), mailboxes: []string{"INBOX", "WORK"}})
+	h.sync(SyncOptions{Mail: true})
+
+	m := h.message("big1")
+	if m.RawComplete {
+		t.Fatal("a size-less added record pulled a message above raw_max_size in full")
+	}
+	if !contains(m.MailboxRemotes, "WORK") || !contains(m.MailboxRemotes, "INBOX") {
+		t.Fatalf("the stub's mailboxes were not refreshed: %v", m.MailboxRemotes)
 	}
 }
 
@@ -284,11 +481,10 @@ func (c concurrentMail) FetchRaw(ctx context.Context, ids []string, fn func(prov
 	return first
 }
 
-// TestReviewFetchRawConcurrentCallback must be run with -race.
+// TestReviewFetchRawConcurrentCallback drives a provider that breaks the
+// (now documented) serial-callback contract; under -race it proves the engine
+// state the callback path touches is guarded anyway.
 func TestReviewFetchRawConcurrentCallback(t *testing.T) {
-	if os.Getenv("EMLCAL_REVIEW") != "1" {
-		t.Skip("review-only: demonstrates an unsynchronised field under -race")
-	}
 	h := newHarness(t)
 	h.fact.mail = concurrentMail{fakeMail: h.mail}
 	for i := 0; i < 300; i++ {
@@ -300,7 +496,7 @@ func TestReviewFetchRawConcurrentCallback(t *testing.T) {
 	}
 	h.sync(SyncOptions{Mail: true})
 	if n := len(h.messages()); n != 300 {
-		reviewFail(t, "indexed %d messages, want 300", n)
+		t.Fatalf("indexed %d messages, want 300", n)
 	}
 }
 

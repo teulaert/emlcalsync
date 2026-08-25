@@ -71,7 +71,9 @@ type MailProvider interface {
 	Enumerate(ctx context.Context, cursor string, limit int) (page []Envelope, next string, err error)
 
 	// FetchRaw fetches full messages for ids and calls fn for each one as it
-	// arrives (order not guaranteed). fn returning an error aborts the fetch.
+	// arrives (order not guaranteed). fn is called serially — never from two
+	// goroutines at once — so an implementation that fetches in parallel must
+	// hold a lock around the call. fn returning an error aborts the fetch.
 	// Ids that no longer exist on the server are silently skipped.
 	FetchRaw(ctx context.Context, ids []string, fn func(RawMessage) error) error
 

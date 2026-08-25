@@ -341,7 +341,6 @@ func TestMailAttachmentRoundTrip(t *testing.T) {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // (d) flag and mailbox writes
 

@@ -83,7 +83,12 @@ const maxOutboxAttempts = 10
 //
 //   - success              → the row is marked done, Queued is false
 //   - provider unreachable → the row stays pending, Queued is true
-//   - provider rejects it  → the row is marked failed and the error returned
+//   - provider rejects it  → the optimistic patch is rolled back, the row is
+//     marked permanently failed (it is never retried) and the error returned
+//
+// The rollback matters because a rejected write changed nothing on the server:
+// no later delta mentions the id, so without it the optimistic patch would
+// survive every sync until a full reconcile.
 func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult, error) {
 	acct, ok := e.cfg.Account(account)
 	if !ok {
@@ -102,13 +107,15 @@ func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult
 	}
 
 	var id int64
+	var undo *rollback
 	err = e.st.Tx(ctx, func(tx *store.Tx) error {
 		var err error
 		id, err = tx.EnqueueOutbox(ctx, account, string(op.Kind), payload)
 		if err != nil {
 			return err
 		}
-		return e.patchLocal(ctx, tx, *acct, op)
+		undo, err = e.patchLocal(ctx, tx, *acct, op)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -126,19 +133,52 @@ func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult
 			return res, err
 		}
 		return res, nil
-	case provider.IsOffline(err):
+
+	case retryable(op, err):
 		res.Queued = true
 		if err := e.st.MarkOutboxFailed(ctx, id, err.Error()); err != nil {
 			return res, err
 		}
 		e.log.Warn("write queued (offline)", "account", account, "kind", op.Kind, "outbox", id)
 		return res, nil
+
 	default:
-		if merr := e.st.MarkOutboxFailed(ctx, id, err.Error()); merr != nil {
-			e.log.Warn("outbox", "err", merr)
-		}
+		// The write will never go through: put the index back the way it was
+		// and stop the row from being retried.
+		e.rollback(ctx, *acct, undo)
+		e.failPermanently(ctx, id, err)
 		return res, err
 	}
+}
+
+// retryable reports whether a failed write may safely be executed again.
+//
+// Anything the provider actively rejected is final — a retry produces the same
+// rejection. A transport failure normally is not: the request never got an
+// answer, so the outbox keeps it and drains it when the network comes back.
+//
+// Sends and drafts are the exception. They are not idempotent: an offline
+// error can just as well mean "the request went out and the reply was lost" as
+// "nothing left this machine", and re-running it would submit the message a
+// second time. So they are retried only when the failure is provably from
+// before the request was built (no client, no session) — otherwise the row is
+// marked failed with the error and the user decides whether to send again.
+func retryable(op Op, err error) bool {
+	if !provider.IsOffline(err) {
+		return false
+	}
+	if op.Kind == OpSend || op.Kind == OpDraft {
+		return isPreRequest(err)
+	}
+	return true
+}
+
+// failPermanently records a rejection the outbox must not retry.
+func (e *Engine) failPermanently(ctx context.Context, id int64, cause error) {
+	if err := e.st.MarkOutboxPermanentlyFailed(ctx, id, cause.Error()); err != nil {
+		e.log.Warn("outbox", "err", err)
+	}
+	e.forgetAttempt(id)
 }
 
 func (op *Op) validate() error {
@@ -179,14 +219,44 @@ func (op *Op) calendarRemote() string {
 // ---------------------------------------------------------------------------
 // Optimistic local patch
 
+// rollback is everything patchLocal overwrote, kept so a rejected write can be
+// undone. It is deliberately a value the caller holds for the duration of one
+// Apply rather than something persisted: a crash before the provider answers
+// leaves the row pending, which is the case RetryOutbox handles.
+type rollback struct {
+	msgs   []msgState
+	events []eventState
+}
+
+// msgState is one message row's pre-patch flags and mailbox membership.
+type msgState struct {
+	remote    string
+	flags     model.Flags
+	mailboxes []string
+}
+
+// eventState is one event row before the patch. prev is nil when there was no
+// row at all, in which case undoing the patch means deleting what we created.
+type eventState struct {
+	calendarID int64
+	calRemote  string
+	remote     string
+	prev       *model.Event
+}
+
+func (rb *rollback) empty() bool { return rb == nil || (len(rb.msgs) == 0 && len(rb.events) == 0) }
+
 // patchLocal applies the write to the index before the provider has confirmed
 // it, so the CLI shows the new state immediately. The next delta confirms.
-func (e *Engine) patchLocal(ctx context.Context, tx *store.Tx, acct config.Account, op Op) error {
+// It returns the pre-patch state, which Apply restores when the provider
+// rejects the write outright.
+func (e *Engine) patchLocal(ctx context.Context, tx *store.Tx, acct config.Account, op Op) (*rollback, error) {
+	rb := &rollback{}
 	switch op.Kind {
 	case OpDraft, OpSend:
 		// Nothing local: the message does not exist in the index yet and the
 		// delta that follows the submission indexes it properly.
-		return nil
+		return rb, nil
 
 	case OpFlags:
 		for _, id := range op.IDs {
@@ -195,19 +265,20 @@ func (e *Engine) patchLocal(ctx context.Context, tx *store.Tx, acct config.Accou
 				continue
 			}
 			if err != nil {
-				return err
+				return rb, err
 			}
+			rb.note(msg)
 			f := applyFlags(msg.Flags, op.Flags.Set, op.Flags.Clear)
 			if err := tx.UpdateMessageState(ctx, acct.Name, id, f, nil); err != nil {
-				return err
+				return rb, err
 			}
 		}
-		return nil
+		return rb, nil
 
 	case OpMailboxes, OpArchive, OpTrash:
 		add, remove, clearOthers, err := e.mailboxPatch(ctx, tx, acct, op)
 		if err != nil {
-			return err
+			return rb, err
 		}
 		for _, id := range op.IDs {
 			msg, err := tx.GetMessage(ctx, acct.Name, id)
@@ -215,8 +286,9 @@ func (e *Engine) patchLocal(ctx context.Context, tx *store.Tx, acct config.Accou
 				continue
 			}
 			if err != nil {
-				return err
+				return rb, err
 			}
+			rb.note(msg)
 			var next []string
 			if !clearOthers {
 				next = append(next, msg.MailboxRemotes...)
@@ -228,15 +300,99 @@ func (e *Engine) patchLocal(ctx context.Context, tx *store.Tx, acct config.Accou
 				}
 			}
 			if err := tx.UpdateMessageState(ctx, acct.Name, id, msg.Flags, nonNil(next)); err != nil {
+				return rb, err
+			}
+		}
+		return rb, nil
+
+	case OpEventCreate, OpEventUpdate, OpEventRespond, OpEventDelete:
+		return rb, e.patchEvent(ctx, tx, acct, op, rb)
+	}
+	return rb, nil
+}
+
+// note records a message row's current state before it is overwritten.
+func (rb *rollback) note(msg *model.Message) {
+	rb.msgs = append(rb.msgs, msgState{
+		remote:    msg.RemoteID,
+		flags:     msg.Flags,
+		mailboxes: nonNil(append([]string(nil), msg.MailboxRemotes...)),
+	})
+}
+
+// noteEvent records an event row (or its absence) before it is overwritten.
+// A missing calendar means there is nothing local to undo.
+func (rb *rollback) noteEvent(ctx context.Context, tx *store.Tx, account, calRemote, remote string) error {
+	if calRemote == "" || remote == "" {
+		return nil
+	}
+	cal, err := tx.GetCalendarByRemote(ctx, account, calRemote)
+	if errors.Is(err, model.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	st := eventState{calendarID: cal.ID, calRemote: calRemote, remote: remote}
+	prev, err := tx.GetEvent(ctx, account, calRemote, remote)
+	switch {
+	case errors.Is(err, model.ErrNotFound):
+		// st.prev stays nil: undoing means removing the row we are about to add.
+	case err != nil:
+		return err
+	default:
+		st.prev = prev
+	}
+	rb.events = append(rb.events, st)
+	return nil
+}
+
+// rollback undoes the optimistic patch after a rejection. Failures here are
+// logged rather than returned: the caller is already reporting the rejection,
+// and a stale index entry is better reported than swallowed.
+func (e *Engine) rollback(ctx context.Context, acct config.Account, rb *rollback) {
+	if rb.empty() {
+		return
+	}
+	err := e.st.Tx(ctx, func(tx *store.Tx) error {
+		for _, m := range rb.msgs {
+			err := tx.UpdateMessageState(ctx, acct.Name, m.remote, m.flags, m.mailboxes)
+			if errors.Is(err, model.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+		}
+		for _, ev := range rb.events {
+			if ev.prev == nil {
+				if err := tx.DeleteEventRow(ctx, ev.calendarID, ev.remote); err != nil {
+					return err
+				}
+				continue
+			}
+			restored := *ev.prev
+			if _, err := tx.UpsertEvent(ctx, &restored); err != nil {
 				return err
 			}
 		}
 		return nil
-
-	case OpEventCreate, OpEventUpdate, OpEventRespond, OpEventDelete:
-		return e.patchEvent(ctx, tx, acct, op)
+	})
+	if err != nil {
+		e.log.Warn("could not undo the optimistic patch of a rejected write",
+			"account", acct.Name, "err", err)
+		return
 	}
-	return nil
+	// An event that was restored (or un-deleted) needs its occurrences back.
+	for _, ev := range rb.events {
+		if ev.prev == nil {
+			continue
+		}
+		if err := e.expandEvent(ctx, acct, ev.calRemote, ev.remote); err != nil {
+			e.log.Warn("could not re-expand a restored event",
+				"account", acct.Name, "event", ev.remote, "err", err)
+		}
+	}
 }
 
 // mailboxPatch resolves an op into the mailbox remote ids to add and remove.
@@ -343,7 +499,7 @@ func withoutAll(s, drop []string) []string {
 // event carries until the provider hands out the real one.
 const pendingPrefix = "pending:"
 
-func (e *Engine) patchEvent(ctx context.Context, tx *store.Tx, acct config.Account, op Op) error {
+func (e *Engine) patchEvent(ctx context.Context, tx *store.Tx, acct config.Account, op Op, rb *rollback) error {
 	switch op.Kind {
 	case OpEventCreate:
 		ev := *op.Event
@@ -355,6 +511,9 @@ func (e *Engine) patchEvent(ctx context.Context, tx *store.Tx, acct config.Accou
 			ev.RemoteID = fmt.Sprintf("%s%d", pendingPrefix, time.Now().UnixNano())
 			op.Event.RemoteID = ev.RemoteID
 		}
+		if err := rb.noteEvent(ctx, tx, acct.Name, ev.CalendarRemote, ev.RemoteID); err != nil {
+			return err
+		}
 		_, err := tx.UpsertEvent(ctx, &ev)
 		return err
 
@@ -363,6 +522,9 @@ func (e *Engine) patchEvent(ctx context.Context, tx *store.Tx, acct config.Accou
 		ev.AccountID = acct.Name
 		if ev.CalendarRemote == "" {
 			ev.CalendarRemote = op.CalendarRemote
+		}
+		if err := rb.noteEvent(ctx, tx, acct.Name, ev.CalendarRemote, ev.RemoteID); err != nil {
+			return err
 		}
 		_, err := tx.UpsertEvent(ctx, &ev)
 		return err
@@ -373,6 +535,9 @@ func (e *Engine) patchEvent(ctx context.Context, tx *store.Tx, acct config.Accou
 			return nil
 		}
 		if err != nil {
+			return err
+		}
+		if err := rb.noteEvent(ctx, tx, acct.Name, op.calendarRemote(), op.eventRemote()); err != nil {
 			return err
 		}
 		ev.MyResponse = op.Response
@@ -390,6 +555,9 @@ func (e *Engine) patchEvent(ctx context.Context, tx *store.Tx, acct config.Accou
 			return nil
 		}
 		if err != nil {
+			return err
+		}
+		if err := rb.noteEvent(ctx, tx, acct.Name, op.calendarRemote(), op.eventRemote()); err != nil {
 			return err
 		}
 		return tx.MarkEventDeleted(ctx, cal.ID, op.eventRemote())
@@ -410,6 +578,27 @@ func (op *Op) eventRemote() string {
 // ---------------------------------------------------------------------------
 // Execution
 
+// preRequestError marks a failure that happened before the write could leave
+// this machine — no provider client, no session, no token. It is the one kind
+// of transport failure that is safe to retry even for a non-idempotent op,
+// because nothing reached the server.
+type preRequestError struct{ err error }
+
+func (p preRequestError) Error() string { return p.err.Error() }
+func (p preRequestError) Unwrap() error { return p.err }
+
+func preRequest(err error) error {
+	if err == nil {
+		return nil
+	}
+	return preRequestError{err: err}
+}
+
+func isPreRequest(err error) bool {
+	var p preRequestError
+	return errors.As(err, &p)
+}
+
 // execute pushes the op to the provider. It returns the remote id of anything
 // the provider created.
 func (e *Engine) execute(ctx context.Context, acct config.Account, op Op) (string, error) {
@@ -417,13 +606,13 @@ func (e *Engine) execute(ctx context.Context, acct config.Account, op Op) (strin
 	case OpFlags, OpMailboxes, OpArchive, OpTrash, OpDraft, OpSend:
 		mp, err := e.mailProvider(ctx, acct)
 		if err != nil {
-			return "", err
+			return "", preRequest(err)
 		}
 		return e.executeMail(ctx, acct, mp, op)
 	default:
 		cp, err := e.calendarProvider(ctx, acct)
 		if err != nil {
-			return "", err
+			return "", preRequest(err)
 		}
 		return e.executeEvent(ctx, acct, cp, op)
 	}
@@ -567,6 +756,11 @@ func (e *Engine) expandEvent(ctx context.Context, acct config.Account, calRemote
 
 // RetryOutbox executes pending writes oldest first, with an attempt-based
 // backoff (1m·2^attempts, capped at an hour). account "" covers all accounts.
+//
+// A row leaves the queue in one of three ways: it goes through, it is given up
+// on after maxOutboxAttempts, or the provider rejects it in a way that will
+// never succeed. The last two both stamp failed_at, so the row stops being
+// pending — nothing here re-sends a message the server already refused.
 func (e *Engine) RetryOutbox(ctx context.Context, account string) (*OutboxReport, error) {
 	started := time.Now()
 	rep := &OutboxReport{}
@@ -574,6 +768,12 @@ func (e *Engine) RetryOutbox(ctx context.Context, account string) (*OutboxReport
 	if err != nil {
 		return rep, err
 	}
+	pendingIDs := make(map[int64]bool, len(items))
+	for _, it := range items {
+		pendingIDs[it.ID] = true
+	}
+	defer e.pruneRetryAt(pendingIDs)
+
 	var firstErr error
 	for _, it := range items {
 		if account != "" && it.AccountID != account {
@@ -581,6 +781,9 @@ func (e *Engine) RetryOutbox(ctx context.Context, account string) (*OutboxReport
 		}
 		rep.Pending++
 		if it.Attempts >= maxOutboxAttempts {
+			// A row from before failed_at existed, or one whose last attempt
+			// exhausted the budget: retire it instead of listing it forever.
+			e.failPermanently(ctx, it.ID, fmt.Errorf("gave up after %d attempts: %s", it.Attempts, it.LastError))
 			rep.Skipped++
 			continue
 		}
@@ -595,10 +798,10 @@ func (e *Engine) RetryOutbox(ctx context.Context, account string) (*OutboxReport
 		}
 		var op Op
 		if err := json.Unmarshal(it.Payload, &op); err != nil {
+			// A payload that does not parse will not parse on the next pass
+			// either; there is nothing to retry.
 			rep.Failed++
-			if merr := e.st.MarkOutboxFailed(ctx, it.ID, "bad payload: "+err.Error()); merr != nil {
-				return rep, merr
-			}
+			e.failPermanently(ctx, it.ID, fmt.Errorf("bad payload: %w", err))
 			continue
 		}
 
@@ -615,13 +818,27 @@ func (e *Engine) RetryOutbox(ctx context.Context, account string) (*OutboxReport
 			}
 			e.forgetAttempt(it.ID)
 			rep.Done++
+
+		case !retryable(op, err):
+			// Rejected outright, or a send whose fate we cannot know: stop.
+			rep.Failed++
+			e.failPermanently(ctx, it.ID, err)
+			if !provider.IsOffline(err) && firstErr == nil {
+				firstErr = err
+			}
+			e.log.Warn("outbox write given up on",
+				"account", it.AccountID, "kind", it.Kind, "outbox", it.ID, "err", err)
+
+		case it.Attempts+1 >= maxOutboxAttempts:
+			rep.Failed++
+			e.failPermanently(ctx, it.ID, fmt.Errorf("gave up after %d attempts: %w", it.Attempts+1, err))
+			e.log.Warn("outbox write given up on",
+				"account", it.AccountID, "kind", it.Kind, "outbox", it.ID, "err", err)
+
 		default:
 			rep.Failed++
 			if merr := e.st.MarkOutboxFailed(ctx, it.ID, err.Error()); merr != nil {
 				return rep, merr
-			}
-			if !provider.IsOffline(err) && firstErr == nil {
-				firstErr = err
 			}
 			e.log.Warn("outbox retry failed",
 				"account", it.AccountID, "kind", it.Kind, "outbox", it.ID, "err", err)
@@ -660,6 +877,19 @@ func (e *Engine) forgetAttempt(id int64) {
 	e.retryMu.Lock()
 	defer e.retryMu.Unlock()
 	delete(e.retryAt, id)
+}
+
+// pruneRetryAt drops timers for rows that are no longer pending — retired,
+// dropped by the user, or pruned — so the map cannot grow for the lifetime of
+// a daemon.
+func (e *Engine) pruneRetryAt(pending map[int64]bool) {
+	e.retryMu.Lock()
+	defer e.retryMu.Unlock()
+	for id := range e.retryAt {
+		if !pending[id] {
+			delete(e.retryAt, id)
+		}
+	}
 }
 
 // backoff is 1m·2^(attempts-1), capped at an hour.

@@ -233,7 +233,15 @@ type OutboxItem struct {
 	Attempts  int        `json:"attempts"`
 	LastError string     `json:"last_error,omitempty"`
 	DoneAt    *time.Time `json:"done_at,omitempty"`
+	// FailedAt is set when the write was rejected permanently: the provider
+	// will never accept it, so it is not retried and not pending. DoneAt stays
+	// nil — the write never went through — and LastError says why.
+	FailedAt *time.Time `json:"failed_at,omitempty"`
 }
+
+// Pending reports whether the write is still waiting to be executed. A row is
+// pending until it either goes through (DoneAt) or is given up on (FailedAt).
+func (it OutboxItem) Pending() bool { return it.DoneAt == nil && it.FailedAt == nil }
 
 // EnqueueOutbox appends a pending write and returns its id. Write commands
 // create the row *before* trying the provider, so a crash mid-request still
@@ -254,16 +262,19 @@ func (tx *Tx) EnqueueOutbox(ctx context.Context, accountID, kind string, payload
 	return id, nil
 }
 
+// outboxCols is the projection every outbox read shares.
+const outboxCols = `id, account_id, kind, payload, created_at, attempts, last_error, done_at, failed_at`
+
 // ListOutbox returns outbox rows oldest first; pending=true limits to rows
-// that have not completed.
+// that are still waiting: neither done nor permanently failed.
 func (s *Store) ListOutbox(ctx context.Context, pending bool) ([]OutboxItem, error) {
 	return s.tx().ListOutbox(ctx, pending)
 }
 
 func (tx *Tx) ListOutbox(ctx context.Context, pending bool) ([]OutboxItem, error) {
-	q := `SELECT id, account_id, kind, payload, created_at, attempts, last_error, done_at FROM outbox`
+	q := `SELECT ` + outboxCols + ` FROM outbox`
 	if pending {
-		q += ` WHERE done_at IS NULL`
+		q += ` WHERE done_at IS NULL AND failed_at IS NULL`
 	}
 	q += ` ORDER BY id`
 	rows, err := tx.q.QueryContext(ctx, q)
@@ -277,15 +288,16 @@ func (tx *Tx) ListOutbox(ctx context.Context, pending bool) ([]OutboxItem, error
 		var payload string
 		var lastErr sql.NullString
 		var created int64
-		var done sql.NullInt64
+		var done, failed sql.NullInt64
 		if err := rows.Scan(&it.ID, &it.AccountID, &it.Kind, &payload, &created,
-			&it.Attempts, &lastErr, &done); err != nil {
+			&it.Attempts, &lastErr, &done, &failed); err != nil {
 			return nil, err
 		}
 		it.Payload = []byte(payload)
 		it.CreatedAt = timeOf(created)
 		it.LastError = lastErr.String
 		it.DoneAt = timePtr(done)
+		it.FailedAt = timePtr(failed)
 		out = append(out, it)
 	}
 	return out, rows.Err()
@@ -297,11 +309,10 @@ func (s *Store) GetOutbox(ctx context.Context, id int64) (*OutboxItem, error) {
 	var payload string
 	var lastErr sql.NullString
 	var created int64
-	var done sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, account_id, kind, payload, created_at, attempts, last_error, done_at
-		  FROM outbox WHERE id = ?`, id).
-		Scan(&it.ID, &it.AccountID, &it.Kind, &payload, &created, &it.Attempts, &lastErr, &done)
+	var done, failed sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT `+outboxCols+` FROM outbox WHERE id = ?`, id).
+		Scan(&it.ID, &it.AccountID, &it.Kind, &payload, &created, &it.Attempts, &lastErr, &done, &failed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, notFound("outbox item %d", id)
 	}
@@ -312,6 +323,7 @@ func (s *Store) GetOutbox(ctx context.Context, id int64) (*OutboxItem, error) {
 	it.CreatedAt = timeOf(created)
 	it.LastError = lastErr.String
 	it.DoneAt = timePtr(done)
+	it.FailedAt = timePtr(failed)
 	return &it, nil
 }
 
@@ -322,7 +334,8 @@ func (s *Store) MarkOutboxDone(ctx context.Context, id int64) error {
 
 func (tx *Tx) MarkOutboxDone(ctx context.Context, id int64) error {
 	res, err := tx.q.ExecContext(ctx,
-		`UPDATE outbox SET done_at = ?, last_error = NULL WHERE id = ?`, time.Now().Unix(), id)
+		`UPDATE outbox SET done_at = ?, last_error = NULL, failed_at = NULL WHERE id = ?`,
+		time.Now().Unix(), id)
 	if err != nil {
 		return fmt.Errorf("store: mark outbox done %d: %w", id, err)
 	}
@@ -340,6 +353,25 @@ func (tx *Tx) MarkOutboxFailed(ctx context.Context, id int64, errMsg string) err
 		nullStr(errMsg), id)
 	if err != nil {
 		return fmt.Errorf("store: mark outbox failed %d: %w", id, err)
+	}
+	return requireRow(res, "outbox item %d", id)
+}
+
+// MarkOutboxPermanentlyFailed records a rejection the provider will never
+// accept: the attempt counter is bumped, the error is kept for the user and
+// failed_at is stamped so the row stops being pending and is never retried.
+// done_at stays NULL — the write did not happen.
+func (s *Store) MarkOutboxPermanentlyFailed(ctx context.Context, id int64, errMsg string) error {
+	return s.tx().MarkOutboxPermanentlyFailed(ctx, id, errMsg)
+}
+
+func (tx *Tx) MarkOutboxPermanentlyFailed(ctx context.Context, id int64, errMsg string) error {
+	res, err := tx.q.ExecContext(ctx, `
+		UPDATE outbox SET attempts = attempts + 1, last_error = ?, failed_at = ?
+		 WHERE id = ? AND done_at IS NULL`,
+		nullStr(errMsg), time.Now().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("store: mark outbox permanently failed %d: %w", id, err)
 	}
 	return requireRow(res, "outbox item %d", id)
 }

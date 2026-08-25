@@ -10,15 +10,36 @@ import (
 	"github.com/lennert/emlcal/internal/model"
 )
 
+// ErrEmptyMailboxList is returned by ReplaceMailboxes when it is asked to
+// replace a non-empty mailbox list with nothing. Deleting every mailbox row
+// cascades away every message_mailboxes row, so one empty-but-not-an-error
+// provider response would unfile the whole account; the index keeps what it
+// has and the caller decides what to do (the sync engine logs and carries on).
+var ErrEmptyMailboxList = errors.New("store: refusing to replace a non-empty mailbox list with an empty one")
+
 // ReplaceMailboxes makes the stored mailbox list for an account match mbs
 // exactly: rows are upserted by remote id, ParentRemote is resolved to
 // parent_id, and rows whose remote id is no longer present are deleted (which
 // cascades their message_mailboxes rows).
+//
+// An empty mbs over an account that already has mailboxes returns
+// ErrEmptyMailboxList and changes nothing.
 func (s *Store) ReplaceMailboxes(ctx context.Context, accountID string, mbs []model.Mailbox) error {
 	return s.Tx(ctx, func(tx *Tx) error { return tx.ReplaceMailboxes(ctx, accountID, mbs) })
 }
 
 func (tx *Tx) ReplaceMailboxes(ctx context.Context, accountID string, mbs []model.Mailbox) error {
+	if len(mbs) == 0 {
+		existing, err := tx.mailboxIDs(ctx, accountID)
+		if err != nil {
+			return err
+		}
+		if len(existing) > 0 {
+			return fmt.Errorf("%w (account %s has %d)", ErrEmptyMailboxList, accountID, len(existing))
+		}
+		return nil
+	}
+
 	// Pass 1: upsert everything without parents.
 	for i := range mbs {
 		m := &mbs[i]

@@ -14,8 +14,11 @@
 // Writes go through Apply, which records an outbox row and patches the index
 // optimistically inside one transaction before trying the provider. When the
 // provider is unreachable the row stays pending and RetryOutbox drains it
-// later; when the provider *rejects* the write the row is marked failed and
-// the error is returned to the caller rather than silently queued.
+// later; when the provider *rejects* the write the optimistic patch is rolled
+// back, the row is marked permanently failed (failed_at, never retried) and
+// the error is returned to the caller rather than silently queued. Sends and
+// drafts are single-attempt: they are not idempotent, so anything but a
+// failure from before the request was built retires the row too.
 package sync
 
 import (

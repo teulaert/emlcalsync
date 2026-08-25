@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
@@ -136,13 +137,45 @@ func TestReviewFTSLifecycle(t *testing.T) {
 	if hits, err = s.Search(ctx, "dirigible", MessageFilter{}); err != nil || len(hits) != 1 {
 		reviewFail(t, "undeleted message not searchable again: err=%v hits=%d", err, len(hits))
 	}
-	// Membership after undelete: MarkDeleted cleared it, does anything restore it?
+	// Membership after undelete: MarkDeleted cleared it and MarkUndeleted
+	// deliberately restores only deleted_at, so the row is unfiled...
 	m, err := s.GetMessage(ctx, "work", "m1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(m.MailboxRemotes) == 0 {
-		reviewFail(t, "MarkUndeleted leaves the message in no mailbox at all (was %v)", []string{"mb-inbox"})
+	if len(m.MailboxRemotes) != 0 {
+		t.Fatalf("MarkUndeleted unexpectedly restored membership: %v", m.MailboxRemotes)
+	}
+	// ...which is why a caller that knows where the message lives must use
+	// UndeleteWithState. Regression test for the store half of H3.
+	if _, err := s.MarkDeleted(ctx, "work", []string{"m1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UndeleteWithState(ctx, "work", "m1", model.Flags{Unread: true}, []string{"mb-inbox"}); err != nil {
+		t.Fatalf("UndeleteWithState: %v", err)
+	}
+	m, err = s.GetMessage(ctx, "work", "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.DeletedAt != nil {
+		t.Fatal("UndeleteWithState left deleted_at set")
+	}
+	if len(m.MailboxRemotes) != 1 || m.MailboxRemotes[0] != "mb-inbox" {
+		t.Fatalf("UndeleteWithState left the message in %v, want [mb-inbox]", m.MailboxRemotes)
+	}
+	if !m.Flags.Unread {
+		t.Fatalf("UndeleteWithState did not apply the flags: %+v", m.Flags)
+	}
+	inbox, err := s.ListMessages(ctx, MessageFilter{MailboxRole: string(model.RoleInbox)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 1 {
+		t.Fatalf("resurrected message is invisible in the inbox listing (%d messages)", len(inbox))
+	}
+	if hits, err = s.Search(ctx, "dirigible", MessageFilter{}); err != nil || len(hits) != 1 {
+		t.Fatalf("search after UndeleteWithState: err=%v hits=%d", err, len(hits))
 	}
 	if err := ftsIntegrity(t, s); err != nil {
 		reviewFail(t, "FTS integrity-check failed after delete/undelete: %v", err)
@@ -307,8 +340,9 @@ func TestReviewReceivedTimeZone(t *testing.T) {
 	}
 }
 
-// TestReviewEmptyMailboxListWipesMembership: ReplaceMailboxes has no guard
-// against an empty provider response.
+// TestReviewEmptyMailboxListWipesMembership: an empty provider response must
+// not be applied over a non-empty mailbox list — deleting every mailbox row
+// cascades away every message's membership. Regression test for M7.
 func TestReviewEmptyMailboxListWipesMembership(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
@@ -322,31 +356,108 @@ func TestReviewEmptyMailboxListWipesMembership(t *testing.T) {
 	}
 
 	// A provider that answers with an empty list instead of an error.
-	if err := s.ReplaceMailboxes(ctx, "work", nil); err != nil {
-		t.Fatalf("ReplaceMailboxes(nil): %v", err)
+	if err := s.ReplaceMailboxes(ctx, "work", nil); !errors.Is(err, ErrEmptyMailboxList) {
+		t.Fatalf("ReplaceMailboxes(nil) = %v, want ErrEmptyMailboxList", err)
 	}
 
 	after, err := s.ListMessages(ctx, MessageFilter{MailboxRole: string(model.RoleInbox)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != 0 {
-		t.Fatalf("unexpected: %d messages still in the inbox", len(after))
+	if len(after) != 5 {
+		t.Fatalf("%d messages left in the inbox, want 5: an empty mailbox list wiped the membership", len(after))
 	}
-	reviewFail(t, "ReplaceMailboxes with an empty list deleted every mailbox and cascaded away "+
-		"the mailbox membership of all %d messages; nothing but a reconcile restores it", len(before))
-
-	// The messages themselves survive, they are just unfiled.
-	all, err := s.ListMessages(ctx, MessageFilter{})
+	mbs, err := s.ListMailboxes(ctx, "work")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 5 {
-		t.Fatalf("messages lost too: %d", len(all))
+	if len(mbs) == 0 {
+		t.Fatal("every mailbox row was deleted")
 	}
-	for _, m := range all {
-		if len(m.MailboxRemotes) != 0 {
-			t.Fatalf("membership unexpectedly kept: %v", m.MailboxRemotes)
-		}
+
+	// An account with no mailboxes yet accepts an empty list: there is nothing
+	// to lose, and a brand-new account legitimately has none.
+	if err := s.UpsertAccount(ctx, &model.Account{
+		ID: "fresh", Provider: model.ProviderFastmail, Email: "fresh@example.com", CreatedAt: base,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceMailboxes(ctx, "fresh", nil); err != nil {
+		t.Fatalf("ReplaceMailboxes(nil) on an empty account: %v", err)
+	}
+}
+
+// TestReviewOutboxPermanentFailure: a write the provider will never accept
+// must stop being pending, while still being visible to `outbox list --all`.
+// Regression test for the store half of H2.
+func TestReviewOutboxPermanentFailure(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+
+	keep, err := s.EnqueueOutbox(ctx, "work", "flags", []byte(`{"kind":"flags"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doomed, err := s.EnqueueOutbox(ctx, "work", "send", []byte(`{"kind":"send"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := s.ListOutbox(ctx, true)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("precondition: err=%v n=%d", err, len(pending))
+	}
+
+	// A retryable failure keeps the row pending and counts the attempt.
+	if err := s.MarkOutboxFailed(ctx, keep, "offline"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkOutboxPermanentlyFailed(ctx, doomed, "403 permission denied"); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err = s.ListOutbox(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ID != keep {
+		t.Fatalf("pending = %+v, want only the retryable row %d", pending, keep)
+	}
+	if !pending[0].Pending() {
+		t.Fatal("a row returned by ListOutbox(pending) reports itself as not pending")
+	}
+
+	it, err := s.GetOutbox(ctx, doomed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.FailedAt == nil {
+		t.Fatal("failed_at was not stamped")
+	}
+	if it.DoneAt != nil {
+		t.Fatal("a rejected write must not be recorded as done")
+	}
+	if it.Attempts != 1 || it.LastError != "403 permission denied" {
+		t.Fatalf("retired row = %+v, want one attempt and the error kept", it)
+	}
+	if it.Pending() {
+		t.Fatal("a permanently failed row still reports itself as pending")
+	}
+
+	all, err := s.ListOutbox(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("outbox list --all returned %d rows, want 2", len(all))
+	}
+
+	// A successful apply is not a failure any more.
+	if err := s.MarkOutboxDone(ctx, keep); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err = s.ListOutbox(ctx, true); err != nil || len(pending) != 0 {
+		t.Fatalf("pending after done: err=%v n=%d", err, len(pending))
 	}
 }
