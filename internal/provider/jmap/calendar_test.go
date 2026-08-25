@@ -705,7 +705,7 @@ func TestRecurrenceToRRule(t *testing.T) {
 				BySetPosition: []int{1},
 				ByMonth:       []string{"1", "7"},
 			},
-			want: "FREQ=MONTHLY;BYMONTHDAY=1,-1;BYMONTH=1,7;BYSETPOS=1",
+			want: "FREQ=MONTHLY;BYMONTH=1,7;BYMONTHDAY=1,-1;BYSETPOS=1",
 		},
 		{
 			name: "week start",
@@ -727,7 +727,7 @@ func TestRecurrenceToRRule(t *testing.T) {
 		{
 			name: "yearly by week and year day",
 			rule: jsRecurrenceRule{Frequency: "yearly", ByWeekNo: []int{1, 53}, ByYearDay: []int{-1}},
-			want: "FREQ=YEARLY;BYYEARDAY=-1;BYWEEKNO=1,53",
+			want: "FREQ=YEARLY;BYWEEKNO=1,53;BYYEARDAY=-1",
 		},
 		{
 			name: "no frequency yields nothing",

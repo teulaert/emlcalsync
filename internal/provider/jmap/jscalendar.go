@@ -180,6 +180,7 @@ func parseISODuration(s string) (isoDuration, error) {
 	}
 	s = s[1:]
 	inTime := false
+	sawComponent := false
 	num := ""
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
@@ -196,6 +197,7 @@ func parseISODuration(s string) (isoDuration, error) {
 			return d, fmt.Errorf("bad duration %q: no number before %q", s, string(ch))
 		}
 		num = ""
+		sawComponent = true
 		switch ch {
 		case 'Y', 'y':
 			d.years = int(v)
@@ -219,6 +221,9 @@ func parseISODuration(s string) (isoDuration, error) {
 	}
 	if num != "" {
 		return d, fmt.Errorf("bad duration %q: trailing number", s)
+	}
+	if !sawComponent {
+		return d, fmt.Errorf("bad duration %q: no components", s)
 	}
 	return d, nil
 }
@@ -307,6 +312,22 @@ func recurrenceToRRule(r jsRecurrenceRule, loc *time.Location, allDay bool) stri
 			}
 		}
 	}
+	if len(r.ByMonth) > 0 {
+		months := make([]string, len(r.ByMonth))
+		for i, m := range r.ByMonth {
+			months[i] = strings.ToUpper(m) // may be "5L" under a leap-month rscale
+		}
+		parts = append(parts, "BYMONTH="+strings.Join(months, ","))
+	}
+	if len(r.ByWeekNo) > 0 {
+		parts = append(parts, "BYWEEKNO="+joinInts(r.ByWeekNo))
+	}
+	if len(r.ByYearDay) > 0 {
+		parts = append(parts, "BYYEARDAY="+joinInts(r.ByYearDay))
+	}
+	if len(r.ByMonthDay) > 0 {
+		parts = append(parts, "BYMONTHDAY="+joinInts(r.ByMonthDay))
+	}
 	if len(r.ByDay) > 0 {
 		days := make([]string, 0, len(r.ByDay))
 		for _, nd := range r.ByDay {
@@ -317,22 +338,6 @@ func recurrenceToRRule(r jsRecurrenceRule, loc *time.Location, allDay bool) stri
 			days = append(days, s)
 		}
 		parts = append(parts, "BYDAY="+strings.Join(days, ","))
-	}
-	if len(r.ByMonthDay) > 0 {
-		parts = append(parts, "BYMONTHDAY="+joinInts(r.ByMonthDay))
-	}
-	if len(r.ByMonth) > 0 {
-		months := make([]string, len(r.ByMonth))
-		for i, m := range r.ByMonth {
-			months[i] = strings.ToUpper(m) // may be "5L" under a leap-month rscale
-		}
-		parts = append(parts, "BYMONTH="+strings.Join(months, ","))
-	}
-	if len(r.ByYearDay) > 0 {
-		parts = append(parts, "BYYEARDAY="+joinInts(r.ByYearDay))
-	}
-	if len(r.ByWeekNo) > 0 {
-		parts = append(parts, "BYWEEKNO="+joinInts(r.ByWeekNo))
 	}
 	if len(r.ByHour) > 0 {
 		parts = append(parts, "BYHOUR="+joinInts(r.ByHour))

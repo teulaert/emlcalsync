@@ -26,11 +26,11 @@ var ErrStateExpired = errors.New("sync state expired")
 // enumeration: enough to decide whether we need to fetch the raw message and
 // to apply flags/mailboxes without a fetch.
 type Envelope struct {
-	RemoteID string
-	ThreadID string
-	Received time.Time
-	Size     int64
-	Flags    model.Flags
+	RemoteID  string
+	ThreadID  string
+	Received  time.Time
+	Size      int64
+	Flags     model.Flags
 	Mailboxes []string // remote mailbox/label ids
 }
 

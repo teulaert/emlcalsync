@@ -48,7 +48,7 @@ func (c *Client) Watch(ctx context.Context, fn func(provider.ChangeHint)) error 
 	if fn == nil {
 		return errors.New("jmap: Watch needs a callback")
 	}
-	backoff := pushBackoffMin
+	backoff := c.pushBackoffMin
 	lastEventID := ""
 	// Remembering the last state per account/type keeps a reconnect (which
 	// replays the current state) from triggering a redundant sync pass.
@@ -71,7 +71,7 @@ func (c *Client) Watch(ctx context.Context, fn func(provider.ChangeHint)) error 
 		}
 		if gotData {
 			// The connection worked; treat the drop as transient.
-			backoff = pushBackoffMin
+			backoff = c.pushBackoffMin
 		}
 		if err != nil {
 			c.log.Debug("jmap push stream ended, reconnecting", "backoff", backoff, "err", err)
@@ -79,8 +79,8 @@ func (c *Client) Watch(ctx context.Context, fn func(provider.ChangeHint)) error 
 		if err := sleepCtx(ctx, jitter(backoff)); err != nil {
 			return err
 		}
-		if backoff < pushBackoffMax {
-			backoff = min(backoff*2, pushBackoffMax)
+		if backoff < c.pushBackoffMax {
+			backoff = min(backoff*2, c.pushBackoffMax)
 		}
 	}
 }

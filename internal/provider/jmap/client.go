@@ -85,6 +85,10 @@ type Client struct {
 
 	// retryBase is the base backoff delay; overridden in tests.
 	retryBase time.Duration
+	// pushBackoffMin/Max bound the EventSource reconnect delay; overridden in
+	// tests so a reconnect does not cost a real second.
+	pushBackoffMin time.Duration
+	pushBackoffMax time.Duration
 
 	mu      sync.Mutex
 	session *Session
@@ -98,13 +102,15 @@ func New(opts Options) (*Client, error) {
 		return nil, errors.New("jmap: Options.Token is required")
 	}
 	c := &Client{
-		token:      opts.Token,
-		email:      strings.TrimSpace(opts.Email),
-		sessionURL: opts.SessionURL,
-		hc:         opts.HTTPClient,
-		ua:         opts.UserAgent,
-		log:        opts.Logger,
-		retryBase:  defaultRetryBase,
+		token:          opts.Token,
+		email:          strings.TrimSpace(opts.Email),
+		sessionURL:     opts.SessionURL,
+		hc:             opts.HTTPClient,
+		ua:             opts.UserAgent,
+		log:            opts.Logger,
+		retryBase:      defaultRetryBase,
+		pushBackoffMin: pushBackoffMin,
+		pushBackoffMax: pushBackoffMax,
 	}
 	if c.sessionURL == "" {
 		c.sessionURL = DefaultSessionURL

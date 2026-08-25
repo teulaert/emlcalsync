@@ -4,10 +4,10 @@ import "testing"
 
 func TestParseID(t *testing.T) {
 	cases := []struct {
-		in   string
-		kind IDKind
+		in                string
+		kind              IDKind
 		acct, remote, cal string
-		err  bool
+		err               bool
 	}{
 		{"work:18f3a2b9", KindMessage, "work", "18f3a2b9", "", false},
 		{"work:t:18f3a2b9", KindThread, "work", "18f3a2b9", "", false},

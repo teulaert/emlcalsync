@@ -48,15 +48,15 @@ const (
 
 // Mailbox is a folder (JMAP) or label (Gmail).
 type Mailbox struct {
-	ID          int64  // local row id, 0 when not yet stored
-	AccountID   string
-	RemoteID    string
-	Name        string
-	Role        MailboxRole
+	ID           int64 // local row id, 0 when not yet stored
+	AccountID    string
+	RemoteID     string
+	Name         string
+	Role         MailboxRole
 	ParentRemote string // remote id of parent, "" for top-level
-	SortOrder   int
-	TotalCount  int
-	UnreadCount int
+	SortOrder    int
+	TotalCount   int
+	UnreadCount  int
 }
 
 // Address is a parsed RFC 5322 mailbox.
@@ -83,14 +83,14 @@ type Flags struct {
 
 // Message is the indexed form of a mail message.
 type Message struct {
-	ID          int64  // local row id
+	ID          int64 // local row id
 	AccountID   string
 	RemoteID    string // Gmail message id / JMAP Email id
 	ThreadID    string // provider thread id
 	BlobSHA256  string // "" when RawComplete is false
 	RawComplete bool
 
-	MessageIDHeader string   // Message-ID header value, without <>
+	MessageIDHeader string // Message-ID header value, without <>
 	InReplyTo       string
 	References      []string
 
@@ -188,28 +188,28 @@ type Attendee struct {
 
 // Event is a calendar event master or exception instance.
 type Event struct {
-	ID           int64
-	CalendarID   int64
-	AccountID    string // denormalised for PublicID
+	ID             int64
+	CalendarID     int64
+	AccountID      string // denormalised for PublicID
 	CalendarRemote string
-	RemoteID     string
-	UID          string
-	Title        string
-	Description  string
-	Location     string
-	Start        time.Time
-	End          time.Time
-	AllDay       bool
-	Timezone     string
-	RRule        string // RFC 5545 RRULE without the "RRULE:" prefix; "" if single
-	RecurrenceID string // set on exception instances
-	Status       EventStatus
-	Organizer    Address
-	Attendees    []Attendee
-	MyResponse   Participation
-	RawJSON      []byte // provider object for fidelity / minimal patches
-	Updated      time.Time
-	DeletedAt    *time.Time
+	RemoteID       string
+	UID            string
+	Title          string
+	Description    string
+	Location       string
+	Start          time.Time
+	End            time.Time
+	AllDay         bool
+	Timezone       string
+	RRule          string // RFC 5545 RRULE without the "RRULE:" prefix; "" if single
+	RecurrenceID   string // set on exception instances
+	Status         EventStatus
+	Organizer      Address
+	Attendees      []Attendee
+	MyResponse     Participation
+	RawJSON        []byte // provider object for fidelity / minimal patches
+	Updated        time.Time
+	DeletedAt      *time.Time
 }
 
 func (e *Event) PublicID() string {
