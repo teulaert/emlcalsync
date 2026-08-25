@@ -1,0 +1,805 @@
+# emlcal — Design Document
+
+Status: draft for review · 2026-08-25
+
+`emlcal` is a single Go binary that keeps a **complete local archive** of all
+mail and calendar accounts (Gmail ×N, Fastmail ×N) and exposes it through an
+**agent-friendly CLI**. The archive is the product; the CLI, and later TUIs and
+Omarchy integrations, are views on it.
+
+---
+
+## 1. Goals and non-goals
+
+### Goals
+
+- **Full archive, offline-first.** Every message of every account is stored
+  locally as raw RFC 822, forever. All read operations work with no network.
+  A local AI model must be able to work on the complete history.
+- **Continuously synced.** Initial backfill, then cheap incremental delta sync
+  (seconds of latency for Fastmail via push, ~1 minute for Gmail via polling).
+- **One CLI for everything.** Multi-account by default, stable IDs, `--json`
+  everywhere, read/write commands split at the subcommand level so Claude Code
+  permission rules can allowlist reads and gate writes.
+- **Rebuildable.** The SQLite index is derived data; `emlcal reindex` rebuilds
+  it from the blob archive.
+- **Foundation for UIs.** TUIs / Omarchy plugins read the same SQLite DB
+  through an internal Go package, never through a second provider client.
+
+### Non-goals (for now)
+
+- Generic IMAP / CalDAV support. Two providers, two purpose-built clients.
+  The `Provider` interface leaves the door open.
+- An MCP server. Trivial to add later on top of the same internal API.
+- Contacts sync (possible later via People API / JMAP Contacts).
+- Being a mail *client* with a rendering engine — HTML is stored, not rendered.
+
+---
+
+## 2. Architecture
+
+```
+  ┌────────────────────────┐   ┌────────────────────────┐
+  │  Gmail API / GCal API  │   │  Fastmail JMAP (+push) │      providers
+  └───────────┬────────────┘   └───────────┬────────────┘
+              │ raw RFC822 + labels        │ raw RFC822 + mailboxes/keywords
+              ▼                            ▼
+  ┌──────────────────────────────────────────────────────┐
+  │  sync engine   backfill → delta → reconcile · outbox │
+  └───────────┬──────────────────────────────┬───────────┘
+              │ write                        │ parse (MIME → text)
+              ▼                              ▼
+  ┌──────────────────────┐        ┌──────────────────────┐
+  │  blob archive        │        │  SQLite index        │
+  │  raw .eml, zstd,     │───────▶│  messages, mailboxes │
+  │  content-addressed   │ reindex│  FTS5, events, state │
+  └──────────────────────┘        └──────────┬───────────┘
+                                             │ read-only queries
+                       ┌─────────────────────┼─────────────────────┐
+                       ▼                     ▼                     ▼
+                 emlcal CLI            future TUI           Omarchy plugins
+                 (agent + human)       (bubbletea)          (walker menus, etc.)
+```
+
+Principles:
+
+1. **Raw RFC 822 is canonical.** Both providers hand out the full raw message in
+   one call. We store it verbatim (compressed) and parse it locally. Nothing
+   in SQLite is unrecoverable.
+2. **Sync writes, everything else reads.** The sync process is the only thing
+   that writes provider state into the index. CLI write commands
+   (archive, send, …) go to the provider first, then optimistically patch the
+   index; the next delta confirms.
+3. **Unified model = JMAP model.** A message belongs to *many* mailboxes and
+   has a set of flags. Gmail labels map onto this directly.
+
+---
+
+## 3. On-disk layout (XDG)
+
+```
+~/.config/emlcal/
+  config.toml                     accounts, policies (no secrets)
+  secrets/                        0600 — OAuth tokens, Fastmail API tokens
+    work.gmail.json
+    personal.fastmail.token
+
+~/.local/share/emlcal/
+  emlcal.db                       SQLite, WAL mode
+  emlcal.db-wal / -shm
+  blobs/
+    ab/ab3f…e9.eml.zst            raw RFC822, sha256 of uncompressed bytes
+    …
+
+~/.local/state/emlcal/
+  emlcal.log
+  sync.<account>.lock             flock per account
+```
+
+Back up = copy `~/.local/share/emlcal` (the index is optional; blobs are the
+archive). Secrets live separately so the data dir can be synced elsewhere.
+
+---
+
+## 4. Blob archive
+
+- Key: `sha256(raw bytes)`. Path: `blobs/<first 2 hex>/<sha256>.eml.zst`.
+- Compression: zstd level 3 (`klauspost/compress`). Base64 attachment bodies
+  still compress ~25–30 %; text-heavy mail 70 %+.
+- Content addressing gives free deduplication: the same message received in two
+  accounts (very common with forwarding / CCs to yourself) is stored once.
+  `messages` rows still exist per account — they just point at the same blob.
+- Writes are atomic: write to `blobs/tmp/<random>`, fsync, rename.
+- A blob is never mutated. Deletion on the server marks the `messages` row
+  `deleted_at`; the blob stays (it's an archive). `emlcal gc --purge-deleted`
+  exists for people who want server semantics.
+
+**Attachment policy.** Because raw includes attachments, backfilling raw =
+backfilling everything. Per-account setting:
+
+```toml
+raw_max_size = "0"        # 0 = unlimited (default: full archive)
+```
+
+If a message exceeds `raw_max_size`, only the text parts are fetched (Gmail
+`format=full`, JMAP `Email/get` with body values) and the row is marked
+`raw_complete = 0`; `emlcal mail attachment get` fetches on demand.
+
+---
+
+## 5. SQLite data model
+
+WAL mode, `busy_timeout = 5000`, `synchronous = NORMAL`, `foreign_keys = ON`.
+Migrations embedded in the binary (`internal/store/migrations/*.sql`).
+
+```sql
+CREATE TABLE accounts (
+  id            TEXT PRIMARY KEY,          -- "work", "personal" (from config)
+  provider      TEXT NOT NULL,             -- 'gmail' | 'fastmail'
+  email         TEXT NOT NULL,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE mailboxes (
+  id            INTEGER PRIMARY KEY,
+  account_id    TEXT NOT NULL REFERENCES accounts(id),
+  remote_id     TEXT NOT NULL,             -- Gmail labelId / JMAP mailbox id
+  name          TEXT NOT NULL,             -- display name
+  role          TEXT,                      -- inbox|archive|sent|drafts|trash|junk|
+                                           -- important|category:* |NULL (user label)
+  parent_id     INTEGER REFERENCES mailboxes(id),
+  sort_order    INTEGER,
+  total_count   INTEGER,
+  unread_count  INTEGER,
+  UNIQUE (account_id, remote_id)
+);
+
+CREATE TABLE messages (
+  id             INTEGER PRIMARY KEY,
+  account_id     TEXT NOT NULL REFERENCES accounts(id),
+  remote_id      TEXT NOT NULL,            -- Gmail message id / JMAP Email id
+  thread_id      TEXT NOT NULL,            -- provider thread id
+  blob_sha256    TEXT,                     -- NULL only when raw_complete = 0
+  raw_complete   INTEGER NOT NULL DEFAULT 1,
+  message_id_hdr TEXT,                     -- Message-ID header (for cross-account stitching)
+  in_reply_to    TEXT,
+  references_json TEXT,                    -- JSON array
+  subject        TEXT,
+  from_addr      TEXT, from_name TEXT,
+  to_json        TEXT, cc_json TEXT, bcc_json TEXT, reply_to_json TEXT,
+  date_utc       INTEGER NOT NULL,         -- Date header, unix seconds
+  received_utc   INTEGER NOT NULL,         -- provider internalDate / receivedAt
+  size           INTEGER,
+  snippet        TEXT,                     -- first ~200 chars of text body
+  text_body      TEXT,                     -- extracted plain text, full (incl. quotes)
+  has_attachments INTEGER NOT NULL DEFAULT 0,
+  is_unread      INTEGER NOT NULL DEFAULT 0,
+  is_flagged     INTEGER NOT NULL DEFAULT 0,
+  is_draft       INTEGER NOT NULL DEFAULT 0,
+  is_answered    INTEGER NOT NULL DEFAULT 0,
+  deleted_at     INTEGER,                  -- set when gone on server
+  indexed_at     INTEGER NOT NULL,
+  UNIQUE (account_id, remote_id)
+);
+CREATE INDEX messages_thread   ON messages(account_id, thread_id);
+CREATE INDEX messages_received ON messages(received_utc DESC);
+CREATE INDEX messages_msgid    ON messages(message_id_hdr);
+
+CREATE TABLE message_mailboxes (
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  mailbox_id INTEGER NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  PRIMARY KEY (message_id, mailbox_id)
+);
+CREATE INDEX mm_mailbox ON message_mailboxes(mailbox_id);
+
+CREATE TABLE attachments (
+  id           INTEGER PRIMARY KEY,
+  message_id   INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  part_path    TEXT NOT NULL,              -- MIME part path, e.g. "1.2"
+  filename     TEXT,
+  content_type TEXT,
+  size         INTEGER,
+  content_id   TEXT,
+  is_inline    INTEGER NOT NULL DEFAULT 0,
+  remote_ref   TEXT                        -- Gmail attachmentId / JMAP blobId (lazy fetch)
+);
+
+CREATE TABLE threads (                     -- maintained at index time, for fast listing
+  account_id    TEXT NOT NULL,
+  thread_id     TEXT NOT NULL,
+  subject       TEXT,
+  first_utc     INTEGER, last_utc INTEGER,
+  message_count INTEGER, unread_count INTEGER,
+  participants_json TEXT,
+  PRIMARY KEY (account_id, thread_id)
+);
+
+-- Full-text search: external-content FTS5 so text is stored once.
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+  subject, from_addr, from_name, to_json, text_body, attachment_names,
+  content='messages', content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2',
+  prefix='2 3'
+);
+-- + the standard insert/update/delete triggers.
+
+CREATE TABLE sync_state (
+  account_id TEXT NOT NULL,
+  resource   TEXT NOT NULL,                -- 'mail' | 'mailboxes' | 'cal:<calendar remote_id>'
+  state      TEXT NOT NULL,                -- Gmail historyId / JMAP state / GCal syncToken
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, resource)
+);
+
+CREATE TABLE backfill_progress (
+  account_id   TEXT PRIMARY KEY,
+  resource     TEXT NOT NULL,
+  cursor       TEXT,                       -- page token / JMAP position
+  state_at_start TEXT NOT NULL,            -- delta state captured before backfill began
+  total_hint   INTEGER, done INTEGER,
+  finished_at  INTEGER
+);
+
+CREATE TABLE outbox (                      -- queued writes (offline or failed)
+  id          INTEGER PRIMARY KEY,
+  account_id  TEXT NOT NULL,
+  kind        TEXT NOT NULL,               -- send|draft|flags|move|trash|event.create|…
+  payload     TEXT NOT NULL,               -- JSON
+  created_at  INTEGER NOT NULL,
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  last_error  TEXT,
+  done_at     INTEGER
+);
+
+CREATE TABLE sync_log (
+  id INTEGER PRIMARY KEY, account_id TEXT, kind TEXT,
+  started_at INTEGER, finished_at INTEGER,
+  added INTEGER, updated INTEGER, removed INTEGER, error TEXT
+);
+
+-- Calendar ---------------------------------------------------------------
+CREATE TABLE calendars (
+  id          INTEGER PRIMARY KEY,
+  account_id  TEXT NOT NULL REFERENCES accounts(id),
+  remote_id   TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  color       TEXT, timezone TEXT,
+  is_primary  INTEGER NOT NULL DEFAULT 0,
+  access_role TEXT,                        -- owner|writer|reader
+  UNIQUE (account_id, remote_id)
+);
+
+CREATE TABLE events (
+  id            INTEGER PRIMARY KEY,
+  calendar_id   INTEGER NOT NULL REFERENCES calendars(id) ON DELETE CASCADE,
+  remote_id     TEXT NOT NULL,
+  uid           TEXT,                      -- iCalendar UID (cross-account dedup)
+  title         TEXT, description TEXT, location TEXT,
+  start_utc     INTEGER, end_utc INTEGER,  -- master occurrence
+  all_day       INTEGER NOT NULL DEFAULT 0,
+  timezone      TEXT,
+  rrule         TEXT,                      -- RFC 5545 RRULE, NULL if single
+  recurrence_id TEXT,                      -- set on exception instances
+  status        TEXT,                      -- confirmed|tentative|cancelled
+  organizer     TEXT, attendees_json TEXT,
+  my_response   TEXT,                      -- accepted|declined|tentative|needs-action
+  raw_json      TEXT NOT NULL,             -- provider object, for fidelity/writes
+  updated_utc   INTEGER, deleted_at INTEGER,
+  UNIQUE (calendar_id, remote_id)
+);
+
+CREATE TABLE event_occurrences (           -- expanded recurrences, ±2 years, rebuilt on change
+  event_id  INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  start_utc INTEGER NOT NULL, end_utc INTEGER NOT NULL,
+  PRIMARY KEY (event_id, start_utc)
+);
+CREATE INDEX occ_start ON event_occurrences(start_utc);
+```
+
+Notes:
+
+- Flags (`is_unread`, `is_flagged`, …) are columns, not mailboxes. Gmail's
+  `UNREAD`/`STARRED` labels and JMAP's `$seen`/`$flagged` keywords are both
+  normalised into them at index time.
+- Gmail system labels (`INBOX`, `SENT`, `DRAFT`, `SPAM`, `TRASH`, `IMPORTANT`,
+  `CATEGORY_*`) become `mailboxes` rows with a `role`. Gmail "archive" =
+  no `INBOX` label, matching JMAP "archive" mailbox semantics closely enough;
+  `emlcal mail archive` does the right thing per provider.
+- `text_body` holds the *full* extracted text (search must find quoted text).
+  `mail read` strips quotes/signatures at display time.
+
+---
+
+## 6. Providers
+
+```go
+type MailProvider interface {
+    Mailboxes(ctx) ([]Mailbox, error)
+
+    // Backfill enumerates every message id (+ labels/flags) from a cursor.
+    Enumerate(ctx, cursor string, limit int) (page []Envelope, next string, err error)
+    // FetchRaw returns raw RFC822 + current labels/flags for a batch of ids.
+    FetchRaw(ctx, ids []string, fn func(RawMessage) error) error
+
+    // Delta since an opaque state. Returns ErrStateExpired when the server
+    // can no longer compute it; caller falls back to Reconcile.
+    Changes(ctx, since string) (*Changes, error)
+
+    SetFlags(ctx, ids []string, set, clear Flags) error
+    SetMailboxes(ctx, ids []string, add, remove []string) error
+    Trash(ctx, ids []string) error
+    CreateDraft(ctx, raw []byte) (id string, err error)
+    Send(ctx, raw []byte, replyToThread string) (id string, err error)
+}
+
+type CalendarProvider interface {
+    Calendars(ctx) ([]Calendar, error)
+    Changes(ctx, calendarID, since string) (*EventChanges, error)   // full list when since==""
+    Create/Update/Delete(ctx, …) (…)
+}
+
+type Pusher interface {                      // optional
+    Watch(ctx, fn func(hint ChangeHint)) error
+}
+```
+
+### 6.1 Gmail (`internal/provider/gmail`)
+
+- Library: `google.golang.org/api/gmail/v1`, `golang.org/x/oauth2/google`.
+- Auth: Desktop OAuth client, loopback redirect (`http://127.0.0.1:<port>`),
+  PKCE. Scopes: `gmail.modify` (covers read, labels, send, trash — not permanent
+  delete) and `calendar`. Consent screen must be **In production** or refresh
+  tokens expire after 7 days. Refreshed tokens are persisted back to
+  `secrets/`.
+- Mailboxes: `users.labels.list`.
+- Enumerate: `users.messages.list` with `includeSpamTrash=true`, `maxResults=500`,
+  page token as cursor. Returns ids + threadIds only.
+- FetchRaw: `users.messages.get?format=raw` in **batch requests** (50 per HTTP
+  call). One response gives `raw` (base64url), `labelIds`, `threadId`,
+  `internalDate`, `historyId`, `sizeEstimate`. Cost 5 units; per-user quota
+  15 000 units/min → ~50 msg/s sustained. Backoff on 429/403 `rateLimitExceeded`.
+- Changes: `users.history.list?startHistoryId=…&historyTypes=messageAdded,
+  messageDeleted,labelAdded,labelRemoved`. Events are coalesced per message id
+  before applying (history is noisy and can repeat). New state = the largest
+  `historyId` seen. HTTP 404 → `ErrStateExpired`.
+- Reconcile (fallback): re-enumerate all ids (cheap: 200 pages for 100k
+  messages). New ids → FetchRaw. Missing ids → `deleted_at`. Then refresh
+  labels for everything via `format=minimal` batches (100k msgs ≈ 35 min;
+  acceptable for a rare event). State = current `profile.historyId`.
+- Push: not used (requires Cloud Pub/Sub). Poll `history.list` every 60 s
+  (2 units per call).
+- Send: `users.messages.send` with raw RFC822 built locally, `threadId` set for
+  replies. Drafts via `users.drafts.create`.
+
+### 6.2 Fastmail JMAP (`internal/provider/jmap`)
+
+- Library: `git.sr.ht/~rockorager/go-jmap` (used by aerc) or a thin hand-rolled
+  client — JMAP is plain JSON; the hand-rolled path is ~500 lines and avoids
+  a dependency with a small bus factor. Decide during phase 1.
+- Auth: API token from Fastmail settings (scopes: Mail, Calendars),
+  `Authorization: Bearer`. Session at `https://api.fastmail.com/jmap/session`
+  → `apiUrl`, `downloadUrl`, `eventSourceUrl`, account ids, limits
+  (`maxObjectsInGet`, `maxCallsInRequest`, `maxConcurrentRequests`).
+- Mailboxes: `Mailbox/get` (roles are native).
+- Enumerate: `Email/query` sorted by `receivedAt` asc, `position` as cursor,
+  `limit` = min(500, server limit). Then `Email/get` with
+  `properties: [blobId, threadId, mailboxIds, keywords, receivedAt, size]`
+  chained in the same request via `#ids` back-reference.
+- FetchRaw: the Email object's own `blobId` **is** the raw RFC822. Download via
+  `downloadUrl` template (`{accountId}`, `{blobId}`, `{type}`, `{name}`),
+  8 concurrent workers.
+- Changes: `Email/changes` + `Mailbox/changes` with `sinceState`, loop on
+  `hasMoreChanges`. `updated` ids → `Email/get` with `mailboxIds, keywords`
+  only. `cannotCalculateChanges` → `ErrStateExpired` → reconcile via full
+  `Email/query` id diff (fast; Fastmail is quick).
+- Push: EventSource at `eventSourceUrl?types=Email,Mailbox,CalendarEvent&
+  closeafter=no&ping=300`. A `StateChange` with a new state triggers a delta
+  immediately. Reconnect with backoff.
+- Send: `Email/import` (drafts mailbox) → `EmailSubmission/set`. Or
+  `Email/set` create + submission in one request.
+
+### 6.3 Google Calendar (`internal/provider/gcal`)
+
+- `calendarList.list` → calendars. Per calendar, `events.list` with
+  `singleEvents=false` (masters + exception instances), `showDeleted=true`,
+  `syncToken` persisted in `sync_state` as `cal:<id>`. 410 GONE → full re-list.
+- Recurrence expansion happens locally (`teambition/rrule-go`) into
+  `event_occurrences` for now−1y … now+2y; refreshed when the master changes
+  and by a nightly job that extends the window.
+- Poll every 120 s. Writes via `events.insert/patch/delete`; `raw_json` holds
+  the last server object so patches are minimal.
+
+### 6.4 Fastmail Calendar (JMAP Calendars)
+
+- `urn:ietf:params:jmap:calendars`: `Calendar/get`, `CalendarEvent/query` +
+  `/get` + `/changes` (JSCalendar objects, RFC 8984). Same delta engine as
+  mail; same push stream.
+- Risk: JMAP Calendars is newer than the mail spec. Fallback is CalDAV at
+  `caldav.fastmail.com` via `emersion/go-webdav` + `go-ical` — the internal
+  event model is provider-neutral so swapping is contained.
+
+---
+
+## 7. Sync engine
+
+Per account, run in this order; each step is idempotent and resumable.
+
+### 7.1 Backfill (first run, or after `--full`)
+
+```
+1. capture state S0 = provider current delta state       (before listing!)
+2. store backfill_progress{cursor: "", state_at_start: S0}
+3. loop:
+     page, next = Enumerate(cursor)
+     for ids not yet in messages (or raw_complete=0): FetchRaw in worker pool
+       → blob.Put(raw) → mime.Parse → upsert messages/mailboxes/attachments/fts
+       (transaction per ~100 messages)
+     cursor = next; persist progress
+   until next == ""
+4. mark backfill finished; sync_state.mail = S0
+5. run a normal delta from S0 to catch what changed during the backfill
+```
+
+Because the state token is captured *before* enumeration, nothing that happens
+during a multi-hour backfill is lost. Restarting mid-way resumes from the
+persisted cursor and skips ids that already have a blob.
+
+Gmail throughput: ~50 msg/s → 100k messages ≈ 35 min, 500k ≈ 3 h.
+Fastmail: typically faster; bounded by blob download bandwidth.
+
+### 7.2 Delta (every tick)
+
+```
+changes = Changes(sync_state.mail)
+  ErrStateExpired → Reconcile(); return
+coalesce by message id (last event wins; add+delete → delete)
+added   → FetchRaw → index
+updated → patch flags/mailboxes only (no re-download)
+removed → deleted_at = now, remove from message_mailboxes/fts
+sync_state.mail = changes.NewState      (same transaction as the last apply)
+```
+
+State is advanced only after everything up to it is applied, so a crash
+replays rather than skips.
+
+### 7.3 Reconcile
+
+Full id enumeration diffed against the local set; see 6.1 / 6.2. Logged loudly
+in `sync_log` because it's slow and should be rare.
+
+### 7.4 Outbox
+
+Write commands construct an outbox row *first*, then try to apply it
+immediately. Success → `done_at`. Network failure → row stays, the sync loop
+retries with exponential backoff, and `emlcal status` shows pending items.
+This is what makes "compose offline, send when back" work, and it makes every
+write crash-safe. Kinds: `send`, `draft`, `flags`, `mailboxes`, `trash`,
+`event.create|update|delete`.
+
+### 7.5 Scheduling
+
+- `emlcal sync` — one pass over all (or `--account`) accounts, then exit.
+- `emlcal sync --watch` — long-running: JMAP push streams + Gmail/GCal polling
+  timers + outbox retry. This is the systemd user service.
+- `emlcal service install` writes `~/.config/systemd/user/emlcal.service`
+  (`Restart=always`, `After=network-online.target`) and enables it.
+  A `--timer` variant installs a `.timer` calling `emlcal sync` every 2 min
+  for people who don't want a daemon.
+
+### 7.6 Concurrency and locking
+
+- One writer per account: `flock` on `sync.<account>.lock`. A manual
+  `emlcal sync` while the daemon runs prints "daemon active — nudged" and
+  sends `SIGUSR1` to trigger an immediate pass.
+- SQLite WAL + `busy_timeout` handles the two writers that do exist (sync
+  process, CLI write commands patching optimistically). Readers never block.
+- Worker pools: Gmail 4 concurrent batch requests; JMAP 8 concurrent blob
+  downloads. All provider calls go through a per-account rate limiter with
+  retry-after awareness.
+
+---
+
+## 8. MIME parsing and text extraction (`internal/mime`)
+
+Library: `github.com/emersion/go-message` (+ `mail` sub-package), stdlib
+`mime/quotedprintable`, `golang.org/x/text/encoding` for charset soup,
+`github.com/k3a/html2text` for HTML.
+
+At index time, for each raw message:
+
+1. Walk the MIME tree; record every leaf as a part with its path (`1.2.1`).
+2. Choose the body: first `text/plain` leaf not marked attachment; else the
+   first `text/html` → html2text (links kept as `text (url)`, tables kept as
+   rows, scripts/styles dropped).
+3. Decode charset (fall back to windows-1252 on failure — real-world mail),
+   normalise line endings, collapse >2 blank lines.
+4. Attachments: any part with `Content-Disposition: attachment`, or a non-text
+   part with a filename, or an inline image. Store metadata; content is read
+   from the blob on demand (`part_path` → re-walk).
+5. Headers: `Message-ID`, `In-Reply-To`, `References`, `List-Id`,
+   `Auto-Submitted`, `Precedence` (the latter three are used by
+   `mail list --no-bulk`).
+
+At display time (`mail read`, default):
+
+- Strip quoted replies: lines starting with `>`, blocks after
+  `On … wrote:` / `Op … schreef:` / `-----Original Message-----` /
+  Outlook `From: … Sent: …` headers, `Le … a écrit :`, `Am … schrieb …`.
+- Strip signature after `-- \n` or a trailing block matching common patterns.
+- `--full` disables stripping; `--html` returns the HTML part; `--raw` the
+  RFC822.
+
+Nothing here mutates stored data, so heuristics can improve without reindexing.
+
+---
+
+## 9. CLI surface
+
+Binary: `emlcal`. Framework: `spf13/cobra` (good `--help`, completions for
+zsh/bash/fish).
+
+### 9.1 Output contract
+
+- `--format json|table|plain` (`-o`). Default: `table` on a TTY, `json` when
+  piped — so agents get JSON without asking; `EMLCAL_FORMAT=json` to force.
+- JSON is always an object for single items, an array for lists, never
+  pretty-printed unless `--pretty`. Timestamps are RFC 3339 in local time
+  with offset, plus `_utc` epoch fields.
+- Errors: JSON `{"error": {"code": "...", "message": "..."}}` on stderr;
+  exit codes: `0` ok, `1` generic, `2` usage, `3` not found, `4` offline and
+  operation needs network, `5` provider error, `6` queued in outbox.
+- IDs are stable and opaque: `<account>:<remote_id>` for messages
+  (`work:18f3a2b9c1d4e5f6`), `<account>:t:<thread_id>` for threads,
+  `<account>:c:<calendar>:<event_id>` for events. Every list output includes
+  the id; every command that takes an id accepts what a list printed.
+- `--limit` defaults to 50; `--since 2d|12h|2026-08-01` and `--until` on every
+  list; `--account` is repeatable and defaults to all.
+
+### 9.2 Commands
+
+```
+emlcal account add gmail --name work            OAuth in browser, loopback
+emlcal account add fastmail --name personal     prompts for API token
+emlcal account list | remove <name>
+
+emlcal sync [--account A] [--full] [--watch]
+emlcal status                                   per account: last sync, counts,
+                                                backfill %, outbox, daemon state
+emlcal doctor                                   tokens valid? db integrity? disk?
+
+MAIL — read (safe to allowlist)
+emlcal mail mailboxes [--account A]
+emlcal mail list [--mailbox inbox] [--unread] [--flagged] [--from X] [--to X]
+                 [--since 2d] [--no-bulk] [--thread] [--limit N]
+emlcal mail search "<fts query>" [same filters]     FTS5 syntax: AND OR NOT "phrase" col:term
+emlcal mail read <id> [--full] [--html] [--raw] [--headers]
+emlcal mail thread <id>                              all messages, oldest first, stripped bodies
+emlcal mail attachment list <id>
+emlcal mail attachment get <id> <part|filename> [-o path]   (fetches remote if raw_complete=0)
+
+MAIL — write (gate behind confirmation)
+emlcal mail mark <id>... --read|--unread|--flag|--unflag
+emlcal mail move <id>... --to <mailbox>
+emlcal mail archive <id>...
+emlcal mail trash <id>...
+emlcal mail draft  --account A --to .. [--cc ..] --subject .. (--body .. | --body-file f)
+                   [--reply <id> [--all]] [--attach f]         → draft id
+emlcal mail send   --draft <id>  |  (same flags as draft) [--dry-run]
+emlcal mail reply  <id> (--body .. | --body-file f) [--all] [--dry-run]
+
+CALENDAR — read
+emlcal cal calendars [--account A]
+emlcal cal agenda [--days 7 | --from .. --to ..] [--calendar C]
+emlcal cal show <id>
+emlcal cal free --from .. --to .. [--duration 30m] [--hours 09:00-18:00]
+
+CALENDAR — write
+emlcal cal create --title .. --start .. --end .. [--calendar C] [--attendees ..]
+                  [--location ..] [--description ..] [--dry-run]
+emlcal cal update <id> [same flags]
+emlcal cal delete <id>
+emlcal cal respond <id> --accept|--decline|--tentative
+
+MAINTENANCE
+emlcal outbox list | retry | drop <id>
+emlcal reindex [--account A]                  rebuild index from blobs
+emlcal gc [--purge-deleted]                   remove blobs no row references
+emlcal export --mbox f | --maildir dir [--account A]
+emlcal service install [--timer] | uninstall
+emlcal skill                                  prints SKILL.md for agents
+emlcal completion zsh|bash|fish
+```
+
+`--dry-run` on every write prints exactly what would be sent (full RFC822 for
+mail) and exits 0 without touching the outbox.
+
+---
+
+## 10. Agent integration
+
+- `emlcal skill` emits a `SKILL.md` describing the command surface, id format,
+  the JSON shapes, and guidance ("use `mail read` before replying", "prefer
+  `--since` to bound results", "never `send` without `--dry-run` first unless
+  told"). Install into `~/.claude/skills/emlcal/` so the agent discovers it.
+- Suggested `~/.claude/settings.json` rules, mapping directly onto the
+  read/write split:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(emlcal mail list*)", "Bash(emlcal mail search*)",
+      "Bash(emlcal mail read*)", "Bash(emlcal mail thread*)",
+      "Bash(emlcal mail mailboxes*)", "Bash(emlcal mail attachment list*)",
+      "Bash(emlcal cal agenda*)", "Bash(emlcal cal show*)",
+      "Bash(emlcal cal free*)", "Bash(emlcal cal calendars*)",
+      "Bash(emlcal status*)", "Bash(emlcal sync)"
+    ],
+    "ask": [
+      "Bash(emlcal mail send*)", "Bash(emlcal mail reply*)",
+      "Bash(emlcal mail trash*)", "Bash(emlcal mail move*)",
+      "Bash(emlcal cal create*)", "Bash(emlcal cal update*)",
+      "Bash(emlcal cal delete*)"
+    ]
+  }
+}
+```
+
+- Output is kept token-cheap by default: `mail list` returns id, date, from,
+  subject, snippet, flags, mailboxes — not bodies. `mail read` returns the
+  stripped text body. `--full`/`--html` are opt-in.
+- For local models later: the same `internal/store` package can back an
+  embeddings table (`sqlite-vec`) for semantic search. Out of scope now, but
+  the schema doesn't fight it.
+
+---
+
+## 11. Configuration and secrets
+
+```toml
+# ~/.config/emlcal/config.toml
+[general]
+timezone       = "Europe/Amsterdam"     # default: system
+default_format = "auto"                 # auto | json | table
+raw_max_size   = "0"                    # global default, per-account override
+
+[[accounts]]
+name     = "work"
+provider = "gmail"
+email    = "lennert@example.com"
+poll     = "60s"
+include_spam_trash = true
+
+[[accounts]]
+name     = "personal"
+provider = "fastmail"
+email    = "lennert@fastmail.example"
+push     = true
+calendars = ["*"]                       # or explicit list of names
+```
+
+Secrets are never in `config.toml`:
+
+- Default: `~/.config/emlcal/secrets/<name>.<provider>.json`, mode 0600,
+  directory 0700.
+- Optional: `secret_backend = "libsecret"` stores/reads via the freedesktop
+  Secret Service (`secret-tool` equivalent, using `zalando/go-keyring`).
+  Useful on Omarchy if a keyring is unlocked at login; otherwise the file
+  backend is simpler and equally protected by full-disk encryption.
+- Google client id/secret for the Desktop OAuth client are embedded in the
+  binary (they are not secret for installed apps per Google's own docs) but
+  can be overridden via config for people using their own GCP project.
+
+---
+
+## 12. Offline behaviour
+
+| Operation | Offline |
+|---|---|
+| `mail list/search/read/thread`, `cal agenda/show/free` | full function, from index |
+| `mail attachment get` | works if `raw_complete=1` (default policy: always) |
+| `mail mark/move/archive/trash`, `cal create/update/delete` | applied to index optimistically, queued in outbox, exit 6 |
+| `mail send/reply` | queued in outbox, exit 6; `status` shows pending |
+| `sync` | exit 4 immediately, no error spam |
+
+The daemon detects connectivity by provider failures, not by probing the
+network, and backs off (5 s → 5 min) while offline.
+
+---
+
+## 13. Code layout and dependencies
+
+```
+cmd/emlcal/main.go
+internal/
+  cli/            cobra commands, flag parsing, output selection
+  output/         json / table / plain renderers
+  config/         TOML loading, validation, secret backends
+  model/          Account, Mailbox, Message, Event, ids
+  store/          SQLite open/migrate, typed queries (sqlc-generated), FTS helpers
+  blob/           content-addressed zstd store
+  mime/           parse, text extraction, quote/signature stripping, RFC822 builder
+  sync/           engine: backfill, delta, reconcile, outbox, scheduler, watch
+  provider/       interfaces + registry
+    gmail/  gcal/  jmap/ (mail + calendar)  oauth/
+  calendar/       recurrence expansion, free/busy, timezone helpers
+  skill/          embedded SKILL.md template
+```
+
+| Concern | Choice | Why |
+|---|---|---|
+| Go version | 1.23+ | range-over-func iterators, stable `slices`/`maps` |
+| SQLite | `modernc.org/sqlite` | pure Go → static binary, FTS5 included, trivial cross-compile for Omarchy; swap to `mattn/go-sqlite3` behind a build tag if FTS perf ever matters |
+| Queries | `sqlc` | typed, checked at build time, no ORM |
+| Gmail / GCal | `google.golang.org/api` | first-party, batch support, retry |
+| OAuth | `golang.org/x/oauth2` | token refresh, loopback flow |
+| JMAP | hand-rolled (or `go-jmap`) | JSON in/out; see 6.2 |
+| MIME | `emersion/go-message` | robust, widely used (aerc, hydroxide) |
+| HTML→text | `k3a/html2text` | small, no DOM dependency |
+| Compression | `klauspost/compress/zstd` | pure Go, fast |
+| Recurrence | `teambition/rrule-go` | RFC 5545 |
+| CLI | `spf13/cobra` | completions, help, ubiquitous |
+| TUI (later) | `charmbracelet/bubbletea` | same language, same store package |
+
+Tests: provider clients tested against recorded fixtures (`httptest` +
+golden JSON); MIME tested with a corpus of nasty real-world messages; sync
+engine tested with a fake provider that can inject `ErrStateExpired`,
+partial pages, and crashes mid-batch.
+
+---
+
+## 14. Roadmap
+
+| Phase | Deliverable | Proves |
+|---|---|---|
+| 1 | config, store, blob, mime, `mail list/search/read/thread`, **Fastmail mail backfill + delta** | the whole pipeline end-to-end, no OAuth needed |
+| 2 | Gmail mail backfill + delta + reconcile | rate limiting, history quirks, batch API |
+| 3 | writes + outbox (both providers), `--dry-run`, `mail draft/send/reply` | crash-safe writes, offline queue |
+| 4 | `sync --watch`, JMAP push, systemd install, `status`, `doctor` | always-on freshness |
+| 5 | calendars: GCal + JMAP Calendars, recurrence expansion, `cal *` | second resource type on the same engine |
+| 6 | `skill`, `reindex`, `gc`, `export`, completions, docs | agent polish + archive guarantees |
+| later | bubbletea TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
+
+Phase 1 is deliberately Fastmail-first: an API token, no consent screens, and
+push support make it the fastest path to a real archive you can query.
+
+---
+
+## 15. Decisions to verify
+
+Each of these is a choice I made that you might want to reverse. None are hard
+to change now; several are hard to change after the first backfill.
+
+1. **Raw RFC 822 on disk as the canonical archive**, SQLite as a derived,
+   rebuildable index. Alternative: everything in SQLite (one file, simpler
+   backup, but a multi-GB DB with blobs). *Hard to change after backfill.*
+2. **Full attachments by default** (`raw_max_size = 0`). Matches the
+   offline-archive goal; costs disk (estimate: 5–30 GB for 10+ years across
+   several accounts). *Hard to change after backfill (would need re-fetch).*
+3. **Content-addressed blobs, never deleted on server-side delete.** Server
+   deletions mark rows, blobs stay until an explicit `gc --purge-deleted`.
+4. **No Maildir.** notmuch/aerc compatibility via `export --maildir` only.
+   Alternative: also write a Maildir during sync (doubles disk, adds little).
+5. **Vendor APIs only** (Gmail API, JMAP), no IMAP/CalDAV. Provider interface
+   keeps the door open.
+6. **JMAP Calendars for Fastmail**, CalDAV as documented fallback.
+7. **Gmail: polling every 60 s**, no Pub/Sub push.
+8. **Secrets in 0600 files by default**, libsecret optional.
+9. **Auto-JSON when stdout is not a TTY.** Convenient for agents; slightly
+   surprising for shell pipelines that expect text (`| grep`). `-o plain`
+   exists for that.
+10. **`text_body` stored in full**, quote-stripping at display time.
+11. **Go + modernc SQLite + cobra + sqlc.**
+12. **Phase order: Fastmail before Gmail.**
+
+Open questions for you:
+
+- How many accounts and roughly how many messages / GB in the largest? (Sizes
+  the worker pools and the disk estimate.)
+- Do you want Spam and Trash in the archive (`include_spam_trash = true` is my
+  default: an archive should be complete)?
+- Should `mail send` always require an explicit `--account`, or infer from
+  `--reply <id>` / a configured default? (I lean: infer for replies, require
+  otherwise.)
+- Any language other than English/Dutch whose quote-header patterns should be
+  in the stripper from day one?

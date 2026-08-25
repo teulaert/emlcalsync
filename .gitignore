@@ -1,0 +1,9 @@
+/emlcal
+/bin/
+/dist/
+*.db
+*.db-wal
+*.db-shm
+*.eml.zst
+.env
+coverage.out
