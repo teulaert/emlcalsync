@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -52,8 +54,9 @@ type changeScript struct {
 
 // capturedCall records one method invocation for assertions.
 type capturedCall struct {
-	Name string
-	Args map[string]any
+	Name  string
+	Args  map[string]any
+	Using []string
 }
 
 type fakeServer struct {
@@ -91,10 +94,31 @@ type fakeServer struct {
 	// failAPI holds HTTP statuses returned by /jmap/api before it starts
 	// answering normally.
 	failAPI []int
+	// failMethod maps a method name to the HTTP statuses /jmap/api returns for
+	// the next requests that contain that method, so one call in a flow can be
+	// made to fail without disturbing the others.
+	failMethod map[string][]int
+	// attempts counts how often each method name reached the server, failed
+	// requests included. Unlike calls it is not reset by resetCalls.
+	attempts map[string]int
+
+	// submissionPrimary overrides primaryAccounts[urn:...:submission].
+	submissionPrimary string
+	// calendarURN overrides the capability URN calendars are advertised under.
+	// When set, urn:ietf:params:jmap:calendars is left out of the session
+	// entirely, as a server with a vendor/legacy spelling would. The "-"
+	// sentinel advertises no calendars capability at all.
+	calendarURN string
+	// calendarPrimary overrides primaryAccounts[<calendar URN>]; "-" drops the
+	// entry, leaving only the account's own accountCapabilities.
+	calendarPrimary string
 
 	// sseSubs are the currently connected EventSource clients.
 	sseSubs  []chan string
 	sseConns int
+	// failSSE holds HTTP statuses /jmap/event returns before it starts
+	// streaming normally.
+	failSSE []int
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
@@ -111,6 +135,8 @@ func newFakeServer(t *testing.T) *fakeServer {
 		eventChanges:   map[string]changeScript{},
 		events:         map[string]map[string]any{},
 		eventState:     "cal-0",
+		failMethod:     map[string][]int{},
+		attempts:       map[string]int{},
 	}
 	f.mailboxes = []map[string]any{
 		{"id": "mb-inbox", "name": "Inbox", "parentId": nil, "role": "inbox", "sortOrder": 1, "totalEmails": 3, "unreadEmails": 1},
@@ -178,6 +204,15 @@ func (f *fakeServer) addEmail(e *fakeEmail, raw []byte) {
 	})
 }
 
+// deleteEmail removes a message from the fake store, as a concurrent delete
+// during an enumeration would.
+func (f *fakeServer) deleteEmail(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.emails, id)
+	f.order = slices.DeleteFunc(f.order, func(v string) bool { return v == id })
+}
+
 func (f *fakeServer) email(id string) *fakeEmail {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -194,6 +229,26 @@ func (f *fakeServer) captured(name string) []map[string]any {
 		}
 	}
 	return out
+}
+
+// attemptsFor reports how many requests carrying this method name reached the
+// server, including ones the fake answered with an HTTP error.
+func (f *fakeServer) attemptsFor(name string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts[name]
+}
+
+// capturedUsing returns the "using" list sent with the first call of a method.
+func (f *fakeServer) capturedUsing(name string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.calls {
+		if c.Name == name {
+			return c.Using
+		}
+	}
+	return nil
 }
 
 func (f *fakeServer) resetCalls() {
@@ -248,33 +303,57 @@ func (f *fakeServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.sessionHits++
 	state := f.sessionState
+	calURN := f.calendarURN
+	calAcct := f.calendarPrimary
+	submissionAcct := f.submissionPrimary
 	f.mu.Unlock()
+	if calURN == "" {
+		calURN = CapCalendars
+	}
+	if submissionAcct == "" {
+		submissionAcct = testAccount
+	}
+	// The calendars account is the same one; only the URN it hangs off varies.
+	if calAcct == "" {
+		calAcct = testAccount
+	}
+	capabilities := map[string]any{
+		CapCore: map[string]any{
+			"maxSizeUpload":         50 << 20,
+			"maxConcurrentUpload":   4,
+			"maxSizeRequest":        10 << 20,
+			"maxConcurrentRequests": 4,
+			"maxCallsInRequest":     16,
+			"maxObjectsInGet":       50,
+			"maxObjectsInSet":       20,
+			"collationAlgorithms":   []string{},
+		},
+		CapMail:       map[string]any{},
+		CapSubmission: map[string]any{},
+	}
+	acctCapabilities := map[string]any{
+		CapMail:       map[string]any{},
+		CapSubmission: map[string]any{},
+	}
+	if calURN != "-" {
+		capabilities[calURN] = map[string]any{}
+		acctCapabilities[calURN] = map[string]any{}
+	}
 
 	base := f.srv.URL
 	writeJSON(w, map[string]any{
-		"capabilities": map[string]any{
-			CapCore: map[string]any{
-				"maxSizeUpload":         50 << 20,
-				"maxConcurrentUpload":   4,
-				"maxSizeRequest":        10 << 20,
-				"maxConcurrentRequests": 4,
-				"maxCallsInRequest":     16,
-				"maxObjectsInGet":       50,
-				"maxObjectsInSet":       20,
-				"collationAlgorithms":   []string{},
-			},
-			CapMail:       map[string]any{},
-			CapSubmission: map[string]any{},
-			CapCalendars:  map[string]any{},
-		},
+		"capabilities": capabilities,
 		"accounts": map[string]any{
-			testAccount: map[string]any{"name": testEmail, "isPersonal": true, "isReadOnly": false},
+			testAccount: map[string]any{
+				"name": testEmail, "isPersonal": true, "isReadOnly": false,
+				"accountCapabilities": acctCapabilities,
+			},
 		},
-		"primaryAccounts": map[string]any{
+		"primaryAccounts": primaryAccounts(map[string]any{
 			CapMail:       testAccount,
-			CapSubmission: testAccount,
-			CapCalendars:  testAccount,
-		},
+			CapSubmission: submissionAcct,
+			calURN:        calAcct,
+		}),
 		"username":       testEmail,
 		"apiUrl":         base + "/jmap/api",
 		"downloadUrl":    base + "/jmap/download/{accountId}/{blobId}/{name}?type={type}",
@@ -282,6 +361,19 @@ func (f *fakeServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		"eventSourceUrl": base + "/jmap/event?types={types}&closeafter={closeafter}&ping={ping}",
 		"state":          state,
 	})
+}
+
+// primaryAccounts drops entries whose account id is the "-" sentinel, so a
+// test can model a session that does not advertise a capability at all.
+func primaryAccounts(m map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range m {
+		if v == "-" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func (f *fakeServer) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -321,6 +413,16 @@ func (f *fakeServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeServer) handleEvent(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	if len(f.failSSE) > 0 {
+		status := f.failSSE[0]
+		f.failSSE = f.failSSE[1:]
+		f.mu.Unlock()
+		http.Error(w, "no", status)
+		return
+	}
+	f.mu.Unlock()
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "no flush", http.StatusInternalServerError)
@@ -364,12 +466,43 @@ func (f *fakeServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 	sessionState := f.sessionState
 	f.mu.Unlock()
 
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, `{"type":"urn:ietf:params:jmap:error:notJSON"}`, http.StatusBadRequest)
+		return
+	}
 	var req struct {
 		Using       []string          `json:"using"`
 		MethodCalls []json.RawMessage `json:"methodCalls"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, `{"type":"urn:ietf:params:jmap:error:notJSON"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Count every method that reached the server and apply any scripted
+	// per-method HTTP failure before doing any work.
+	f.mu.Lock()
+	failStatus := 0
+	for _, mc := range req.MethodCalls {
+		var trip []json.RawMessage
+		if json.Unmarshal(mc, &trip) != nil || len(trip) == 0 {
+			continue
+		}
+		var name string
+		json.Unmarshal(trip[0], &name)
+		f.attempts[name]++
+		if failStatus == 0 {
+			if q := f.failMethod[name]; len(q) > 0 {
+				failStatus = q[0]
+				f.failMethod[name] = q[1:]
+			}
+		}
+	}
+	f.mu.Unlock()
+	if failStatus != 0 {
+		w.Header().Set("Retry-After", "0")
+		http.Error(w, "temporary", failStatus)
 		return
 	}
 
@@ -409,10 +542,12 @@ func (f *fakeServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 
 		f.mu.Lock()
-		f.calls = append(f.calls, capturedCall{Name: name, Args: deepCopyArgs(args)})
+		f.calls = append(f.calls, capturedCall{
+			Name: name, Args: deepCopyArgs(args), Using: slices.Clone(req.Using),
+		})
 		f.mu.Unlock()
 
-		rname, rargs := f.dispatch(name, args)
+		rname, rargs := f.dispatch(name, args, req.Using)
 		results = append(results, fakeResult{rname, rargs, id})
 	}
 
@@ -473,9 +608,22 @@ func methodErrorArgs(typ, desc string) map[string]any {
 // ---------------------------------------------------------------------------
 // Method dispatch
 
-func (f *fakeServer) dispatch(name string, args map[string]any) (string, map[string]any) {
+func (f *fakeServer) dispatch(name string, args map[string]any, using []string) (string, map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	// RFC 8620 §3.2: a method whose capability the request did not claim in
+	// "using" is an unknownMethod.
+	if strings.HasPrefix(name, "Calendar") {
+		urn := f.calendarURN
+		if urn == "" {
+			urn = CapCalendars
+		}
+		if !slices.Contains(using, urn) {
+			return "error", methodErrorArgs("unknownMethod",
+				name+" needs "+urn+" in using")
+		}
+	}
 
 	switch name {
 	case "Mailbox/get":
@@ -524,6 +672,24 @@ func (f *fakeServer) dispatch(name string, args map[string]any) (string, map[str
 	case "Email/query":
 		position := argInt(args, "position", 0)
 		limit := argInt(args, "limit", 50)
+		if anchor, ok := args["anchor"].(string); ok && anchor != "" {
+			// RFC 8620 §5.5: the anchor's index plus anchorOffset replaces
+			// position, and a missing anchor is an "anchorNotFound" error.
+			idx := -1
+			for i, id := range f.order {
+				if id == anchor {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				return "error", methodErrorArgs("anchorNotFound", anchor)
+			}
+			position = idx + argInt(args, "anchorOffset", 0)
+			if position < 0 {
+				position = 0
+			}
+		}
 		ids := []string{}
 		for i := position; i < len(f.order) && len(ids) < limit; i++ {
 			ids = append(ids, f.order[i])
@@ -640,6 +806,12 @@ func (f *fakeServer) dispatch(name string, args map[string]any) (string, map[str
 func (f *fakeServer) changes(name string, args map[string]any, scripts map[string]changeScript, current string) (string, map[string]any) {
 	since, _ := args["sinceState"].(string)
 	sc, ok := scripts[since]
+	if !ok && strings.HasPrefix(since, "spin-") {
+		// A server that always has more changes and always advances its state:
+		// the client must give up rather than loop forever.
+		n, _ := strconv.Atoi(strings.TrimPrefix(since, "spin-"))
+		sc, ok = changeScript{NewState: fmt.Sprintf("spin-%d", n+1), HasMore: true}, true
+	}
 	if !ok {
 		return name, map[string]any{
 			"accountId": testAccount, "oldState": since, "newState": current,

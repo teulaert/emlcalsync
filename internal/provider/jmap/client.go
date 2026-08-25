@@ -256,6 +256,63 @@ func (c *Client) AccountEmail() string {
 	return c.email
 }
 
+// CalendarCapability resolves the capability URN this server publishes
+// calendars under, together with the primary account id behind it.
+//
+// draft-ietf-jmap-calendars is not an RFC yet, so a server may still ship its
+// calendar support under a vendor or legacy URN — Fastmail's own
+// "https://www.fastmail.com/dev/calendars" predates the draft's spelling. The
+// standard URN wins when present; otherwise any capability whose URN ends in
+// ":calendars" is accepted, preferring one that names a primary account and
+// falling back to an account that lists it among its accountCapabilities.
+//
+// The URN this returns must also be the one sent in "using" for calendar
+// requests: a server will reject method calls for a capability the request did
+// not claim.
+func (c *Client) CalendarCapability(ctx context.Context) (urn, accountID string, err error) {
+	s, err := c.Session(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	if id := s.PrimaryAccounts[CapCalendars]; id != "" {
+		return CapCalendars, id, nil
+	}
+	for _, u := range sortedKeys(s.PrimaryAccounts) {
+		if u == CapCalendars || !isCalendarURN(u) {
+			continue
+		}
+		if id := s.PrimaryAccounts[u]; id != "" {
+			c.log.Info("jmap: using a non-standard calendars capability", "urn", u, "account", id)
+			return u, id, nil
+		}
+	}
+	// No primary account for any calendars URN: fall back to an account that
+	// advertises one among its own capabilities.
+	for _, u := range sortedKeys(s.Capabilities) {
+		if !isCalendarURN(u) {
+			continue
+		}
+		for _, acct := range sortedKeys(s.Accounts) {
+			if _, ok := s.Accounts[acct].AccountCapabilities[u]; ok {
+				c.log.Info("jmap: using a non-standard calendars capability",
+					"urn", u, "account", acct, "via", "accountCapabilities")
+				return u, acct, nil
+			}
+		}
+	}
+	return "", "", fmt.Errorf("jmap: no primary account for %s (token missing that scope?)", CapCalendars)
+}
+
+// isCalendarURN reports whether a capability URN is a calendars capability,
+// standard or vendor-specific. Vendor spellings are both URN- and URL-shaped
+// (Fastmail publishes "https://www.fastmail.com/dev/calendars"), so the last
+// component is what is matched, after ':' or '/'.
+func isCalendarURN(urn string) bool {
+	return urn == CapCalendars ||
+		strings.HasSuffix(urn, ":calendars") ||
+		strings.HasSuffix(urn, "/calendars")
+}
+
 // PrimaryAccount returns the primary account id for a capability URN.
 func (c *Client) PrimaryAccount(ctx context.Context, capability string) (string, error) {
 	s, err := c.Session(ctx)
@@ -381,8 +438,14 @@ func IsMethodError(err error, typ string) bool {
 	return errors.As(err, &me) && me.Type == typ
 }
 
-// AuthError is returned for HTTP 401/403. It is permanent: the token is
-// invalid or lacks the required scope.
+// AuthError is returned for HTTP 401 only. It is permanent: the credential is
+// not accepted at all, so no amount of retrying or reconnecting will help.
+//
+// 403 deliberately does not land here: it means "authenticated, but not
+// allowed to do this", which is a per-request condition (one calendar the
+// token cannot see, one mailbox it may not write) rather than a dead token. It
+// surfaces as a *RequestError so a single forbidden call cannot tear down a
+// long-lived Watch.
 type AuthError struct {
 	Status int
 	Body   string
@@ -418,6 +481,16 @@ func (e *RequestError) Error() string {
 // first ["error", ...] method response so callers can inspect partial results
 // when they care.
 func (c *Client) Request(ctx context.Context, using []string, calls []Invocation) (*Response, error) {
+	return c.request(ctx, using, calls, true)
+}
+
+// RequestNoRetry is Request for a batch that must not be retried: a
+// non-idempotent write whose effect a retry could duplicate. See doOnce.
+func (c *Client) RequestNoRetry(ctx context.Context, using []string, calls []Invocation) (*Response, error) {
+	return c.request(ctx, using, calls, false)
+}
+
+func (c *Client) request(ctx context.Context, using []string, calls []Invocation, retry bool) (*Response, error) {
 	if len(calls) == 0 {
 		return nil, errors.New("jmap: Request with no method calls")
 	}
@@ -438,7 +511,7 @@ func (c *Client) Request(ctx context.Context, using []string, calls []Invocation
 		return nil, fmt.Errorf("jmap: encoding request: %w", err)
 	}
 
-	httpResp, err := c.doRetry(ctx, func() (*http.Request, error) {
+	httpResp, err := c.do(ctx, func() (*http.Request, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.APIURL, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
@@ -447,7 +520,7 @@ func (c *Client) Request(ctx context.Context, using []string, calls []Invocation
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 		return req, nil
-	})
+	}, retry)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +552,16 @@ func (c *Client) Request(ctx context.Context, using []string, calls []Invocation
 
 // call is the common single-method convenience wrapper.
 func (c *Client) call(ctx context.Context, using []string, name string, args map[string]any, dst any) error {
-	resp, err := c.Request(ctx, using, []Invocation{{Name: name, Args: args, ID: "0"}})
+	return c.callWith(ctx, using, name, args, dst, true)
+}
+
+// callNoRetry is call for a non-idempotent method. See doOnce.
+func (c *Client) callNoRetry(ctx context.Context, using []string, name string, args map[string]any, dst any) error {
+	return c.callWith(ctx, using, name, args, dst, false)
+}
+
+func (c *Client) callWith(ctx context.Context, using []string, name string, args map[string]any, dst any, retry bool) error {
+	resp, err := c.request(ctx, using, []Invocation{{Name: name, Args: args, ID: "0"}}, retry)
 	if err != nil {
 		return err
 	}
@@ -641,6 +723,33 @@ func (c *Client) setHeaders(req *http.Request) {
 // 429/503/5xx (honouring Retry-After) and transport failures. When retries are
 // exhausted the error wraps model.ErrOffline so provider.IsOffline reports true.
 func (c *Client) doRetry(ctx context.Context, mk func() (*http.Request, error)) (*http.Response, error) {
+	return c.do(ctx, mk, true)
+}
+
+// doOnce runs mk() exactly once. It is for non-idempotent writes (Email/import,
+// EmailSubmission/set): a 5xx or 429 says nothing about whether the server
+// already applied the write, so retrying risks a duplicate import or, worse, a
+// message sent twice. The failure is surfaced instead — transport errors as
+// model.ErrOffline, HTTP errors through checkStatus.
+func (c *Client) doOnce(ctx context.Context, mk func() (*http.Request, error)) (*http.Response, error) {
+	return c.do(ctx, mk, false)
+}
+
+func (c *Client) do(ctx context.Context, mk func() (*http.Request, error), retry bool) (*http.Response, error) {
+	if !retry {
+		req, err := mk()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.hc.Do(req)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, fmt.Errorf("%w: %v", model.ErrOffline, err)
+		}
+		return resp, nil
+	}
 	var (
 		lastErr    error
 		retryAfter time.Duration
@@ -732,7 +841,7 @@ func checkStatus(resp *http.Response) error {
 	}
 	body := readSnippet(resp.Body)
 	switch resp.StatusCode {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
 		return &AuthError{Status: resp.StatusCode, Body: body}
 	case http.StatusNotFound:
 		return fmt.Errorf("%w: HTTP 404: %s", model.ErrNotFound, body)

@@ -329,8 +329,8 @@ func TestRateLimiterBudget(t *testing.T) {
 		f.addMessage(id, "t", []string{"INBOX"}, "b")
 		ids = append(ids, id)
 	}
-	// 100 messages × 5 units = 500 units. With a 250-unit burst and 2500
-	// units/s of refill the fetch cannot finish faster than 100ms.
+	// 100 messages × 20 units = 2000 units. With a 1000-unit burst and 2500
+	// units/s of refill the fetch cannot finish faster than 400ms.
 	m := newMail(t, f, func(o *Options) { o.QuotaUnitsPerSecond = 2500 })
 	start := time.Now()
 	got := collectRaw(t, m, ids)
@@ -651,5 +651,101 @@ func TestFetchEnvelopes(t *testing.T) {
 	}
 	if got[0].ThreadID != "t1" {
 		t.Errorf("ThreadID = %q, want t1", got[0].ThreadID)
+	}
+}
+
+// A 5xx on messages.send does not mean the message was not sent: Gmail may
+// have accepted it and lost the response. Retrying would deliver it twice, so
+// the call must fail after exactly one attempt.
+func TestSendIsNotRetriedOnServerError(t *testing.T) {
+	f := newFakeGmail(t)
+	f.failSendOnce = http.StatusServiceUnavailable
+	m := newMail(t, f, nil)
+
+	id, err := m.Send(context.Background(), []byte("From: a@b\r\n\r\nhi"), "")
+	if err == nil {
+		t.Fatalf("Send returned id %q and no error, want the 503 surfaced", id)
+	}
+	if id != "" {
+		t.Errorf("Send returned id %q on failure, want empty", id)
+	}
+	if errors.Is(err, model.ErrOffline) {
+		t.Errorf("Send error = %v, want a server error, not ErrOffline", err)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.sendCalls != 1 {
+		t.Errorf("the fake received %d messages.send calls, want exactly 1: "+
+			"a retried send duplicates the message", f.sendCalls)
+	}
+}
+
+// The same holds for drafts.create: a retry leaves two drafts behind.
+func TestCreateDraftIsNotRetriedOnServerError(t *testing.T) {
+	f := newFakeGmail(t)
+	f.failDraftOnce = http.StatusTooManyRequests
+	m := newMail(t, f, nil)
+
+	if _, err := m.CreateDraft(context.Background(), []byte("From: a@b\r\n\r\nhi")); err == nil {
+		t.Fatal("CreateDraft succeeded, want the 429 surfaced")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.draftCalls != 1 {
+		t.Errorf("the fake received %d drafts.create calls, want exactly 1", f.draftCalls)
+	}
+}
+
+// Idempotent calls must still be retried; the guard is limited to writes.
+func TestIdempotentCallsStillRetry(t *testing.T) {
+	f := newFakeGmail(t)
+	f.addMessage("m1", "t1", []string{"INBOX"}, "body")
+	f.failOnce["m1"] = http.StatusServiceUnavailable
+	m := newMail(t, f, func(o *Options) { o.FetchMode = FetchIndividual })
+
+	got := collectRaw(t, m, []string{"m1"})
+	if len(got) != 1 {
+		t.Fatalf("fetched %d messages, want 1 after a retried 503", len(got))
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.gets != 2 {
+		t.Errorf("messages.get called %d times, want 2 (one failure, one retry)", f.gets)
+	}
+}
+
+// A transport failure on a non-idempotent write is still reported as offline,
+// so the sync engine backs off wholesale instead of treating it as a hard
+// rejection.
+func TestSendTransportFailureIsOffline(t *testing.T) {
+	f := newFakeGmail(t)
+	m := newMail(t, f, nil)
+	f.srv.Close() // nothing is listening any more
+
+	_, err := m.Send(context.Background(), []byte("From: a@b\r\n\r\nhi"), "")
+	if !errors.Is(err, model.ErrOffline) {
+		t.Fatalf("Send with a dead server = %v, want model.ErrOffline", err)
+	}
+}
+
+// The batch endpoint must default to the per-API host; the global
+// www.googleapis.com batch endpoint is deprecated.
+func TestBatchEndpointDefaults(t *testing.T) {
+	f := newFakeGmail(t)
+
+	m := newMail(t, f, func(o *Options) { o.Endpoint = "" })
+	if m.batchURL != "https://gmail.googleapis.com/batch/gmail/v1" {
+		t.Errorf("default batchURL = %q", m.batchURL)
+	}
+
+	m = newMail(t, f, nil) // Endpoint points at the fake
+	if want := f.srv.URL + "/batch/gmail/v1"; m.batchURL != want {
+		t.Errorf("batchURL with an Endpoint override = %q, want %q", m.batchURL, want)
+	}
+
+	m = newMail(t, f, func(o *Options) { o.BatchEndpoint = "https://example.test/b" })
+	if m.batchURL != "https://example.test/b" {
+		t.Errorf("BatchEndpoint override ignored: %q", m.batchURL)
 	}
 }

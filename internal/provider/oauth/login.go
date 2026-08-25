@@ -77,7 +77,10 @@ func Login(ctx context.Context, cfg Config, opts LoginOptions) (*oauth2.Token, e
 	}
 	defer ln.Close()
 
-	redirectURL := "http://" + ln.Addr().String()
+	redirectURL, err := loopbackURL(ln.Addr())
+	if err != nil {
+		return nil, err
+	}
 	conf := cfg.oauth2Config(redirectURL)
 
 	verifier := oauth2.GenerateVerifier()
@@ -191,6 +194,26 @@ func Login(ctx context.Context, cfg Config, opts LoginOptions) (*oauth2.Token, e
 			"need you to log in again when the access token expires.")
 	}
 	return tok, nil
+}
+
+// loopbackURL builds the redirect URI Google is given, and the one it must
+// match exactly when the browser comes back.
+//
+// Only the port is taken from the listener: its address prints as "[::]:8080"
+// or "0.0.0.0:8080" whenever the caller asked to listen on every interface,
+// and neither is a URL Google's installed-app flow accepts. The redirect
+// itself always arrives over loopback, so 127.0.0.1 is both correct and the
+// literal form Google documents (it needs no DNS and needs no registration,
+// unlike "localhost").
+func loopbackURL(addr net.Addr) (string, error) {
+	if a, ok := addr.(*net.TCPAddr); ok {
+		return fmt.Sprintf("http://127.0.0.1:%d", a.Port), nil
+	}
+	_, port, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return "", fmt.Errorf("loopback listener address %q: %w", addr, err)
+	}
+	return "http://127.0.0.1:" + port, nil
 }
 
 func randomState() (string, error) {

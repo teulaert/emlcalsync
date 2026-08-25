@@ -36,14 +36,18 @@ type fakeGmail struct {
 	historyID uint64
 
 	// injected behaviour
-	historyGone bool           // history.list answers 404
-	failOnce    map[string]int // message id -> status returned on its first get
+	historyGone   bool           // history.list answers 404
+	failOnce      map[string]int // message id -> status returned on its first get
+	failSendOnce  int            // status returned by the first messages.send
+	failDraftOnce int            // status returned by the first drafts.create
 
 	// observations
 	gets        int
 	batchCalls  int
 	listCalls   int
 	labelGets   int
+	sendCalls   int
+	draftCalls  int
 	lastModify  *gmailapi.BatchModifyMessagesRequest
 	trashed     []string
 	sentRaw     []string
@@ -313,9 +317,18 @@ func (f *fakeGmail) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
+	f.sendCalls++
+	// The message is recorded before the injected failure: a real Gmail that
+	// answers 503 may still have accepted and delivered it.
 	f.sentRaw = append(f.sentRaw, msg.Raw)
 	f.sentThread = msg.ThreadId
+	status := f.failSendOnce
+	f.failSendOnce = 0
 	f.mu.Unlock()
+	if status != 0 {
+		apiError(w, status, "backendError", "backend error")
+		return
+	}
 	f.writeJSON(w, &gmailapi.Message{Id: "sent-1", ThreadId: msg.ThreadId})
 }
 
@@ -326,10 +339,17 @@ func (f *fakeGmail) handleDraftCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
+	f.draftCalls++
 	if d.Message != nil {
 		f.draftedRaw = d.Message.Raw
 	}
+	status := f.failDraftOnce
+	f.failDraftOnce = 0
 	f.mu.Unlock()
+	if status != 0 {
+		apiError(w, status, "backendError", "backend error")
+		return
+	}
 	f.writeJSON(w, &gmailapi.Draft{Id: "draft-1", Message: &gmailapi.Message{Id: "draft-msg-1", ThreadId: "t-draft"}})
 }
 

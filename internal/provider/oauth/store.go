@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"golang.org/x/oauth2"
 
@@ -130,14 +131,19 @@ func (s FileTokenStore) Save(key string, t *oauth2.Token) error {
 }
 
 // MemoryTokenStore is an in-memory TokenStore, useful for tests and for
-// one-shot commands that must not touch disk.
+// one-shot commands that must not touch disk. It is safe for concurrent use:
+// a token source is shared by every HTTP request an *http.Client makes, so
+// Save can be called from several goroutines at once.
 type MemoryTokenStore struct {
+	mu     sync.Mutex
 	tokens map[string]*oauth2.Token
 }
 
 var _ TokenStore = (*MemoryTokenStore)(nil)
 
 func (s *MemoryTokenStore) Load(key string) (*oauth2.Token, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if t, ok := s.tokens[key]; ok {
 		cp := *t
 		return &cp, nil
@@ -146,6 +152,11 @@ func (s *MemoryTokenStore) Load(key string) (*oauth2.Token, error) {
 }
 
 func (s *MemoryTokenStore) Save(key string, t *oauth2.Token) error {
+	if t == nil {
+		return fmt.Errorf("oauth: refusing to store a nil token for %q", key)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.tokens == nil {
 		s.tokens = make(map[string]*oauth2.Token)
 	}

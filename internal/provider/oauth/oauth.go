@@ -1,10 +1,12 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -50,6 +52,18 @@ type Config struct {
 	// Endpoint overrides Google's authorization/token endpoints. Zero value
 	// means google.Endpoint; tests set this to a local httptest server.
 	Endpoint oauth2.Endpoint
+}
+
+// Logger receives the package's occasional warnings — chiefly a refreshed
+// token that could not be persisted. Nil means slog.Default(). Set it once at
+// start-up, before any token source is used.
+var Logger *slog.Logger
+
+func logger() *slog.Logger {
+	if Logger != nil {
+		return Logger
+	}
+	return slog.Default()
 }
 
 // ErrMissingClient is returned when no OAuth client id/secret is configured.
@@ -202,7 +216,12 @@ func (p *persistingSource) Token() (*oauth2.Token, error) {
 	if changed {
 		if err := p.store.Save(p.key, tok); err != nil {
 			// A token we cannot persist still works for this process; losing
-			// it only means an extra refresh next time. Do not fail the call.
+			// it only means an extra refresh next time. Do not fail the call
+			// — but say so, because a store that keeps failing means the
+			// rotated refresh token is being thrown away, and the user will
+			// eventually be asked to log in again for no visible reason.
+			logger().Warn("oauth: could not persist refreshed token",
+				"key", p.key, "err", err)
 			return tok, nil //nolint:nilerr // deliberate: saving is best-effort
 		}
 	}
@@ -219,7 +238,14 @@ func (p *persistingSource) classify(err error) error {
 		case "invalid_grant", "unauthorized_client", "invalid_client":
 			return &ErrReauthRequired{Key: p.key, Err: err}
 		}
-		if re.Response != nil && re.Response.StatusCode == http.StatusBadRequest && re.ErrorCode == "" {
+		// Google sometimes answers with a bare 400 whose body is not the
+		// documented JSON error object, so x/oauth2 cannot fill in ErrorCode.
+		// Only treat that as a dead grant when the body actually names
+		// invalid_grant: other 400s (a malformed request, a bad client
+		// configuration) are bugs, and telling the user to log in again would
+		// send them round a loop that cannot fix anything.
+		if re.Response != nil && re.Response.StatusCode == http.StatusBadRequest &&
+			re.ErrorCode == "" && bytes.Contains(bytes.ToLower(re.Body), []byte("invalid_grant")) {
 			return &ErrReauthRequired{Key: p.key, Err: err}
 		}
 		return err

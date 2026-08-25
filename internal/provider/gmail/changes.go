@@ -28,6 +28,17 @@ type change struct {
 // Changes replays users.history.list since the given historyId. Deletions win
 // over everything else, so a message added and removed inside one window is
 // reported only as removed.
+//
+// Callers must treat an unknown Updated id as an addition. Gmail's history is
+// not exhaustive: records older than the retention window are dropped, and a
+// message can therefore first appear in a labelAdded/labelRemoved record with
+// its messageAdded record already gone (a message that is only relabelled
+// while the caller was away produces no messageAdded record at all). Such a
+// message lands in Updated even though the caller has never seen it, so a
+// caller that ignores Updated ids it does not know will silently miss
+// messages. Envelopes in Updated always carry the message's current flags and
+// mailboxes, so they hold everything an addition needs except the raw bytes,
+// which the caller fetches anyway.
 func (m *Mail) Changes(ctx context.Context, since string) (*provider.Changes, error) {
 	if since == "" {
 		return nil, fmt.Errorf("gmail: no history state to delta from: %w", provider.ErrStateExpired)

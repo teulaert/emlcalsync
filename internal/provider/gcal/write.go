@@ -11,6 +11,36 @@ import (
 	"github.com/lennert/emlcal/internal/model"
 )
 
+// sendUpdatesAll is the value of the sendUpdates query parameter that makes
+// Google mail an invitation, update or cancellation to every guest. The
+// parameter is shared by events.insert, events.patch/update and events.delete;
+// its other values are "externalOnly" and "none", and omitting it falls back
+// to the deprecated sendNotifications default, which sends nothing.
+//
+// Without it a guest never hears that they were invited, that the meeting
+// moved or that it was called off, which is the single most visible way a
+// calendar sync can misbehave.
+const sendUpdatesAll = "all"
+
+// hasGuests reports whether an event has attendees other than the account
+// itself. Notifying is pointless — and noisy — for a private appointment, so
+// the parameter is only sent when somebody else is on the invitation.
+func (c *Calendar) hasGuests(ev *model.Event) bool {
+	if ev == nil {
+		return false
+	}
+	for _, a := range ev.Attendees {
+		if a.Self {
+			continue
+		}
+		if c.opts.Email != "" && strings.EqualFold(a.Email, c.opts.Email) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // CreateEvent inserts a new event and returns it as the server stored it.
 func (c *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev *model.Event) (*model.Event, error) {
 	if calendarRemote == "" || ev == nil {
@@ -18,8 +48,12 @@ func (c *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev *m
 	}
 	var created *calendarapi.Event
 	err := c.do(ctx, "events.insert", func() error {
+		call := c.svc.Events.Insert(calendarRemote, toAPIEvent(ev)).Context(ctx)
+		if c.hasGuests(ev) {
+			call = call.SendUpdates(sendUpdatesAll)
+		}
 		var err error
-		created, err = c.svc.Events.Insert(calendarRemote, toAPIEvent(ev)).Context(ctx).Do()
+		created, err = call.Do()
 		return err
 	})
 	if err != nil {
@@ -40,8 +74,12 @@ func (c *Calendar) UpdateEvent(ctx context.Context, ev *model.Event) (*model.Eve
 	}
 	var updated *calendarapi.Event
 	err := c.do(ctx, "events.patch", func() error {
+		call := c.svc.Events.Patch(ev.CalendarRemote, ev.RemoteID, toAPIPatch(ev)).Context(ctx)
+		if c.hasGuests(ev) {
+			call = call.SendUpdates(sendUpdatesAll)
+		}
 		var err error
-		updated, err = c.svc.Events.Patch(ev.CalendarRemote, ev.RemoteID, toAPIPatch(ev)).Context(ctx).Do()
+		updated, err = call.Do()
 		return err
 	})
 	if err != nil {
@@ -59,12 +97,18 @@ func (c *Calendar) UpdateEvent(ctx context.Context, ev *model.Event) (*model.Eve
 
 // DeleteEvent removes an event. Deleting one that is already gone is not an
 // error: the outbox may well be retrying.
+//
+// sendUpdates=all is always sent here. Unlike Create/UpdateEvent this call is
+// handed nothing but an id, so there is no attendee list to inspect, and
+// cancelling a meeting without telling the guests is much worse than passing
+// the parameter for a solo appointment, where it is a no-op.
 func (c *Calendar) DeleteEvent(ctx context.Context, calendarRemote, remoteID string) error {
 	if calendarRemote == "" || remoteID == "" {
 		return errors.New("gcal: DeleteEvent needs a calendar id and an event id")
 	}
 	err := c.do(ctx, "events.delete", func() error {
-		return c.svc.Events.Delete(calendarRemote, remoteID).Context(ctx).Do()
+		return c.svc.Events.Delete(calendarRemote, remoteID).
+			SendUpdates(sendUpdatesAll).Context(ctx).Do()
 	})
 	if err != nil && isNotFound(err) {
 		c.log.Debug("gcal event already deleted", "event", remoteID)
@@ -108,8 +152,11 @@ func (c *Calendar) Respond(ctx context.Context, calendarRemote, remoteID string,
 		return fmt.Errorf("gcal event %s: %q is not an attendee, cannot respond",
 			remoteID, c.opts.Email)
 	}
+	// A response is only interesting to the other guests, so it is always
+	// announced.
 	return c.do(ctx, "events.patch", func() error {
-		_, err := c.svc.Events.Patch(calendarRemote, remoteID, patch).Context(ctx).Do()
+		_, err := c.svc.Events.Patch(calendarRemote, remoteID, patch).
+			SendUpdates(sendUpdatesAll).Context(ctx).Do()
 		return err
 	})
 }

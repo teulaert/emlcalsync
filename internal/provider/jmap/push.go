@@ -42,8 +42,8 @@ var _ provider.Pusher = (*Client)(nil)
 // the server reports new state for a type we care about.
 //
 // It blocks until ctx is done (returning ctx.Err()) or authentication fails
-// permanently (401/403). Every other failure is retried with exponential
-// backoff between 1s and 60s.
+// permanently (401). Every other failure — a 403 on the stream included — is
+// retried with exponential backoff between 1s and 60s.
 func (c *Client) Watch(ctx context.Context, fn func(provider.ChangeHint)) error {
 	if fn == nil {
 		return errors.New("jmap: Watch needs a callback")
@@ -226,9 +226,16 @@ func (c *Client) readEvents(ctx context.Context, body io.Reader, lastEventID str
 
 // parseStateChange turns one StateChange payload into a ChangeHint, reporting
 // only types whose state actually moved.
+//
+// RFC 8620 §7.1 tags every push payload with an @type, and the stream carries
+// more than one kind (a PushSubscription verification, for one). Anything that
+// is not a StateChange is ignored rather than mined for a "changed" map.
 func parseStateChange(payload string, seen map[string]string) (provider.ChangeHint, bool) {
 	var sc stateChange
 	if err := json.Unmarshal([]byte(payload), &sc); err != nil {
+		return provider.ChangeHint{}, false
+	}
+	if sc.Type != "StateChange" {
 		return provider.ChangeHint{}, false
 	}
 	if len(sc.Changed) == 0 {

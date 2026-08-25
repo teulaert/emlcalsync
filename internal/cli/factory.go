@@ -29,6 +29,8 @@ const (
 
 	EnvGoogleClientID     = "EMLCAL_GOOGLE_CLIENT_ID"
 	EnvGoogleClientSecret = "EMLCAL_GOOGLE_CLIENT_SECRET"
+	// EnvJMAPSessionURL overrides the Fastmail session URL (tests, self-hosted JMAP).
+	EnvJMAPSessionURL = "EMLCAL_JMAP_SESSION_URL"
 )
 
 // Factory builds real providers from config + secrets and caches them per
@@ -106,9 +108,10 @@ func (f *Factory) jmapClient(acct config.Account) (*jmap.Client, error) {
 			"no Fastmail token for account %q: run `emlcal account add fastmail --name %s`", acct.Name, acct.Name)
 	}
 	c, err := jmap.New(jmap.Options{
-		Token:  strings.TrimSpace(string(tok)),
-		Email:  acct.Email,
-		Logger: f.app.Logger(),
+		Token:      strings.TrimSpace(string(tok)),
+		Email:      acct.Email,
+		Logger:     f.app.Logger(),
+		SessionURL: os.Getenv(EnvJMAPSessionURL),
 	})
 	if err != nil {
 		return nil, err

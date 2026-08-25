@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +147,80 @@ func seedEvents(f *fakeServer, objs ...map[string]any) {
 }
 
 // ---------------------------------------------------------------------------
+
+// TestVendorCalendarCapability: a server that ships calendars under a vendor
+// URN (Fastmail's own predates the draft's spelling) must still work — the URN
+// is discovered from the session and sent in "using".
+func TestVendorCalendarCapability(t *testing.T) {
+	const vendorURN = "https://www.fastmail.com/dev/calendars"
+	f := newFakeServer(t)
+	f.calendarURN = vendorURN
+	seedCalendars(f)
+	seedEvents(f, standupEvent())
+
+	cal := f.client(t).Calendar()
+	ctx := testCtx(t)
+
+	cals, err := cal.Calendars(ctx)
+	if err != nil {
+		t.Fatalf("Calendars with a vendor capability URN: %v", err)
+	}
+	if len(cals) != 3 {
+		t.Fatalf("got %d calendars", len(cals))
+	}
+	if using := f.capturedUsing("Calendar/get"); !slices.Contains(using, vendorURN) {
+		t.Errorf("Calendar/get using = %v, want the vendor URN", using)
+	}
+	if urn, acct, err := f.client(t).CalendarCapability(ctx); err != nil ||
+		urn != vendorURN || acct != testAccount {
+		t.Errorf("CalendarCapability = %q, %q, %v", urn, acct, err)
+	}
+
+	// The rest of the surface must use the same URN, not the standard one.
+	if _, err := cal.EventChanges(ctx, "cal-1", ""); err != nil {
+		t.Fatalf("EventChanges with a vendor capability URN: %v", err)
+	}
+	for _, m := range []string{"CalendarEvent/query", "CalendarEvent/get"} {
+		if using := f.capturedUsing(m); !slices.Contains(using, vendorURN) {
+			t.Errorf("%s using = %v, want the vendor URN", m, using)
+		}
+	}
+}
+
+// TestCalendarCapabilityFromAccountCapabilities: no primaryAccounts entry for
+// any calendars URN, so the account that lists it must be picked instead.
+func TestCalendarCapabilityFromAccountCapabilities(t *testing.T) {
+	const vendorURN = "https://www.fastmail.com/dev/calendars"
+	f := newFakeServer(t)
+	f.calendarURN = vendorURN
+	f.calendarPrimary = "-" // drop it from primaryAccounts entirely
+	seedCalendars(f)
+
+	c := f.client(t)
+	urn, acct, err := c.CalendarCapability(testCtx(t))
+	if err != nil {
+		t.Fatalf("CalendarCapability: %v", err)
+	}
+	if urn != vendorURN || acct != testAccount {
+		t.Errorf("CalendarCapability = %q, %q, want the vendor URN on %s", urn, acct, testAccount)
+	}
+	if _, err := c.Calendar().Calendars(testCtx(t)); err != nil {
+		t.Fatalf("Calendars: %v", err)
+	}
+}
+
+// TestCalendarCapabilityMissing: a token without any calendars scope must fail
+// with a message naming the standard URN.
+func TestCalendarCapabilityMissing(t *testing.T) {
+	f := newFakeServer(t)
+	f.calendarURN = "-" // no calendars capability at all
+	f.calendarPrimary = "-"
+
+	_, _, err := f.client(t).CalendarCapability(testCtx(t))
+	if err == nil || !strings.Contains(err.Error(), CapCalendars) {
+		t.Fatalf("CalendarCapability error = %v, want one naming %s", err, CapCalendars)
+	}
+}
 
 func TestCalendars(t *testing.T) {
 	f := newFakeServer(t)

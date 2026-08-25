@@ -5,7 +5,8 @@
 // internal/model: labels become mailboxes, except STARRED/UNREAD which become
 // flags. Raw RFC 822 bytes are fetched with format=raw through the batch
 // endpoint (50 messages per HTTP request) and every call is metered against
-// Gmail's per-user quota (15 000 units/minute) by a token-bucket limiter.
+// Gmail's per-user quota (6 000 units/minute per project) by a token-bucket
+// limiter.
 //
 // Nothing here knows about the local account id: model.Mailbox.AccountID and
 // the like are left empty for the sync engine to fill in.
@@ -65,15 +66,15 @@ type Options struct {
 	// FetchMode selects the FetchRaw strategy. Defaults to FetchBatch.
 	FetchMode FetchMode
 	// QuotaUnitsPerSecond is the token-bucket refill rate in Gmail quota
-	// units. Gmail allows 15 000 units/minute (250/s) per user; the default
-	// of 200 leaves headroom for other clients and for retries. A
-	// messages.get costs 5 units, so the default sustains ~40 messages/s.
+	// units. Gmail allows one user 6 000 units/minute per project (100/s);
+	// the default of 80 leaves headroom for other clients and for retries. A
+	// messages.get costs 20 units, so the default sustains ~4 messages/s.
 	QuotaUnitsPerSecond float64
 	// Endpoint overrides the API base URL. It must end in "/". Tests point
 	// this at an httptest server; production leaves it empty.
 	Endpoint string
 	// BatchEndpoint overrides the batch URL. Defaults to Google's
-	// https://www.googleapis.com/batch/gmail/v1, or, when Endpoint is set,
+	// https://gmail.googleapis.com/batch/gmail/v1, or, when Endpoint is set,
 	// to <Endpoint>batch/gmail/v1.
 	BatchEndpoint string
 }
@@ -99,32 +100,49 @@ const (
 	// account the token belongs to".
 	me = "me"
 
-	defaultUnitsPerSecond = 200.0
-	// Burst covers one full 50-message batch (50 × 5 units).
-	quotaBurst = 250
+	// Gmail allows one user 6 000 quota units per minute per project (100/s);
+	// the default leaves headroom for other clients and for retries. Projects
+	// that used the API before May 2026 keep the older, roomier quota and can
+	// raise this through Options.QuotaUnitsPerSecond.
+	defaultUnitsPerSecond = 80.0
 
 	maxEnumeratePage = 500
 	batchSize        = 50
+	// Burst covers one full batch of messages.get, which is spent in one go.
+	quotaBurst = batchSize * unitsMessagesGet
 	// batchModify accepts at most 1000 ids per call.
 	maxModifyIDs = 1000
 
-	defaultBatchURL = "https://www.googleapis.com/batch/gmail/v1"
+	// defaultBatchURL is rootUrl + the documented default batch path
+	// "/batch/<api>/<version>" for the Gmail API
+	// (https://developers.google.com/gmail/api/guides/batch). The API's
+	// discovery document gives rootUrl "https://gmail.googleapis.com/"; the
+	// old global endpoint on www.googleapis.com is deprecated.
+	defaultBatchURL = "https://gmail.googleapis.com/batch/gmail/v1"
 )
 
-// Gmail quota unit costs, from the API's published quota table.
+// Gmail quota unit costs, from the API's published quota table
+// (https://developers.google.com/gmail/api/reference/quota, checked
+// 2026-08-25).
+//
+// The table was reissued on 2026-05-01: reads went from 5 to 20 units and the
+// per-user allowance from 15 000 to 6 000 units/minute. Cloud projects that
+// called the API before then keep their old quota, so these numbers are the
+// pessimistic reading — they overstate the cost for a grandfathered project,
+// which only means it runs below its ceiling.
 const (
 	unitsLabelsList     = 1
 	unitsLabelsGet      = 1
 	unitsGetProfile     = 1
 	unitsHistoryList    = 2
 	unitsMessagesList   = 5
-	unitsMessagesGet    = 5
+	unitsMessagesGet    = 20
 	unitsMessagesModify = 5
 	unitsBatchModify    = 50
-	unitsMessagesTrash  = 5
+	unitsMessagesTrash  = 20
 	unitsMessagesSend   = 100
 	unitsDraftsCreate   = 10
-	unitsAttachmentGet  = 5
+	unitsAttachmentGet  = 20
 )
 
 // New builds a Mail provider. The HTTP client must already carry credentials.

@@ -41,7 +41,8 @@ type Calendar struct {
 
 	mu           sync.Mutex
 	accountID    string
-	filterPlural bool // server wants the legacy {"inCalendars": [...]} filter
+	capURN       string // capability URN calendars live under on this server
+	filterPlural bool   // server wants the legacy {"inCalendars": [...]} filter
 	filterProbed bool
 	noScheduling bool // server rejected sendSchedulingMessages
 }
@@ -52,7 +53,11 @@ func (c *Client) Calendar() *Calendar { return &Calendar{c: c} }
 
 var _ provider.CalendarProvider = (*Calendar)(nil)
 
-// AccountID resolves (and caches) the primary account id for urn:...:calendars.
+// AccountID resolves (and caches) the primary account id for calendars, along
+// with the capability URN this server publishes them under.
+//
+// Every calendar method calls this before it builds a request, so using() can
+// rely on the URN being resolved by the time it is consulted.
 func (cal *Calendar) AccountID(ctx context.Context) (string, error) {
 	cal.mu.Lock()
 	id := cal.accountID
@@ -60,17 +65,28 @@ func (cal *Calendar) AccountID(ctx context.Context) (string, error) {
 	if id != "" {
 		return id, nil
 	}
-	id, err := cal.c.PrimaryAccount(ctx, CapCalendars)
+	urn, id, err := cal.c.CalendarCapability(ctx)
 	if err != nil {
 		return "", err
 	}
 	cal.mu.Lock()
-	cal.accountID = id
+	cal.accountID, cal.capURN = id, urn
 	cal.mu.Unlock()
 	return id, nil
 }
 
-func (cal *Calendar) using() []string { return []string{CapCalendars} }
+// using returns the capability set for a calendar request: whichever URN this
+// server publishes calendars under, defaulting to the standard one until
+// AccountID has resolved it.
+func (cal *Calendar) using() []string {
+	cal.mu.Lock()
+	urn := cal.capURN
+	cal.mu.Unlock()
+	if urn == "" {
+		urn = CapCalendars
+	}
+	return []string{urn}
+}
 
 // ---------------------------------------------------------------------------
 // Calendars

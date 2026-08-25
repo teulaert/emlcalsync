@@ -177,6 +177,15 @@ func (c *Calendar) EventChanges(ctx context.Context, calendarRemote, since strin
 			pageToken = resp.NextPageToken
 			continue
 		}
+		if resp.NextSyncToken == "" {
+			// The last page must carry a sync token. Persisting "" would
+			// silently turn every later delta into a full listing, and the
+			// changes just collected would be applied against a state that
+			// claims nothing was ever synced.
+			return nil, fmt.Errorf(
+				"gcal: events.list for %s ended with neither nextPageToken nor nextSyncToken",
+				calendarRemote)
+		}
 		out.NewState = resp.NextSyncToken
 		return out, nil
 	}

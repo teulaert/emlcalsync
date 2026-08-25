@@ -43,6 +43,29 @@ func mapEvent(calendarRemote string, in *calendarapi.Event, calTZ, selfEmail str
 	if err != nil {
 		return model.Event{}, fmt.Errorf("gcal event %s: end: %w", in.Id, err)
 	}
+
+	// A cancelled instance of a recurring event is delivered stripped down to
+	// id, status, recurringEventId and originalStartTime — no start, no end.
+	// Fall back to the original start so the hole it punches can still be
+	// matched against an expanded occurrence, and so the event never reaches
+	// the index with a zero (i.e. 1970) start.
+	var orig time.Time
+	var origAllDay bool
+	var origTZ string
+	if in.OriginalStartTime != nil {
+		orig, origAllDay, origTZ, err = parseEventTime(in.OriginalStartTime, calTZ)
+		if err != nil {
+			return model.Event{}, fmt.Errorf("gcal event %s: originalStartTime: %w", in.Id, err)
+		}
+	}
+	if start.IsZero() && !orig.IsZero() {
+		start, allDay, tz = orig, origAllDay, origTZ
+	}
+	if end.IsZero() {
+		// A point in time is better than 1970: the occurrence matcher only
+		// needs the start, and a zero end would be stored as end_utc=0.
+		end = start
+	}
 	ev.Start, ev.End, ev.AllDay, ev.Timezone = start, end, allDay, tz
 
 	// Only the RRULE is modelled; EXDATE/RDATE stay in RawJSON, which the
@@ -54,11 +77,7 @@ func mapEvent(calendarRemote string, in *calendarapi.Event, calTZ, selfEmail str
 		}
 	}
 
-	if in.RecurringEventId != "" && in.OriginalStartTime != nil {
-		orig, _, _, err := parseEventTime(in.OriginalStartTime, calTZ)
-		if err != nil {
-			return model.Event{}, fmt.Errorf("gcal event %s: originalStartTime: %w", in.Id, err)
-		}
+	if in.RecurringEventId != "" && !orig.IsZero() {
 		ev.RecurrenceID = orig.Format(time.RFC3339)
 	}
 

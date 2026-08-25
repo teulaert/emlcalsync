@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -353,20 +352,55 @@ func (m *Mail) State(ctx context.Context) (string, error) {
 // ---------------------------------------------------------------------------
 // Enumerate
 
-// Enumerate lists messages ordered by receivedAt ascending. The cursor is the
-// numeric query position, so a restart resumes exactly where it stopped even
-// if new mail arrived (new mail sorts after everything already enumerated).
+// enumCursor is the opaque Enumerate cursor:
+//
+//	{"anchor":"<last Email id of the previous page>","n":<ids enumerated so far>}
+//
+// Anchoring on the last id of the previous page (RFC 8620 §5.5: anchor +
+// anchorOffset) is what makes paging safe against concurrent deletes. A plain
+// numeric position shifts down by one for every message removed behind the
+// cursor, silently skipping unenumerated mail.
+//
+// n is only the fallback: when the anchor itself has been destroyed the server
+// answers "anchorNotFound", and resuming from position n is better than
+// failing the whole enumeration.
+type enumCursor struct {
+	Anchor string `json:"anchor"`
+	N      int    `json:"n"`
+}
+
+func (c enumCursor) String() string {
+	b, err := json.Marshal(c)
+	if err != nil { // cannot happen for a string and an int
+		return ""
+	}
+	return string(b)
+}
+
+func parseEnumCursor(s string) (enumCursor, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return enumCursor{}, nil
+	}
+	var c enumCursor
+	if !strings.HasPrefix(s, "{") || json.Unmarshal([]byte(s), &c) != nil || c.N < 0 {
+		return enumCursor{}, fmt.Errorf("jmap: bad enumerate cursor %q", s)
+	}
+	return c, nil
+}
+
+// Enumerate lists messages ordered by receivedAt ascending. The cursor anchors
+// on the last id of the previous page, so a restart resumes exactly where it
+// stopped even if mail arrived (new mail sorts after everything already
+// enumerated) or was deleted behind the cursor.
 func (m *Mail) Enumerate(ctx context.Context, cursor string, limit int) ([]provider.Envelope, string, error) {
 	acct, err := m.AccountID(ctx)
 	if err != nil {
 		return nil, "", err
 	}
-	position := 0
-	if cursor != "" {
-		position, err = strconv.Atoi(cursor)
-		if err != nil || position < 0 {
-			return nil, "", fmt.Errorf("jmap: bad enumerate cursor %q", cursor)
-		}
+	cur, err := parseEnumCursor(cursor)
+	if err != nil {
+		return nil, "", err
 	}
 	s, err := m.c.Session(ctx)
 	if err != nil {
@@ -380,32 +414,44 @@ func (m *Mail) Enumerate(ctx context.Context, cursor string, limit int) ([]provi
 	queryArgs := map[string]any{
 		"accountId": acct,
 		"sort":      []map[string]any{{"property": "receivedAt", "isAscending": true}},
-		"position":  position,
 		"limit":     limit,
 	}
-	if position == 0 {
-		// Only worth asking for on the first page; later pages fall back to
-		// the "short page means last page" rule.
-		queryArgs["calculateTotal"] = true
+	switch {
+	case cur.Anchor != "":
+		// Start at the record after the anchor.
+		queryArgs["anchor"] = cur.Anchor
+		queryArgs["anchorOffset"] = 1
+	default:
+		queryArgs["position"] = cur.N
+		if cur.N == 0 {
+			// Only worth asking for on the first page; later pages fall back
+			// to the "short page means last page" rule.
+			queryArgs["calculateTotal"] = true
+		}
 	}
-	resp, err := m.c.Request(ctx, m.using(), []Invocation{
-		{Name: "Email/query", Args: queryArgs, ID: "q"},
-		{Name: "Email/get", Args: map[string]any{
-			"accountId":  acct,
-			"#ids":       ResultRef("q", "Email/query", "/ids"),
-			"properties": envelopeProperties,
-		}, ID: "g"},
-	})
+
+	q, g, err := m.queryPage(ctx, acct, queryArgs)
 	if err != nil {
-		return nil, "", err
-	}
-	var q queryResponse
-	if err := resp.DecodeAt(0, &q); err != nil {
-		return nil, "", err
-	}
-	var g emailGetResponse
-	if err := resp.DecodeAt(1, &g); err != nil {
-		return nil, "", err
+		if !IsMethodError(err, "anchorNotFound") {
+			return nil, "", err
+		}
+		// The anchor was destroyed between pages. Fall back to a plain
+		// position, one short of the count so far: the anchor's own removal
+		// has shifted everything after it down by one, so that lands exactly
+		// on the next unenumerated message. Further deletions behind the
+		// cursor can still shift it, and re-delivering an envelope is the
+		// harmless direction (upserts are idempotent) where skipping one is
+		// not, so this errs towards overlap.
+		pos := max(0, cur.N-1)
+		m.c.log.Debug("jmap enumerate anchor is gone, falling back to position",
+			"anchor", cur.Anchor, "position", pos)
+		delete(queryArgs, "anchor")
+		delete(queryArgs, "anchorOffset")
+		queryArgs["position"] = pos
+		q, g, err = m.queryPage(ctx, acct, queryArgs)
+		if err != nil {
+			return nil, "", err
+		}
 	}
 
 	byID := make(map[string]emailObject, len(g.List))
@@ -426,15 +472,42 @@ func (m *Mail) Enumerate(ctx context.Context, cursor string, limit int) ([]provi
 	if q.Limit != nil && *q.Limit > 0 {
 		effLimit = *q.Limit
 	}
-	nextPos := position + len(q.IDs)
+	next := enumCursor{N: cur.N + len(q.IDs)}
 	done := len(q.IDs) == 0 || len(q.IDs) < effLimit
-	if q.Total != nil && nextPos >= *q.Total {
+	if q.Total != nil && next.N >= *q.Total {
 		done = true
 	}
 	if done {
 		return page, "", nil
 	}
-	return page, strconv.Itoa(nextPos), nil
+	next.Anchor = q.IDs[len(q.IDs)-1]
+	return page, next.String(), nil
+}
+
+// queryPage runs one Email/query chained into an Email/get.
+func (m *Mail) queryPage(ctx context.Context, acct string, queryArgs map[string]any) (queryResponse, emailGetResponse, error) {
+	var (
+		q queryResponse
+		g emailGetResponse
+	)
+	resp, err := m.c.Request(ctx, m.using(), []Invocation{
+		{Name: "Email/query", Args: queryArgs, ID: "q"},
+		{Name: "Email/get", Args: map[string]any{
+			"accountId":  acct,
+			"#ids":       ResultRef("q", "Email/query", "/ids"),
+			"properties": envelopeProperties,
+		}, ID: "g"},
+	})
+	if err != nil {
+		return q, g, err
+	}
+	if err := resp.DecodeAt(0, &q); err != nil {
+		return q, g, err
+	}
+	if err := resp.DecodeAt(1, &g); err != nil {
+		return q, g, err
+	}
+	return q, g, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -585,12 +658,15 @@ func (m *Mail) Changes(ctx context.Context, since string) (*provider.Changes, er
 		mailboxState = mg.State
 		out.MailboxesChanged = true
 	} else {
+		// A mailbox delta that cannot be computed (or cannot be paged to the
+		// end) must not lose the mail delta: it degrades to "resync the
+		// mailbox list" instead.
 		mc, mu2, md, newMbState, err := m.c.collectChanges(ctx, m.using(), "Mailbox/changes", acct, mailboxState)
 		switch {
 		case err == nil:
 			mailboxState = newMbState
 			out.MailboxesChanged = len(mc)+len(mu2)+len(md) > 0
-		case IsMethodError(err, "cannotCalculateChanges"):
+		case IsMethodError(err, "cannotCalculateChanges"), errors.Is(err, provider.ErrStateExpired):
 			var mg mailboxGetResponse
 			if err := m.c.call(ctx, m.using(), "Mailbox/get",
 				map[string]any{"accountId": acct, "ids": []string{}}, &mg); err != nil {
@@ -663,11 +739,17 @@ func (m *Mail) Changes(ctx context.Context, since string) (*provider.Changes, er
 }
 
 // collectChanges loops a /changes method until hasMoreChanges is false.
+//
+// A server that reports more changes without advancing its state, or one that
+// never converges, cannot be paged to completion. Returning what we have would
+// hand the sync engine a token that claims to cover changes it never saw, so
+// both cases report provider.ErrStateExpired instead: the caller re-lists.
 func (c *Client) collectChanges(ctx context.Context, using []string, method, acct, since string) (created, updated, destroyed []string, newState string, err error) {
 	newState = since
 	for i := 0; ; i++ {
 		if i >= changesLoopLimit {
-			return nil, nil, nil, "", fmt.Errorf("jmap: %s did not converge after %d rounds", method, i)
+			return nil, nil, nil, "", fmt.Errorf("jmap: %s did not converge after %d rounds: %w",
+				method, i, provider.ErrStateExpired)
 		}
 		var cr changesResponse
 		err = c.call(ctx, using, method, map[string]any{
@@ -685,9 +767,9 @@ func (c *Client) collectChanges(ctx context.Context, using []string, method, acc
 			return created, updated, destroyed, cr.NewState, nil
 		}
 		if cr.NewState == "" || cr.NewState == newState {
-			// A server that keeps saying "more" without advancing would spin
-			// forever; treat it as done rather than hang the sync loop.
-			return created, updated, destroyed, cr.NewState, nil
+			return nil, nil, nil, "", fmt.Errorf(
+				"jmap: %s reports more changes but its state did not advance past %q: %w",
+				method, newState, provider.ErrStateExpired)
 		}
 		newState = cr.NewState
 	}
@@ -800,6 +882,10 @@ type importResponse struct {
 }
 
 // importRaw uploads raw and imports it into one mailbox with the given keywords.
+//
+// The upload is idempotent (a blob is content-addressed and expires on its
+// own) and stays retryable; the Email/import is not, and must not be retried
+// on a 5xx — the server may well have created the message before failing.
 func (m *Mail) importRaw(ctx context.Context, raw []byte, mailboxID string, keywords map[string]bool) (importedEmail, error) {
 	acct, err := m.AccountID(ctx)
 	if err != nil {
@@ -811,7 +897,7 @@ func (m *Mail) importRaw(ctx context.Context, raw []byte, mailboxID string, keyw
 	}
 	const cid = "new"
 	var ir importResponse
-	if err := m.c.call(ctx, m.using(), "Email/import", map[string]any{
+	if err := m.c.callNoRetry(ctx, m.using(), "Email/import", map[string]any{
 		"accountId": acct,
 		"emails": map[string]any{
 			cid: map[string]any{
@@ -859,6 +945,18 @@ type identityGetResponse struct {
 	List      []identityObject `json:"list"`
 }
 
+// submissionAccountID resolves the account that owns Identity and
+// EmailSubmission. RFC 8621 §7 puts those in the submission capability's
+// primary account, which need not be the mail account; on Fastmail the two
+// coincide, so a server that advertises no submission primary account falls
+// back to the mail account rather than failing.
+func (m *Mail) submissionAccountID(ctx context.Context) (string, error) {
+	if id, err := m.c.PrimaryAccount(ctx, CapSubmission); err == nil && id != "" {
+		return id, nil
+	}
+	return m.AccountID(ctx)
+}
+
 // identityID picks the Identity whose address matches the configured account
 // email, falling back to the first identity the server offers.
 func (m *Mail) identityID(ctx context.Context) (string, error) {
@@ -868,7 +966,7 @@ func (m *Mail) identityID(ctx context.Context) (string, error) {
 	if id != "" {
 		return id, nil
 	}
-	acct, err := m.AccountID(ctx)
+	acct, err := m.submissionAccountID(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -921,7 +1019,9 @@ func (m *Mail) Send(ctx context.Context, raw []byte, threadID string) (string, e
 	if err != nil {
 		return "", err
 	}
-	acct, err := m.AccountID(ctx)
+	// The submission is created in the identity's own account, which is the
+	// mail account on any server that does not split the two.
+	acct, err := m.submissionAccountID(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -931,9 +1031,11 @@ func (m *Mail) Send(ctx context.Context, raw []byte, threadID string) (string, e
 		return "", err
 	}
 
+	// Never retried: a 5xx from a submission says nothing about whether the
+	// message was already handed to the MTA, and a retry would send it twice.
 	const cid = "sub"
 	var sr setResponse
-	err = m.c.call(ctx, []string{CapMail, CapSubmission}, "EmailSubmission/set", map[string]any{
+	err = m.c.callNoRetry(ctx, []string{CapMail, CapSubmission}, "EmailSubmission/set", map[string]any{
 		"accountId": acct,
 		"create": map[string]any{
 			cid: map[string]any{"identityId": identity, "emailId": em.ID},

@@ -2,8 +2,10 @@ package jmap
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"sort"
@@ -256,6 +258,112 @@ func TestEnumeratePaging(t *testing.T) {
 	}
 }
 
+// TestEnumerateSurvivesDeleteBehindCursor deletes a message that has already
+// been enumerated. A position cursor would shift down by one and skip an
+// unenumerated message; the anchor cursor must not.
+func TestEnumerateSurvivesDeleteBehindCursor(t *testing.T) {
+	f := newFakeServer(t)
+	seedEmails(f, 25)
+	m := f.client(t).Mail()
+	ctx := testCtx(t)
+
+	var (
+		all    []provider.Envelope
+		cursor string
+		pages  int
+	)
+	for {
+		page, next, err := m.Enumerate(ctx, cursor, 10)
+		if err != nil {
+			t.Fatalf("Enumerate(%q): %v", cursor, err)
+		}
+		pages++
+		all = append(all, page...)
+		if next == "" {
+			break
+		}
+		cursor = next
+		// Delete a message from the page we have just consumed, plus one from
+		// the very first page, so the whole list shifts under the cursor.
+		if pages == 1 {
+			f.deleteEmail("e000")
+			f.deleteEmail("e003")
+		}
+		if pages > 10 {
+			t.Fatal("Enumerate did not terminate")
+		}
+	}
+
+	seen := map[string]bool{}
+	for _, e := range all {
+		if seen[e.RemoteID] {
+			t.Fatalf("message %s enumerated twice", e.RemoteID)
+		}
+		seen[e.RemoteID] = true
+	}
+	// Everything except the two deleted messages must have been seen.
+	for i := range 25 {
+		id := fmt.Sprintf("e%03d", i)
+		if id == "e000" || id == "e003" {
+			continue
+		}
+		if !seen[id] {
+			t.Errorf("message %s was skipped", id)
+		}
+	}
+}
+
+// TestEnumerateAnchorNotFound deletes the anchor itself: the server rejects the
+// query and the client must fall back to the counted position instead of
+// failing the enumeration.
+func TestEnumerateAnchorNotFound(t *testing.T) {
+	f := newFakeServer(t)
+	seedEmails(f, 25)
+	m := f.client(t).Mail()
+	ctx := testCtx(t)
+
+	page, cursor, err := m.Enumerate(ctx, "", 10)
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(page) != 10 || cursor == "" {
+		t.Fatalf("first page = %d envelopes, cursor %q", len(page), cursor)
+	}
+	var cur enumCursor
+	if err := json.Unmarshal([]byte(cursor), &cur); err != nil {
+		t.Fatalf("cursor %q is not JSON: %v", cursor, err)
+	}
+	if cur.Anchor != "e009" || cur.N != 10 {
+		t.Fatalf("cursor = %+v, want anchor e009 and n 10", cur)
+	}
+
+	// The anchor is destroyed before the next page is requested.
+	f.deleteEmail("e009")
+	f.resetCalls()
+
+	page2, cursor2, err := m.Enumerate(ctx, cursor, 10)
+	if err != nil {
+		t.Fatalf("Enumerate after the anchor vanished: %v", err)
+	}
+	queries := f.captured("Email/query")
+	if len(queries) != 2 {
+		t.Fatalf("got %d Email/query calls, want the anchored one plus the position retry", len(queries))
+	}
+	if _, ok := queries[1]["anchor"]; ok {
+		t.Error("the retry must not send an anchor")
+	}
+	if queries[1]["position"].(float64) != 9 {
+		t.Errorf("retry position = %v, want 9 (one back, the anchor itself is gone)", queries[1]["position"])
+	}
+	if len(page2) != 10 || page2[0].RemoteID != "e010" {
+		t.Fatalf("second page = %d envelopes starting at %q, want e010 (nothing skipped)",
+			len(page2), page2[0].RemoteID)
+	}
+	if cursor2 == "" {
+		t.Error("enumeration ended early")
+	}
+}
+
 func TestEnumerateEmptyAccount(t *testing.T) {
 	f := newFakeServer(t)
 	m := f.client(t).Mail()
@@ -504,6 +612,70 @@ func TestChangesMailboxStateExpiredDegrades(t *testing.T) {
 	}
 }
 
+// TestChangesStuckStateExpired: the server keeps saying hasMoreChanges without
+// advancing its state. Returning the partial delta would advance the sync
+// engine past changes it never saw, so this must report ErrStateExpired.
+func TestChangesStuckStateExpired(t *testing.T) {
+	f := newFakeServer(t)
+	seedEmails(f, 3)
+	f.emailChanges["email-0"] = changeScript{
+		Created: []string{"e000"}, NewState: "email-0", HasMore: true,
+	}
+	m := f.client(t).Mail()
+
+	_, err := m.Changes(testCtx(t), `{"email":"email-0","mailbox":"mailbox-0"}`)
+	if !errors.Is(err, provider.ErrStateExpired) {
+		t.Fatalf("Changes error = %v, want ErrStateExpired", err)
+	}
+}
+
+// TestChangesEmptyNewStateExpired covers the same guard when the server sends
+// hasMoreChanges with no newState at all.
+func TestChangesEmptyNewStateExpired(t *testing.T) {
+	f := newFakeServer(t)
+	f.emailChanges["email-0"] = changeScript{Created: []string{"e000"}, NewState: "", HasMore: true}
+	m := f.client(t).Mail()
+
+	_, err := m.Changes(testCtx(t), `{"email":"email-0","mailbox":"mailbox-0"}`)
+	if !errors.Is(err, provider.ErrStateExpired) {
+		t.Fatalf("Changes error = %v, want ErrStateExpired", err)
+	}
+}
+
+// TestChangesLoopLimitStateExpired: a server whose state advances forever must
+// hit the loop guard and report ErrStateExpired rather than spin.
+func TestChangesLoopLimitStateExpired(t *testing.T) {
+	f := newFakeServer(t)
+	m := f.client(t).Mail()
+
+	_, err := m.Changes(testCtx(t), `{"email":"spin-0","mailbox":"mailbox-0"}`)
+	if !errors.Is(err, provider.ErrStateExpired) {
+		t.Fatalf("Changes error = %v, want ErrStateExpired", err)
+	}
+	if n := len(f.captured("Email/changes")); n != changesLoopLimit {
+		t.Errorf("made %d Email/changes calls, want the loop limit %d", n, changesLoopLimit)
+	}
+}
+
+// TestChangesStuckMailboxDegrades: a Mailbox/changes loop that cannot be paged
+// to the end must degrade to a mailbox resync, not fail the mail delta.
+func TestChangesStuckMailboxDegrades(t *testing.T) {
+	f := newFakeServer(t)
+	f.emailChanges["email-0"] = changeScript{NewState: "email-1"}
+	f.mailboxChanges["mailbox-0"] = changeScript{
+		Updated: []string{"mb-inbox"}, NewState: "mailbox-0", HasMore: true,
+	}
+	m := f.client(t).Mail()
+
+	ch, err := m.Changes(testCtx(t), `{"email":"email-0","mailbox":"mailbox-0"}`)
+	if err != nil {
+		t.Fatalf("a stuck mailbox delta must not fail the mail delta: %v", err)
+	}
+	if !ch.MailboxesChanged {
+		t.Error("MailboxesChanged should be forced true")
+	}
+}
+
 func TestChangesLegacyBareToken(t *testing.T) {
 	f := newFakeServer(t)
 	f.emailChanges["email-0"] = changeScript{NewState: "email-1"}
@@ -709,6 +881,101 @@ func TestSend(t *testing.T) {
 	}
 }
 
+// TestSendDoesNotRetrySubmission: a submission that fails with a 5xx may still
+// have handed the message to the MTA, so it must be surfaced, never retried.
+func TestSendDoesNotRetrySubmission(t *testing.T) {
+	f := newFakeServer(t)
+	f.failMethod["EmailSubmission/set"] = []int{503}
+	m := f.client(t).Mail()
+	raw := []byte("From: me@example.com\r\nTo: you@example.com\r\nSubject: hi\r\n\r\nhello\r\n")
+
+	_, err := m.Send(testCtx(t), raw, "")
+	if err == nil {
+		t.Fatal("Send should have failed")
+	}
+	if n := f.attemptsFor("EmailSubmission/set"); n != 1 {
+		t.Errorf("the server saw %d submissions, want exactly 1", n)
+	}
+	if len(f.failMethod["EmailSubmission/set"]) != 0 {
+		t.Error("the scripted failure was not used")
+	}
+}
+
+// TestCreateDraftDoesNotRetryImport: Email/import is not idempotent either —
+// a retry would leave two copies of the draft.
+func TestCreateDraftDoesNotRetryImport(t *testing.T) {
+	f := newFakeServer(t)
+	f.failMethod["Email/import"] = []int{503}
+	m := f.client(t).Mail()
+
+	_, err := m.CreateDraft(testCtx(t), []byte("From: me@example.com\r\n\r\nhi\r\n"))
+	if err == nil {
+		t.Fatal("CreateDraft should have failed")
+	}
+	if n := f.attemptsFor("Email/import"); n != 1 {
+		t.Errorf("the server saw %d imports, want exactly 1", n)
+	}
+	if len(f.emails) != 0 {
+		t.Errorf("a failed import left %d messages behind", len(f.emails))
+	}
+}
+
+// TestIdempotentCallsStillRetry guards the other half: an ordinary read is
+// still retried through the same code path.
+func TestIdempotentCallsStillRetry(t *testing.T) {
+	f := newFakeServer(t)
+	f.failMethod["Mailbox/get"] = []int{503, 429}
+	m := f.client(t).Mail()
+
+	if _, err := m.Mailboxes(testCtx(t)); err != nil {
+		t.Fatalf("Mailboxes should have succeeded after retries: %v", err)
+	}
+	if n := f.attemptsFor("Mailbox/get"); n != 3 {
+		t.Errorf("Mailbox/get attempts = %d, want 3", n)
+	}
+}
+
+// TestSubmissionAccountFromPrimaryAccounts: Identity and EmailSubmission live
+// in the submission capability's primary account, not necessarily the mail one.
+func TestSubmissionAccountFromPrimaryAccounts(t *testing.T) {
+	f := newFakeServer(t)
+	f.submissionPrimary = "acct-submission"
+	m := f.client(t).Mail()
+
+	if _, err := m.Send(testCtx(t), []byte("From: me@example.com\r\n\r\nhi\r\n"), ""); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	ids := f.captured("Identity/get")
+	if len(ids) != 1 || ids[0]["accountId"] != "acct-submission" {
+		t.Errorf("Identity/get accountId = %v, want acct-submission", ids[0]["accountId"])
+	}
+	subs := f.captured("EmailSubmission/set")
+	if len(subs) != 1 || subs[0]["accountId"] != "acct-submission" {
+		t.Errorf("EmailSubmission/set accountId = %v, want acct-submission", subs[0]["accountId"])
+	}
+	// The message itself is still imported into the mail account.
+	imports := f.captured("Email/import")
+	if len(imports) != 1 || imports[0]["accountId"] != testAccount {
+		t.Errorf("Email/import accountId = %v, want %s", imports[0]["accountId"], testAccount)
+	}
+}
+
+// TestSubmissionAccountFallsBackToMail: a session that advertises no
+// submission primary account still sends, using the mail account.
+func TestSubmissionAccountFallsBackToMail(t *testing.T) {
+	f := newFakeServer(t)
+	f.submissionPrimary = "-" // sentinel: drop the entry entirely
+	m := f.client(t).Mail()
+
+	if _, err := m.Send(testCtx(t), []byte("From: me@example.com\r\n\r\nhi\r\n"), ""); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	ids := f.captured("Identity/get")
+	if len(ids) != 1 || ids[0]["accountId"] != testAccount {
+		t.Errorf("Identity/get accountId = %v, want the mail account %s", ids[0]["accountId"], testAccount)
+	}
+}
+
 func TestFetchAttachment(t *testing.T) {
 	f := newFakeServer(t)
 	f.mu.Lock()
@@ -783,6 +1050,35 @@ func TestGivesUpAfterRepeatedServerErrors(t *testing.T) {
 	}
 	if !provider.IsOffline(err) {
 		t.Fatalf("persistent 5xx should look offline, got %v", err)
+	}
+}
+
+// TestForbiddenIsNotAnAuthError: 403 means "not allowed to do this", not "your
+// token is dead". It must surface as an ordinary request error so a single
+// forbidden call cannot be mistaken for a permanently broken credential.
+func TestForbiddenIsNotAnAuthError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"type":"about:blank","detail":"no calendars scope"}`, http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := New(Options{Token: testToken, SessionURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.retryBase = time.Millisecond
+
+	_, err = c.Session(testCtx(t))
+	var ae *AuthError
+	if errors.As(err, &ae) {
+		t.Fatalf("403 gave %v, want a RequestError rather than an AuthError", err)
+	}
+	var re *RequestError
+	if !errors.As(err, &re) || re.Status != http.StatusForbidden {
+		t.Fatalf("403 gave %v, want a *RequestError with status 403", err)
+	}
+	if re.Detail != "no calendars scope" {
+		t.Errorf("problem+json detail = %q", re.Detail)
 	}
 }
 

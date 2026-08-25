@@ -26,9 +26,27 @@ const (
 	jitterFactor = 0.3
 )
 
+// nonIdempotent lists the calls that must never be repeated once the server
+// has answered, however transient the answer looks.
+//
+// A 500/503/429 on messages.send or drafts.create does not prove the request
+// was rejected: Gmail may well have accepted the message and failed on the way
+// back, and a retry would then send or draft it a second time. Losing the id
+// of a message that was in fact delivered is far cheaper than delivering it
+// twice, so these calls fail fast and let the outbox decide (it can look for
+// the message before trying again).
+//
+// Transport failures are a different story and are handled the same way for
+// every call: they are not retried here either, just tagged model.ErrOffline.
+var nonIdempotent = map[string]bool{
+	"messages.send": true,
+	"drafts.create": true,
+}
+
 // do runs one API call: it waits for quota, logs it, and retries transient
 // failures (429, 403 rateLimitExceeded/userRateLimitExceeded, 5xx) with
-// exponential backoff and jitter. Transport failures are not retried here —
+// exponential backoff and jitter. Calls named in nonIdempotent are never
+// retried after the server answered. Transport failures are not retried here —
 // they are wrapped with model.ErrOffline so the sync engine can back off
 // wholesale (§12).
 func (m *Mail) do(ctx context.Context, name string, units int, f func() error) error {
@@ -46,6 +64,11 @@ func (m *Mail) do(ctx context.Context, name string, units int, f func() error) e
 			return ctxErr
 		}
 		lastErr = wrapErr(name, err)
+		if nonIdempotent[name] {
+			m.log.Debug("gmail write failed, not retrying a non-idempotent call",
+				"method", name, "err", err)
+			return lastErr
+		}
 		if !retryable(err) || attempt == maxAttempts {
 			return lastErr
 		}

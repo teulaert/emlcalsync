@@ -1,12 +1,15 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -109,6 +112,11 @@ type fakeGoogle struct {
 	failWith     string // when set, the token endpoint returns this OAuth error code
 	refreshCount int
 	nextTokenSeq int
+	// failRaw* make the token endpoint answer with a body that is not the
+	// documented JSON error object, as Google's front end sometimes does.
+	failRawStatus int
+	failRawBody   string
+	failRawType   string
 }
 
 func newFakeGoogle(t *testing.T) *fakeGoogle {
@@ -125,6 +133,16 @@ func newFakeGoogle(t *testing.T) *fakeGoogle {
 		f.lastForm = r.PostForm
 		if r.PostForm.Get("grant_type") == "refresh_token" {
 			f.refreshCount++
+		}
+		if f.failRawStatus != 0 {
+			ct := f.failRawType
+			if ct == "" {
+				ct = "text/html; charset=utf-8"
+			}
+			w.Header().Set("Content-Type", ct)
+			w.WriteHeader(f.failRawStatus)
+			io.WriteString(w, f.failRawBody)
+			return
 		}
 		if f.failWith != "" {
 			w.Header().Set("Content-Type", "application/json")
@@ -362,5 +380,251 @@ func TestHTTPClientOffline(t *testing.T) {
 	_, err = src.Token()
 	if !errors.Is(err, model.ErrOffline) {
 		t.Fatalf("Token with a dead token endpoint = %v, want model.ErrOffline", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Redirect URL
+
+type stringAddr string
+
+func (a stringAddr) Network() string { return "tcp" }
+func (a stringAddr) String() string  { return string(a) }
+
+// Google's installed-app flow only accepts a loopback redirect URI, and the
+// one sent to the authorization server must match the one the browser is sent
+// to. A listener bound to every interface prints as "[::]:port" or
+// "0.0.0.0:port", neither of which is usable, so only the port is taken.
+func TestLoopbackURL(t *testing.T) {
+	cases := []struct {
+		name string
+		addr net.Addr
+		want string
+	}{
+		{"ipv4 loopback", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5000}, "http://127.0.0.1:5000"},
+		{"ipv4 wildcard", &net.TCPAddr{IP: net.IPv4zero, Port: 5001}, "http://127.0.0.1:5001"},
+		{"ipv6 wildcard", &net.TCPAddr{IP: net.IPv6zero, Port: 5002}, "http://127.0.0.1:5002"},
+		{"ipv6 loopback", &net.TCPAddr{IP: net.IPv6loopback, Port: 5003}, "http://127.0.0.1:5003"},
+		{"stringly ipv6 wildcard", stringAddr("[::]:5004"), "http://127.0.0.1:5004"},
+		{"stringly ipv4 wildcard", stringAddr("0.0.0.0:5005"), "http://127.0.0.1:5005"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := loopbackURL(tc.addr)
+			if err != nil {
+				t.Fatalf("loopbackURL(%v): %v", tc.addr, err)
+			}
+			if got != tc.want {
+				t.Errorf("loopbackURL(%v) = %q, want %q", tc.addr, got, tc.want)
+			}
+		})
+	}
+
+	if _, err := loopbackURL(stringAddr("not-an-address")); err == nil {
+		t.Error("loopbackURL of an unparsable address succeeded, want an error")
+	}
+}
+
+// End to end: listening on every interface must still advertise 127.0.0.1.
+func TestLoginRedirectURLOnWildcardListener(t *testing.T) {
+	fake := newFakeGoogle(t)
+
+	var authQuery url.Values
+	opened := make(chan struct{})
+	open := func(raw string) error {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return err
+		}
+		authQuery = u.Query()
+		close(opened)
+		return nil
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := Login(context.Background(), fake.config(), LoginOptions{
+			Addr:        "0.0.0.0:0",
+			OpenBrowser: open,
+			Output:      io.Discard,
+			Timeout:     10 * time.Second,
+		})
+		done <- err
+	}()
+
+	select {
+	case <-opened:
+	case err := <-done:
+		t.Fatalf("Login returned before opening a browser: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for the authorization URL")
+	}
+
+	redirect := authQuery.Get("redirect_uri")
+	if !strings.HasPrefix(redirect, "http://127.0.0.1:") {
+		t.Fatalf("redirect_uri = %q, want a http://127.0.0.1:<port> URL", redirect)
+	}
+	u, err := url.Parse(redirect)
+	if err != nil {
+		t.Fatalf("redirect_uri is not a URL: %v", err)
+	}
+	if u.Port() == "" || u.Port() == "0" {
+		t.Fatalf("redirect_uri %q carries no real port", redirect)
+	}
+
+	// The browser really can reach it, which is the point of the exercise.
+	resp, err := http.Get(redirect + "/?state=" + authQuery.Get("state") + "&code=the-code")
+	if err != nil {
+		t.Fatalf("GET %s: %v", redirect, err)
+	}
+	resp.Body.Close()
+
+	if err := <-done; err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if got := fake.form().Get("redirect_uri"); got != redirect {
+		t.Errorf("token exchange redirect_uri = %q, want %q", got, redirect)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Error classification
+
+// A 400 that is not an invalid_grant is a bug on our side, not a dead
+// credential: sending the user through the consent screen cannot fix it.
+func TestBadRequestWithoutInvalidGrantIsNotReauth(t *testing.T) {
+	fake := newFakeGoogle(t)
+	fake.failRawStatus = http.StatusBadRequest
+	fake.failRawBody = "<html><body>Bad Request</body></html>"
+
+	store := &MemoryTokenStore{}
+	if err := store.Save("k", &oauth2.Token{
+		AccessToken: "stale", RefreshToken: "r", Expiry: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	src, err := TokenSource(context.Background(), fake.config(), store, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = src.Token()
+	if err == nil {
+		t.Fatal("Token succeeded, want the 400 surfaced")
+	}
+	if IsReauthRequired(err) {
+		t.Errorf("a bare 400 was reported as *ErrReauthRequired: %v", err)
+	}
+	if errors.Is(err, model.ErrOffline) {
+		t.Errorf("a bare 400 was reported as offline: %v", err)
+	}
+}
+
+// A 400 whose body names invalid_grant is a dead grant even when the response
+// is not the documented JSON object and x/oauth2 cannot fill in ErrorCode.
+func TestBadRequestNamingInvalidGrantIsReauth(t *testing.T) {
+	fake := newFakeGoogle(t)
+	fake.failRawStatus = http.StatusBadRequest
+	fake.failRawBody = "<html><body>error: Invalid_Grant (token revoked)</body></html>"
+
+	store := &MemoryTokenStore{}
+	if err := store.Save("k", &oauth2.Token{
+		AccessToken: "stale", RefreshToken: "r", Expiry: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	src, err := TokenSource(context.Background(), fake.config(), store, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Token(); !IsReauthRequired(err) {
+		t.Fatalf("Token after an invalid_grant body = %v, want *ErrReauthRequired", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Store failures and concurrency
+
+// failingStore accepts nothing.
+type failingStore struct {
+	tok *oauth2.Token
+}
+
+func (s failingStore) Load(string) (*oauth2.Token, error) { return s.tok, nil }
+func (s failingStore) Save(string, *oauth2.Token) error {
+	return errors.New("disk is full")
+}
+
+// A token that cannot be persisted still works for this process, but silence
+// would hide a store that is throwing away every rotated refresh token.
+func TestSaveFailureIsWarnedAboutAndTokenReturned(t *testing.T) {
+	fake := newFakeGoogle(t)
+	var buf bytes.Buffer
+	var mu sync.Mutex
+	Logger = slog.New(slog.NewTextHandler(&syncWriter{w: &buf, mu: &mu}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { Logger = nil })
+
+	store := failingStore{tok: &oauth2.Token{
+		AccessToken: "stale", RefreshToken: "r", Expiry: time.Now().Add(-time.Minute),
+	}}
+	src, err := TokenSource(context.Background(), fake.config(), store, "work.gmail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := src.Token()
+	if err != nil {
+		t.Fatalf("Token = %v, want the refreshed token despite the store failing", err)
+	}
+	if tok.AccessToken != "access-1" {
+		t.Errorf("access token = %q, want access-1", tok.AccessToken)
+	}
+
+	mu.Lock()
+	logged := buf.String()
+	mu.Unlock()
+	if !strings.Contains(logged, "level=WARN") {
+		t.Errorf("store failure was not logged at WARN:\n%s", logged)
+	}
+	if !strings.Contains(logged, "work.gmail") || !strings.Contains(logged, "disk is full") {
+		t.Errorf("warning does not name the key and the cause:\n%s", logged)
+	}
+}
+
+type syncWriter struct {
+	w  io.Writer
+	mu *sync.Mutex
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+// One token source is shared by every request an *http.Client makes, so the
+// store is written from several goroutines at once.
+func TestMemoryTokenStoreConcurrent(t *testing.T) {
+	store := &MemoryTokenStore{}
+	var wg sync.WaitGroup
+	for i := range 16 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := store.Save("k", &oauth2.Token{AccessToken: "a" + strconv.Itoa(i)}); err != nil {
+				t.Errorf("Save: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if _, err := store.Load("k"); err != nil && !errors.Is(err, model.ErrNotFound) {
+				t.Errorf("Load: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if _, err := store.Load("k"); err != nil {
+		t.Fatalf("Load after the storm: %v", err)
+	}
+	if err := store.Save("k", nil); err == nil {
+		t.Error("Save of a nil token succeeded, want an error instead of a panic")
 	}
 }

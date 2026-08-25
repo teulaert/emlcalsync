@@ -29,7 +29,7 @@ type batchResult struct {
 }
 
 // batchGet fetches up to batchSize messages in a single multipart/mixed
-// request against https://www.googleapis.com/batch/gmail/v1.
+// request against https://gmail.googleapis.com/batch/gmail/v1.
 //
 // google.golang.org/api no longer ships a batch helper, so the request is
 // assembled by hand: one application/http part per message holding a bare

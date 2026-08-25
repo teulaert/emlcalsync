@@ -176,6 +176,38 @@ func TestWatchStopsOnAuthFailure(t *testing.T) {
 	}
 }
 
+// TestWatchRetriesForbidden: a 403 on the stream is not a dead token, so Watch
+// must reconnect rather than give up on the account for good.
+func TestWatchRetriesForbidden(t *testing.T) {
+	f := newFakeServer(t)
+	f.failSSE = []int{403, 403}
+	c := f.client(t)
+	c.pushBackoffMin = time.Millisecond
+	c.pushBackoffMax = 5 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.Watch(ctx, func(provider.ChangeHint) {}) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for f.sseConnections() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("Watch never got past the 403s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("Watch returned %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Watch did not return after cancellation")
+	}
+}
+
 func TestWatchNeedsCallback(t *testing.T) {
 	f := newFakeServer(t)
 	if err := f.client(t).Watch(context.Background(), nil); err == nil {
@@ -245,6 +277,21 @@ func TestParseStateChange(t *testing.T) {
 	}
 	if _, ok := parseStateChange(`{"@type":"StateChange"}`, seen); ok {
 		t.Error("a payload with no changes should be ignored")
+	}
+
+	// Only StateChange payloads are ours; anything else on the stream (a
+	// PushSubscription verification, a future payload type) is ignored even
+	// when it happens to carry a "changed" map.
+	fresh := map[string]string{}
+	if _, ok := parseStateChange(
+		`{"@type":"PushVerification","changed":{"a1":{"Email":"z"}}}`, fresh); ok {
+		t.Error("a non-StateChange payload should be ignored")
+	}
+	if len(fresh) != 0 {
+		t.Errorf("a non-StateChange payload updated the seen states: %v", fresh)
+	}
+	if _, ok := parseStateChange(`{"changed":{"a1":{"Email":"z"}}}`, fresh); ok {
+		t.Error("a payload without @type should be ignored")
 	}
 }
 

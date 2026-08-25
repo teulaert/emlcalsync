@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -37,11 +38,14 @@ type fakeCalendar struct {
 	gone bool // events.list answers 410
 
 	// observations
-	listQueries []url.Values
-	lastPatch   *calendarapi.Event
-	lastInsert  *calendarapi.Event
-	patchedID   string
-	deleted     []string
+	listQueries   []url.Values
+	insertQueries []url.Values
+	patchQueries  []url.Values
+	deleteQueries []url.Values
+	lastPatch     *calendarapi.Event
+	lastInsert    *calendarapi.Event
+	patchedID     string
+	deleted       []string
 }
 
 func newFakeCalendar(t *testing.T) *fakeCalendar {
@@ -130,6 +134,7 @@ func (f *fakeCalendar) handleInsert(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.lastInsert = &ev
+	f.insertQueries = append(f.insertQueries, r.URL.Query())
 	f.mu.Unlock()
 	stored := ev
 	stored.Id = "created-1"
@@ -148,6 +153,7 @@ func (f *fakeCalendar) handlePatch(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastPatch = &patch
+	f.patchQueries = append(f.patchQueries, r.URL.Query())
 	f.patchedID = r.PathValue("eid")
 
 	base, ok := f.events[f.patchedID]
@@ -173,6 +179,7 @@ func (f *fakeCalendar) handleDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("eid")
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.deleteQueries = append(f.deleteQueries, r.URL.Query())
 	if _, ok := f.events[id]; !ok {
 		apiError(w, http.StatusNotFound, "notFound", "event not found")
 		return
@@ -626,5 +633,210 @@ func TestContextCancellation(t *testing.T) {
 	}
 	if _, err := c.EventChanges(ctx, "cal-1", ""); !errors.Is(err, context.Canceled) {
 		t.Errorf("EventChanges with a cancelled ctx = %v, want context.Canceled", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// sendUpdates
+
+func lastQuery(t *testing.T, qs []url.Values) url.Values {
+	t.Helper()
+	if len(qs) == 0 {
+		t.Fatal("no request was recorded")
+	}
+	return qs[len(qs)-1]
+}
+
+// Guests must be told when they are invited, when the meeting moves and when
+// it is called off: every write that touches an event with other attendees
+// carries sendUpdates=all.
+func TestSendUpdatesOnWrites(t *testing.T) {
+	guests := []model.Attendee{
+		{Email: "me@example.com", Self: true, Response: model.PartAccepted},
+		{Email: "guest@example.com", Response: model.PartNeedsAction},
+	}
+	start := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+
+	t.Run("insert with guests", func(t *testing.T) {
+		f := newFakeCalendar(t)
+		c := newCal(t, f)
+		ev := &model.Event{Title: "Kickoff", Start: start, End: start.Add(time.Hour), Attendees: guests}
+		if _, err := c.CreateEvent(context.Background(), "cal-1", ev); err != nil {
+			t.Fatalf("CreateEvent: %v", err)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if got := lastQuery(t, f.insertQueries).Get("sendUpdates"); got != "all" {
+			t.Errorf("events.insert sendUpdates = %q, want all", got)
+		}
+	})
+
+	t.Run("insert without guests", func(t *testing.T) {
+		f := newFakeCalendar(t)
+		c := newCal(t, f)
+		ev := &model.Event{
+			Title: "Gym", Start: start, End: start.Add(time.Hour),
+			Attendees: []model.Attendee{{Email: "me@example.com", Self: true}},
+		}
+		if _, err := c.CreateEvent(context.Background(), "cal-1", ev); err != nil {
+			t.Fatalf("CreateEvent: %v", err)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if q := lastQuery(t, f.insertQueries); q.Has("sendUpdates") {
+			t.Errorf("events.insert sent sendUpdates=%q for a private event, want it omitted",
+				q.Get("sendUpdates"))
+		}
+	})
+
+	t.Run("patch with guests", func(t *testing.T) {
+		f := newFakeCalendar(t)
+		f.events["ev-1"] = &calendarapi.Event{Id: "ev-1", Summary: "Kickoff", Status: statusConfirmed}
+		c := newCal(t, f)
+		ev := &model.Event{
+			CalendarRemote: "cal-1", RemoteID: "ev-1", Title: "Kickoff (moved)",
+			Start: start, End: start.Add(time.Hour), Attendees: guests,
+		}
+		if _, err := c.UpdateEvent(context.Background(), ev); err != nil {
+			t.Fatalf("UpdateEvent: %v", err)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if got := lastQuery(t, f.patchQueries).Get("sendUpdates"); got != "all" {
+			t.Errorf("events.patch sendUpdates = %q, want all", got)
+		}
+	})
+
+	t.Run("patch without guests", func(t *testing.T) {
+		f := newFakeCalendar(t)
+		f.events["ev-1"] = &calendarapi.Event{Id: "ev-1", Summary: "Gym", Status: statusConfirmed}
+		c := newCal(t, f)
+		ev := &model.Event{CalendarRemote: "cal-1", RemoteID: "ev-1", Title: "Gym (later)"}
+		if _, err := c.UpdateEvent(context.Background(), ev); err != nil {
+			t.Fatalf("UpdateEvent: %v", err)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if q := lastQuery(t, f.patchQueries); q.Has("sendUpdates") {
+			t.Errorf("events.patch sent sendUpdates=%q for a private event, want it omitted",
+				q.Get("sendUpdates"))
+		}
+	})
+
+	// DeleteEvent is handed nothing but an id, so it cannot inspect the guest
+	// list; it always announces, which is a no-op for a private event.
+	t.Run("delete", func(t *testing.T) {
+		f := newFakeCalendar(t)
+		f.events["ev-1"] = &calendarapi.Event{Id: "ev-1", Status: statusConfirmed}
+		c := newCal(t, f)
+		if err := c.DeleteEvent(context.Background(), "cal-1", "ev-1"); err != nil {
+			t.Fatalf("DeleteEvent: %v", err)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if got := lastQuery(t, f.deleteQueries).Get("sendUpdates"); got != "all" {
+			t.Errorf("events.delete sendUpdates = %q, want all", got)
+		}
+	})
+
+	t.Run("respond", func(t *testing.T) {
+		f := newFakeCalendar(t)
+		f.events["ev-1"] = &calendarapi.Event{
+			Id: "ev-1", Summary: "Kickoff", Status: statusConfirmed,
+			Attendees: []*calendarapi.EventAttendee{
+				{Email: "boss@example.com", ResponseStatus: "accepted"},
+				{Email: "me@example.com", Self: true, ResponseStatus: "needsAction"},
+			},
+		}
+		c := newCal(t, f)
+		if err := c.Respond(context.Background(), "cal-1", "ev-1", model.PartAccepted); err != nil {
+			t.Fatalf("Respond: %v", err)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if got := lastQuery(t, f.patchQueries).Get("sendUpdates"); got != "all" {
+			t.Errorf("Respond's events.patch sendUpdates = %q, want all", got)
+		}
+	})
+}
+
+// A final page with neither token would otherwise persist an empty sync state,
+// quietly turning every later delta into a full listing.
+func TestEventChangesRejectsMissingSyncToken(t *testing.T) {
+	f := newFakeCalendar(t)
+	f.pages = []*calendarapi.Events{{
+		TimeZone: "UTC",
+		Items: []*calendarapi.Event{{
+			Id: "e1", ICalUID: "e1@g", Summary: "One", Status: statusConfirmed,
+			Start: &calendarapi.EventDateTime{DateTime: "2026-08-25T10:00:00Z"},
+			End:   &calendarapi.EventDateTime{DateTime: "2026-08-25T11:00:00Z"},
+		}},
+		// no NextPageToken, no NextSyncToken
+	}}
+	c := newCal(t, f)
+	ch, err := c.EventChanges(context.Background(), "cal-1", "token-1")
+	if err == nil {
+		t.Fatalf("EventChanges returned NewState %q and no error, want an error", ch.NewState)
+	}
+	if ch != nil {
+		t.Errorf("EventChanges returned %+v alongside the error, want nil", ch)
+	}
+	if !strings.Contains(err.Error(), "nextSyncToken") {
+		t.Errorf("error = %v, want it to name the missing nextSyncToken", err)
+	}
+}
+
+// Google delivers a cancelled instance stripped down to id, status,
+// recurringEventId and originalStartTime. It must still map to an event the
+// occurrence matcher can place, and must never reach the index with a zero
+// (1970) start.
+func TestCancelledInstanceWithoutTimes(t *testing.T) {
+	f := newFakeCalendar(t)
+	f.pages = []*calendarapi.Events{{
+		TimeZone:      "Europe/Amsterdam",
+		NextSyncToken: "token-1",
+		Items: []*calendarapi.Event{{
+			Id:                "master_20260827T070000Z",
+			Status:            statusCancelled,
+			RecurringEventId:  "master",
+			OriginalStartTime: &calendarapi.EventDateTime{DateTime: "2026-08-27T09:00:00+02:00", TimeZone: "Europe/Amsterdam"},
+		}},
+	}}
+	c := newCal(t, f)
+	ch, err := c.EventChanges(context.Background(), "cal-1", "")
+	if err != nil {
+		t.Fatalf("EventChanges: %v", err)
+	}
+	if len(ch.Removed) != 0 {
+		t.Errorf("Removed = %v, want none: a cancelled instance is an exception, not a deletion", ch.Removed)
+	}
+	if len(ch.Upserted) != 1 {
+		t.Fatalf("upserted %d events, want 1", len(ch.Upserted))
+	}
+	ev := ch.Upserted[0]
+	if ev.Status != model.StatusCancelled {
+		t.Errorf("Status = %q, want cancelled", ev.Status)
+	}
+	if ev.RecurrenceID != "2026-08-27T09:00:00+02:00" {
+		t.Errorf("RecurrenceID = %q, want the original start in RFC3339", ev.RecurrenceID)
+	}
+	if ev.Start.IsZero() {
+		t.Fatal("Start is the zero time; it would be stored as start_utc=0 (1970)")
+	}
+	if ev.End.IsZero() {
+		t.Error("End is the zero time; it would be stored as end_utc=0 (1970)")
+	}
+	want, err := time.Parse(time.RFC3339, "2026-08-27T09:00:00+02:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ev.Start.Equal(want) {
+		t.Errorf("Start = %v, want the original start %v", ev.Start, want)
+	}
+	if !ev.End.Equal(want) {
+		t.Errorf("End = %v, want the original start %v", ev.End, want)
+	}
+	if ev.Timezone != "Europe/Amsterdam" {
+		t.Errorf("Timezone = %q, want the original start's zone", ev.Timezone)
 	}
 }
