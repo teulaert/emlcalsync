@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lennert/emlcal/internal/calendar"
 	"github.com/lennert/emlcal/internal/model"
 	"github.com/lennert/emlcal/internal/provider"
 )
@@ -134,6 +135,45 @@ func exceptionEvent() map[string]any {
 	  "recurrenceIdTimeZone": "Europe/Amsterdam",
 	  "status": "cancelled",
 	  "updated": "2026-02-04T10:00:00Z"
+	}`), &obj)
+	return obj
+}
+
+// weeklyWithOverridesEvent is a recurring master carrying per-occurrence
+// changes inside recurrenceOverrides (RFC 8984 §4.7.3): one moved occurrence,
+// one excluded, and one patched through a nested path.
+func weeklyWithOverridesEvent() map[string]any {
+	var obj map[string]any
+	json.Unmarshal([]byte(`{
+	  "@type": "Event",
+	  "id": "ev-weekly",
+	  "calendarIds": {"cal-1": true},
+	  "uid": "uid-weekly",
+	  "title": "Weekly",
+	  "start": "2026-03-02T09:00:00",
+	  "duration": "PT1H",
+	  "timeZone": "Europe/Amsterdam",
+	  "status": "confirmed",
+	  "updated": "2026-02-01T10:00:00Z",
+	  "locations": {"loc-a": {"@type": "Location", "name": "Room 4"}},
+	  "recurrenceRules": [{
+	    "@type": "RecurrenceRule",
+	    "frequency": "weekly",
+	    "byDay": [{"@type": "NDay", "day": "mo"}]
+	  }],
+	  "alerts": {"a1": {"@type": "Alert", "trigger": {"@type": "OffsetTrigger", "offset": "-PT5M"}}},
+	  "recurrenceOverrides": {
+	    "2026-03-09T09:00:00": {
+	      "start": "2026-03-09T11:00:00",
+	      "title": "Weekly (moved)",
+	      "duration": "PT30M"
+	    },
+	    "2026-03-16T09:00:00": {"excluded": true},
+	    "2026-03-23T09:00:00": {
+	      "status": "tentative",
+	      "locations/loc-a/name": "Room 9"
+	    }
+	  }
 	}`), &obj)
 	return obj
 }
@@ -369,7 +409,9 @@ func TestEventChangesFullListing(t *testing.T) {
 
 	// --- the exception instance ----------------------------------------
 	ex := byID["ev-standup-exception"]
-	if ex.RecurrenceID != "2026-03-09T09:30:00" {
+	// Normalised to an RFC 3339 instant in the master's zone, the way the
+	// Google provider writes it and calendar.ApplyExceptions matches it.
+	if ex.RecurrenceID != "2026-03-09T09:30:00+01:00" {
 		t.Errorf("recurrenceId = %q", ex.RecurrenceID)
 	}
 	if ex.Status != model.StatusCancelled {
@@ -1153,5 +1195,263 @@ func TestCalendarRequiresCapability(t *testing.T) {
 	cal := (&Client{}).Calendar()
 	if !strings.Contains(strings.Join(cal.using(), ","), CapCalendars) {
 		t.Errorf("using = %v", cal.using())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// recurrenceOverrides
+
+func TestEventChangesExpandsRecurrenceOverrides(t *testing.T) {
+	f := newFakeServer(t)
+	seedCalendars(f)
+	seedEvents(f, weeklyWithOverridesEvent())
+	cal := f.client(t).Calendar()
+
+	ch, err := cal.EventChanges(testCtx(t), "cal-1", "")
+	if err != nil {
+		t.Fatalf("EventChanges: %v", err)
+	}
+	if len(ch.Upserted) != 4 {
+		t.Fatalf("got %d events, want the master plus 3 overrides: %+v", len(ch.Upserted), ch.Upserted)
+	}
+	byID := map[string]model.Event{}
+	for _, ev := range ch.Upserted {
+		byID[ev.RemoteID] = ev
+	}
+
+	// --- the master ------------------------------------------------------
+	master, ok := byID["ev-weekly"]
+	if !ok {
+		t.Fatalf("no master event in %v", sortedMapKeys(byID))
+	}
+	if master.RecurrenceID != "" {
+		t.Errorf("the master must not carry a recurrence id, got %q", master.RecurrenceID)
+	}
+	if master.RRule != "FREQ=WEEKLY;BYDAY=MO" {
+		t.Errorf("master rrule = %q", master.RRule)
+	}
+	var rawMaster map[string]any
+	if err := json.Unmarshal(master.RawJSON, &rawMaster); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rawMaster["recurrenceOverrides"]; !ok {
+		t.Error("the master's RawJSON lost recurrenceOverrides")
+	}
+
+	// --- the moved occurrence -------------------------------------------
+	moved, ok := byID["ev-weekly;20260309T090000"]
+	if !ok {
+		t.Fatalf("no exception for the moved occurrence in %v", sortedMapKeys(byID))
+	}
+	if moved.RecurrenceID != "2026-03-09T09:00:00+01:00" {
+		t.Errorf("moved recurrenceId = %q", moved.RecurrenceID)
+	}
+	if moved.UID != master.UID {
+		t.Errorf("exception uid %q should match the master %q", moved.UID, master.UID)
+	}
+	if moved.RRule != "" {
+		t.Errorf("an exception instance must not carry an RRULE, got %q", moved.RRule)
+	}
+	if moved.Title != "Weekly (moved)" {
+		t.Errorf("moved title = %q", moved.Title)
+	}
+	loc, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Skipf("no tzdata: %v", err)
+	}
+	if want := time.Date(2026, 3, 9, 11, 0, 0, 0, loc); !moved.Start.Equal(want) {
+		t.Errorf("moved start = %s, want %s", moved.Start, want)
+	}
+	if want := time.Date(2026, 3, 9, 11, 30, 0, 0, loc); !moved.End.Equal(want) {
+		t.Errorf("moved end = %s, want %s (the override's own duration)", moved.End, want)
+	}
+	if moved.Status != model.StatusConfirmed {
+		t.Errorf("moved status = %q", moved.Status)
+	}
+	// Properties the override does not touch come from the master.
+	if moved.Location != "Room 4" {
+		t.Errorf("moved location = %q, want the master's", moved.Location)
+	}
+
+	// --- the excluded occurrence ----------------------------------------
+	gone, ok := byID["ev-weekly;20260316T090000"]
+	if !ok {
+		t.Fatalf("no exception for the excluded occurrence in %v", sortedMapKeys(byID))
+	}
+	if gone.Status != model.StatusCancelled {
+		t.Errorf("excluded occurrence status = %q, want cancelled", gone.Status)
+	}
+	if gone.RecurrenceID != "2026-03-16T09:00:00+01:00" {
+		t.Errorf("excluded recurrenceId = %q", gone.RecurrenceID)
+	}
+
+	// --- the nested patch ------------------------------------------------
+	patched, ok := byID["ev-weekly;20260323T090000"]
+	if !ok {
+		t.Fatalf("no exception for the patched occurrence in %v", sortedMapKeys(byID))
+	}
+	if patched.Location != "Room 9" {
+		t.Errorf("patched location = %q, want the override's nested path to have applied", patched.Location)
+	}
+	if patched.Status != model.StatusTentative {
+		t.Errorf("patched status = %q", patched.Status)
+	}
+	if want := time.Date(2026, 3, 23, 9, 0, 0, 0, loc); !patched.Start.Equal(want) {
+		t.Errorf("patched start = %s, want the occurrence time %s", patched.Start, want)
+	}
+}
+
+// TestRecurrenceOverridesExpandThroughApplyExceptions is the end-to-end check:
+// the events this provider hands over must make internal/calendar produce the
+// right occurrences.
+func TestRecurrenceOverridesExpandThroughApplyExceptions(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Skipf("no tzdata: %v", err)
+	}
+	f := newFakeServer(t)
+	seedCalendars(f)
+	seedEvents(f, weeklyWithOverridesEvent())
+
+	ch, err := f.client(t).Calendar().EventChanges(testCtx(t), "cal-1", "")
+	if err != nil {
+		t.Fatalf("EventChanges: %v", err)
+	}
+	var master model.Event
+	var exceptions []model.Event
+	for _, ev := range ch.Upserted {
+		if ev.RecurrenceID == "" {
+			master = ev
+			continue
+		}
+		exceptions = append(exceptions, ev)
+	}
+
+	from := time.Date(2026, 3, 1, 0, 0, 0, 0, loc)
+	to := time.Date(2026, 3, 31, 0, 0, 0, 0, loc)
+	occ, err := calendar.Expand(&master, from, to)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	occ = calendar.ApplyExceptions(occ, exceptions)
+
+	var got []string
+	for _, o := range occ {
+		got = append(got, o.Start.In(loc).Format(time.RFC3339))
+	}
+	want := []string{
+		"2026-03-02T09:00:00+01:00",
+		"2026-03-09T11:00:00+01:00", // moved
+		// 2026-03-16 is excluded
+		"2026-03-23T09:00:00+01:00",
+		"2026-03-30T09:00:00+02:00", // after the DST switch
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("occurrences =\n%v\nwant\n%v", got, want)
+	}
+}
+
+// TestUpdateEventKeepsRecurrenceOverrides: an ordinary edit of the master must
+// not rewrite (or drop) the per-occurrence overrides.
+func TestUpdateEventKeepsRecurrenceOverrides(t *testing.T) {
+	f := newFakeServer(t)
+	seedCalendars(f)
+	seedEvents(f, weeklyWithOverridesEvent())
+	cal := f.client(t).Calendar()
+	ctx := testCtx(t)
+
+	ch, err := cal.EventChanges(ctx, "cal-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var master model.Event
+	for _, ev := range ch.Upserted {
+		if ev.RemoteID == "ev-weekly" {
+			master = ev
+		}
+	}
+	master.Title = "Weekly sync"
+	if _, err := cal.UpdateEvent(ctx, &master); err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+
+	sets := f.captured("CalendarEvent/set")
+	if len(sets) != 1 {
+		t.Fatalf("got %d CalendarEvent/set calls", len(sets))
+	}
+	patch := sets[0]["update"].(map[string]any)["ev-weekly"].(map[string]any)
+	if patch["title"] != "Weekly sync" {
+		t.Errorf("patch title = %v", patch["title"])
+	}
+	for k := range patch {
+		if strings.HasPrefix(k, "recurrenceOverrides") {
+			t.Errorf("the patch touches %q; overrides are not ours to rewrite", k)
+		}
+	}
+	f.mu.Lock()
+	stored, _ := f.events["ev-weekly"]["recurrenceOverrides"].(map[string]any)
+	f.mu.Unlock()
+	if len(stored) != 3 {
+		t.Errorf("the server now holds %d overrides, want 3", len(stored))
+	}
+}
+
+// TestCreateEventCarriesRecurrenceOverrides: re-creating an event we read from
+// this provider keeps its overrides, which a create has no base to patch into.
+func TestCreateEventCarriesRecurrenceOverrides(t *testing.T) {
+	f := newFakeServer(t)
+	seedCalendars(f)
+	seedEvents(f, weeklyWithOverridesEvent())
+	cal := f.client(t).Calendar()
+	ctx := testCtx(t)
+
+	ch, err := cal.EventChanges(ctx, "cal-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var master model.Event
+	for _, ev := range ch.Upserted {
+		if ev.RemoteID == "ev-weekly" {
+			master = ev
+		}
+	}
+	master.RemoteID = ""
+	if _, err := cal.CreateEvent(ctx, "cal-1", &master); err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	create := f.captured("CalendarEvent/set")[0]["create"].(map[string]any)["new"].(map[string]any)
+	ovr, _ := create["recurrenceOverrides"].(map[string]any)
+	if len(ovr) != 3 {
+		t.Fatalf("created event carries %d overrides, want 3: %v", len(ovr), create["recurrenceOverrides"])
+	}
+	if excl, _ := ovr["2026-03-16T09:00:00"].(map[string]any); excl["excluded"] != true {
+		t.Errorf("the excluded override did not survive: %v", ovr["2026-03-16T09:00:00"])
+	}
+}
+
+// TestWritesRefuseOverrideInstances: the ids this package invents for override
+// instances mean nothing to the server, so a write against one is refused
+// rather than sent.
+func TestWritesRefuseOverrideInstances(t *testing.T) {
+	f := newFakeServer(t)
+	seedCalendars(f)
+	seedEvents(f, weeklyWithOverridesEvent())
+	cal := f.client(t).Calendar()
+	ctx := testCtx(t)
+
+	ev := &model.Event{
+		RemoteID:       "ev-weekly;20260309T090000",
+		CalendarRemote: "cal-1",
+		Title:          "nope",
+		Start:          time.Date(2026, 3, 9, 11, 0, 0, 0, time.UTC),
+	}
+	if _, err := cal.UpdateEvent(ctx, ev); err == nil {
+		t.Error("UpdateEvent on an override instance should be refused")
+	}
+	if err := cal.DeleteEvent(ctx, "cal-1", ev.RemoteID); err == nil {
+		t.Error("DeleteEvent on an override instance should be refused")
+	}
+	if n := len(f.captured("CalendarEvent/set")); n != 0 {
+		t.Errorf("%d writes reached the server", n)
 	}
 }

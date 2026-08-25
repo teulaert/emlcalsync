@@ -26,6 +26,10 @@ const eventPageMax = 500
 // a few things may differ from the draft this was written against (-28).
 // Everywhere that matters this file probes and falls back rather than assuming:
 //
+//   - the capability URN is urn:ietf:params:jmap:calendars when the session
+//     advertises it, and otherwise any capability whose last component is
+//     "calendars" (see Client.CalendarCapability), so a vendor spelling such as
+//     https://www.fastmail.com/dev/calendars still works;
 //   - the query filter is sent as {"inCalendar": id} (draft -20 and later) and
 //     retried as {"inCalendars": [id]} (draft -08 and earlier) if the server
 //     rejects it;
@@ -306,6 +310,15 @@ func (cal *Calendar) eventState(ctx context.Context, acct string) (string, error
 // since=="" performs a full listing. The state token is read *before* the
 // listing so a long backfill replays rather than skips concurrent edits.
 //
+// A recurring event whose master carries recurrenceOverrides is reported as
+// the master plus one exception instance per override (see toModelEvents), so
+// Upserted can hold more events than the server returned.
+//
+// KNOWN GAP: when an override disappears from a master (or the master itself
+// is destroyed), the server reports only the master id, so the exception rows
+// the previous sync materialised are not named in Removed and linger locally
+// until the next full listing.
+//
 // The CalendarEvent state is per account, not per calendar, so every calendar
 // in an account is handed the same NewState. That is harmless: an event that
 // changed in another calendar is simply filtered out here.
@@ -338,7 +351,7 @@ func (cal *Calendar) EventChanges(ctx context.Context, calendarRemote, since str
 		}
 		for i, js := range evs {
 			out.Upserted = append(out.Upserted,
-				toModelEvent(js, raws[i], calendarRemote, self, cal.c.log))
+				toModelEvents(js, raws[i], calendarRemote, self, cal.c.log)...)
 		}
 		return out, nil
 	}
@@ -389,7 +402,7 @@ func (cal *Calendar) EventChanges(ctx context.Context, calendarRemote, since str
 			continue
 		}
 		out.Upserted = append(out.Upserted,
-			toModelEvent(js, raws[i], calendarRemote, self, cal.c.log))
+			toModelEvents(js, raws[i], calendarRemote, self, cal.c.log)...)
 	}
 	return out, nil
 }
@@ -459,6 +472,14 @@ func (cal *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev 
 	if err != nil {
 		return nil, err
 	}
+	// A create has no server object to patch against, so per-occurrence
+	// overrides would be dropped on the floor. Carry them across from RawJSON
+	// when it holds a JSCalendar object that has them (re-creating an event we
+	// read from this provider), and only them: nothing else in a foreign
+	// RawJSON can be trusted to be JSCalendar.
+	if ovr := recurrenceOverridesFrom(ev.RawJSON); len(ovr) > 0 {
+		js.RecurrenceOverrides = ovr
+	}
 	const cid = "new"
 	sr, err := cal.setEvents(ctx, map[string]any{
 		"accountId": acct,
@@ -501,6 +522,10 @@ var managedEventKeys = []string{
 }
 
 // UpdateEvent writes the changed top-level properties of ev.
+//
+// recurrenceOverrides is deliberately not in managedEventKeys: an update
+// patches only the properties this package models, so per-occurrence overrides
+// (along with alerts, colours and vendor extensions) survive untouched.
 func (cal *Calendar) UpdateEvent(ctx context.Context, ev *model.Event) (*model.Event, error) {
 	acct, err := cal.AccountID(ctx)
 	if err != nil {
@@ -508,6 +533,11 @@ func (cal *Calendar) UpdateEvent(ctx context.Context, ev *model.Event) (*model.E
 	}
 	if ev.RemoteID == "" {
 		return nil, errors.New("jmap: UpdateEvent needs a remote id")
+	}
+	if isExceptionRemoteID(ev.RemoteID) {
+		return nil, fmt.Errorf("jmap: %s is one occurrence of %s, and writing a single "+
+			"occurrence back into recurrenceOverrides is not implemented",
+			ev.RemoteID, strings.Split(ev.RemoteID, overrideIDSeparator)[0])
 	}
 
 	var base *jsEvent
@@ -576,6 +606,11 @@ func (cal *Calendar) DeleteEvent(ctx context.Context, calendarRemote, remoteID s
 	acct, err := cal.AccountID(ctx)
 	if err != nil {
 		return err
+	}
+	if isExceptionRemoteID(remoteID) {
+		return fmt.Errorf("jmap: %s is one occurrence of %s, and excluding a single "+
+			"occurrence through recurrenceOverrides is not implemented",
+			remoteID, strings.Split(remoteID, overrideIDSeparator)[0])
 	}
 	sr, err := cal.setEvents(ctx, map[string]any{
 		"accountId": acct,

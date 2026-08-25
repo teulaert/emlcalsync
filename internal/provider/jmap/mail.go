@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -382,8 +383,17 @@ func parseEnumCursor(s string) (enumCursor, error) {
 	if s == "" {
 		return enumCursor{}, nil
 	}
+	if !strings.HasPrefix(s, "{") {
+		// A bare number is a cursor written by an older build, persisted in a
+		// half-finished backfill. Resume from that position; the next page
+		// picks up an anchor again.
+		if n, err := strconv.Atoi(s); err == nil && n >= 0 {
+			return enumCursor{N: n}, nil
+		}
+		return enumCursor{}, fmt.Errorf("jmap: bad enumerate cursor %q", s)
+	}
 	var c enumCursor
-	if !strings.HasPrefix(s, "{") || json.Unmarshal([]byte(s), &c) != nil || c.N < 0 {
+	if json.Unmarshal([]byte(s), &c) != nil || c.N < 0 {
 		return enumCursor{}, fmt.Errorf("jmap: bad enumerate cursor %q", s)
 	}
 	return c, nil

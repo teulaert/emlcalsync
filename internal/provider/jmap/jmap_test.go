@@ -379,8 +379,29 @@ func TestEnumerateEmptyAccount(t *testing.T) {
 func TestEnumerateBadCursor(t *testing.T) {
 	f := newFakeServer(t)
 	m := f.client(t).Mail()
-	if _, _, err := m.Enumerate(testCtx(t), "not-a-number", 10); err == nil {
-		t.Fatal("expected an error for a non-numeric cursor")
+	for _, bad := range []string{"not-a-number", "-3", `{"n":-1}`, "{oops"} {
+		if _, _, err := m.Enumerate(testCtx(t), bad, 10); err == nil {
+			t.Errorf("cursor %q should have been rejected", bad)
+		}
+	}
+}
+
+// TestEnumerateLegacyPositionCursor: a backfill interrupted by an older build
+// resumes from its numeric cursor instead of starting over.
+func TestEnumerateLegacyPositionCursor(t *testing.T) {
+	f := newFakeServer(t)
+	seedEmails(f, 25)
+	m := f.client(t).Mail()
+
+	page, next, err := m.Enumerate(testCtx(t), "20", 10)
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(page) != 5 || page[0].RemoteID != "e020" {
+		t.Fatalf("page = %d envelopes starting at %q", len(page), page[0].RemoteID)
+	}
+	if next != "" {
+		t.Errorf("a short page should end the enumeration, got cursor %q", next)
 	}
 }
 

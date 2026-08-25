@@ -581,6 +581,9 @@ func participationToJS(p model.Participation) string {
 
 // toModelEvent maps a JSCalendar event onto the provider-neutral model.
 // raw is stored verbatim on the result so writes can patch minimally.
+//
+// It maps exactly one object. A master carrying recurrenceOverrides also has
+// exception instances hiding inside it — use toModelEvents for that.
 func toModelEvent(js *jsEvent, raw json.RawMessage, calendarRemote, selfEmail string, log *slog.Logger) model.Event {
 	loc := loadLocation(js.TimeZone, log)
 	ev := model.Event{
@@ -591,7 +594,7 @@ func toModelEvent(js *jsEvent, raw json.RawMessage, calendarRemote, selfEmail st
 		Description:    js.Description,
 		AllDay:         js.ShowWithoutTime,
 		Status:         statusFromJS(js.Status),
-		RecurrenceID:   js.RecurrenceID,
+		RecurrenceID:   recurrenceIDToRFC3339(js, loc, log),
 		Updated:        js.Updated.Time,
 		RawJSON:        append(json.RawMessage(nil), raw...),
 	}
@@ -661,6 +664,252 @@ func toModelEvent(js *jsEvent, raw json.RawMessage, calendarRemote, selfEmail st
 		}
 	}
 	return ev
+}
+
+// recurrenceIDToRFC3339 renders a recurrence id the way the rest of the app
+// expects it: an RFC 3339 instant in the master's zone, matching what the
+// Google provider writes and what calendar.ApplyExceptions matches on.
+//
+// The zone is recurrenceIdTimeZone (RFC 8984 §4.7.4: the zone of the *master*),
+// falling back to the instance's own zone when the server omits it.
+func recurrenceIDToRFC3339(js *jsEvent, loc *time.Location, log *slog.Logger) string {
+	if js.RecurrenceID == "" {
+		return ""
+	}
+	ridLoc := loc
+	if js.RecurrenceIDTimeZone != nil && *js.RecurrenceIDTimeZone != "" {
+		ridLoc = loadLocation(js.RecurrenceIDTimeZone, log)
+	}
+	t, err := parseLocalDateTime(js.RecurrenceID, ridLoc)
+	if err != nil {
+		if log != nil {
+			log.Warn("jmap: unparseable recurrenceId", "event", js.ID, "recurrenceId", js.RecurrenceID)
+		}
+		// Hand it through unchanged rather than dropping the instance's only
+		// link to its series; ApplyExceptions also accepts the local form.
+		return js.RecurrenceID
+	}
+	return t.Format(time.RFC3339)
+}
+
+// toModelEvents maps one CalendarEvent onto the master event plus one model
+// event per entry in recurrenceOverrides.
+//
+// RFC 8984 §4.7.3 keeps per-occurrence changes inside the master object rather
+// than as separate events: recurrenceOverrides maps a recurrence id
+// (LocalDateTime in the master's zone) to a PatchObject. The sync engine and
+// internal/calendar work on flat exception events instead, so each override is
+// materialised here:
+//
+//   - "excluded": true becomes an exception with status cancelled, which is how
+//     calendar.ApplyExceptions drops the occurrence (an EXDATE has nowhere else
+//     to live: model.Event carries a single RRULE line and calendar.Expand
+//     ignores EXDATE/RDATE lines appended to it);
+//   - any other patch becomes an exception instance with the master's fields
+//     patched by the override.
+//
+// The master keeps its own RawJSON — overrides and all — so a later write
+// patches minimally and never rewrites them.
+func toModelEvents(js *jsEvent, raw json.RawMessage, calendarRemote, selfEmail string, log *slog.Logger) []model.Event {
+	master := toModelEvent(js, raw, calendarRemote, selfEmail, log)
+	if len(js.RecurrenceOverrides) == 0 {
+		return []model.Event{master}
+	}
+	baseMap := map[string]any{}
+	if err := json.Unmarshal(raw, &baseMap); err != nil {
+		if log != nil {
+			log.Warn("jmap: cannot expand recurrenceOverrides", "event", js.ID, "err", err)
+		}
+		return []model.Event{master}
+	}
+	loc := loadLocation(js.TimeZone, log)
+
+	out := make([]model.Event, 0, 1+len(js.RecurrenceOverrides))
+	out = append(out, master)
+	for _, key := range sortedKeys(js.RecurrenceOverrides) {
+		ev, ok := overrideEvent(js, baseMap, key, js.RecurrenceOverrides[key], loc,
+			calendarRemote, selfEmail, log)
+		if !ok {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// overrideEvent materialises one recurrenceOverrides entry as an exception.
+func overrideEvent(js *jsEvent, baseMap map[string]any, key string, patchRaw json.RawMessage,
+	loc *time.Location, calendarRemote, selfEmail string, log *slog.Logger) (model.Event, bool) {
+
+	rid, err := parseLocalDateTime(key, loc)
+	if err != nil {
+		if log != nil {
+			log.Warn("jmap: unparseable recurrenceOverrides key", "event", js.ID, "key", key)
+		}
+		return model.Event{}, false
+	}
+	var patch map[string]json.RawMessage
+	if err := json.Unmarshal(patchRaw, &patch); err != nil {
+		if log != nil {
+			log.Warn("jmap: recurrenceOverrides entry is not a patch object",
+				"event", js.ID, "key", key, "err", err)
+		}
+		return model.Event{}, false
+	}
+	excluded := false
+	if v, ok := patch["excluded"]; ok {
+		_ = json.Unmarshal(v, &excluded)
+	}
+
+	obj := deepCopyJSON(baseMap)
+	// RFC 8984 §4.7.4: an instance carries no recurrence of its own.
+	delete(obj, "recurrenceRules")
+	delete(obj, "recurrenceOverrides")
+	delete(obj, "excludedRecurrenceRules")
+	delete(obj, "excluded")
+	obj["start"] = key
+	obj["recurrenceId"] = key
+	if js.TimeZone != nil && *js.TimeZone != "" {
+		obj["recurrenceIdTimeZone"] = *js.TimeZone
+	} else {
+		delete(obj, "recurrenceIdTimeZone")
+	}
+	if js.ID != "" {
+		obj["baseEventId"] = js.ID
+		obj["id"] = exceptionRemoteID(js.ID, rid)
+	}
+	for _, path := range sortedKeys(patch) {
+		if path == "excluded" {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal(patch[path], &v); err != nil {
+			continue
+		}
+		if !applyPatchPath(obj, path, v) && log != nil {
+			log.Debug("jmap: skipping unapplicable recurrence override path",
+				"event", js.ID, "key", key, "path", path)
+		}
+	}
+	if excluded {
+		// An excluded occurrence is not "an event that is cancelled" on the
+		// wire, but that is exactly how ApplyExceptions removes an instance.
+		obj["status"] = "cancelled"
+	}
+
+	rawEx, err := json.Marshal(obj)
+	if err != nil {
+		return model.Event{}, false
+	}
+	var exJS jsEvent
+	if err := json.Unmarshal(rawEx, &exJS); err != nil {
+		return model.Event{}, false
+	}
+	ev := toModelEvent(&exJS, rawEx, calendarRemote, selfEmail, log)
+	ev.RRule = ""
+	ev.RecurrenceID = rid.Format(time.RFC3339)
+	if excluded {
+		ev.Status = model.StatusCancelled
+	}
+	return ev, true
+}
+
+// recurrenceOverridesFrom extracts just the recurrenceOverrides property from a
+// stored provider object, ignoring anything that is not a JSCalendar event.
+func recurrenceOverridesFrom(raw json.RawMessage) map[string]json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var probe struct {
+		Overrides map[string]json.RawMessage `json:"recurrenceOverrides"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil
+	}
+	return probe.Overrides
+}
+
+// overrideIDSeparator joins a base event id and its occurrence stamp.
+const overrideIDSeparator = ";"
+
+// exceptionRemoteID is the remote id of a materialised override instance.
+//
+// draft-ietf-jmap-calendars spells an instance id "<baseId>;<recurrenceId>",
+// but a LocalDateTime is full of ':' and this app's public event ids split on
+// that character (model.ParseID), so the stamp is written compactly. Nothing
+// sends these ids back to the server: per-occurrence writes are refused in
+// calendar.go rather than guessed at.
+func exceptionRemoteID(baseID string, rid time.Time) string {
+	return baseID + overrideIDSeparator + rid.Format("20060102T150405")
+}
+
+// isExceptionRemoteID reports whether a remote id names a materialised
+// override instance rather than a CalendarEvent the server knows about.
+func isExceptionRemoteID(remoteID string) bool {
+	return strings.Contains(remoteID, overrideIDSeparator)
+}
+
+// applyPatchPath applies one PatchObject entry (RFC 8984 §1.4.8: JSON Pointer
+// with an implicit leading '/'). A nil value removes the property. It reports
+// whether the path could be applied.
+func applyPatchPath(obj map[string]any, path string, val any) bool {
+	segs := strings.Split(path, "/")
+	for i, seg := range segs {
+		seg = strings.ReplaceAll(seg, "~1", "/")
+		segs[i] = strings.ReplaceAll(seg, "~0", "~")
+	}
+	cur := obj
+	for _, seg := range segs[:len(segs)-1] {
+		if seg == "" {
+			return false
+		}
+		next, ok := cur[seg].(map[string]any)
+		if !ok {
+			if _, exists := cur[seg]; exists {
+				// The path runs through a scalar or an array; JSCalendar's own
+				// patchable structures are all objects, so this is malformed.
+				return false
+			}
+			next = map[string]any{}
+			cur[seg] = next
+		}
+		cur = next
+	}
+	last := segs[len(segs)-1]
+	if last == "" {
+		return false
+	}
+	if val == nil {
+		delete(cur, last)
+		return true
+	}
+	cur[last] = val
+	return true
+}
+
+// deepCopyJSON copies a decoded JSON object so a patch cannot reach back into
+// the original.
+func deepCopyJSON(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = deepCopyJSONValue(v)
+	}
+	return out
+}
+
+func deepCopyJSONValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		return deepCopyJSON(t)
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = deepCopyJSONValue(e)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // fromModelEvent builds the JSCalendar object for a create or a full update.
