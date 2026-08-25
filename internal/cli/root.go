@@ -34,6 +34,8 @@ and lets you (or an AI agent) read, search and act on it from the terminal.
 
 Read commands work fully offline. Write commands go to the provider and are
 queued when offline (exit code 6). Output is JSON when stdout is not a TTY.`,
+		Args:              cobra.NoArgs,
+		RunE:              func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 		SilenceUsage:      true,
 		SilenceErrors:     true,
 		CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: false},
