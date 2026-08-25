@@ -1,24 +1,18 @@
+// The assertions in this file come from the 2026-08-25 adversarial review of
+// internal/mime (docs/reviews/2026-08-25-data-path.md). They were gated behind
+// EMLCAL_REVIEW while the findings were open; M4, M5, M6 and L1 are fixed, so
+// they now run as ordinary regression tests.
 package mime
 
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/lennert/emlcal/internal/model"
 )
-
-func reviewFail(t *testing.T, format string, args ...any) {
-	t.Helper()
-	if os.Getenv("EMLCAL_REVIEW") == "1" {
-		t.Errorf(format, args...)
-		return
-	}
-	t.Logf("[review] "+format, args...)
-}
 
 func crlf(s string) []byte { return []byte(strings.ReplaceAll(s, "\n", "\r\n")) }
 
@@ -42,15 +36,15 @@ func TestReviewLargeBase64Attachment(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 	if took > 10*time.Second {
-		reviewFail(t, "parsing a 10 MB base64 attachment took %s", took)
+		t.Errorf("parsing a 10 MB base64 attachment took %s", took)
 	}
 	if len(p.Attachments) != 1 {
-		reviewFail(t, "10 MB attachment: got %d attachments, want 1 (%+v)", len(p.Attachments), p.AllParts)
+		t.Errorf("10 MB attachment: got %d attachments, want 1 (%+v)", len(p.Attachments), p.AllParts)
 	} else if p.Attachments[0].Size != int64(len(payload)) {
-		reviewFail(t, "attachment size = %d, want the decoded %d", p.Attachments[0].Size, len(payload))
+		t.Errorf("attachment size = %d, want the decoded %d", p.Attachments[0].Size, len(payload))
 	}
 	if !strings.Contains(p.TextBody, "hello") {
-		reviewFail(t, "body lost next to a big attachment: %q", p.TextBody)
+		t.Errorf("body lost next to a big attachment: %q", p.TextBody)
 	}
 	t.Logf("10 MB attachment parsed in %s", took)
 }
@@ -101,11 +95,11 @@ func TestReviewDeepNesting(t *testing.T) {
 			return
 		}
 		if !strings.Contains(p.TextBody, "innermost") {
-			reviewFail(t, "depth-%d multipart: body not extracted (maxDepth=%d); TextBody=%q parts=%d",
+			t.Errorf("depth-%d multipart: body not extracted (maxDepth=%d); TextBody=%q parts=%d",
 				depth, maxDepth, p.TextBody, len(p.AllParts))
 		}
 	case <-time.After(20 * time.Second):
-		reviewFail(t, "Parse hung on a depth-%d multipart", depth)
+		t.Errorf("Parse hung on a depth-%d multipart", depth)
 	}
 }
 
@@ -127,14 +121,14 @@ func TestReviewMessageRFC822Attachment(t *testing.T) {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		if !strings.Contains(p.TextBody, "see attached") {
-			reviewFail(t, "%s: outer body lost: %q", tc.name, p.TextBody)
+			t.Errorf("%s: outer body lost: %q", tc.name, p.TextBody)
 		}
 		if got := len(p.Attachments) > 0; got != tc.wantAtt {
-			reviewFail(t, "%s: message/rfc822 recorded as attachment = %v, want %v (parts: %+v)",
+			t.Errorf("%s: message/rfc822 recorded as attachment = %v, want %v (parts: %+v)",
 				tc.name, got, tc.wantAtt, p.AllParts)
 		}
 		if strings.Contains(p.TextBody, "inner body") {
-			reviewFail(t, "%s: the attached message's body leaked into text_body: %q", tc.name, p.TextBody)
+			t.Errorf("%s: the attached message's body leaked into text_body: %q", tc.name, p.TextBody)
 		}
 	}
 }
@@ -151,13 +145,13 @@ func TestReviewTextPlainAsAttachment(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(p.TextBody, "ATTACHED NOTES") {
-		reviewFail(t, "an attached text/plain became the display body: %q", p.TextBody)
+		t.Errorf("an attached text/plain became the display body: %q", p.TextBody)
 	}
 	if !strings.Contains(p.TextBody, "real body") {
-		reviewFail(t, "the real body was not selected: %q", p.TextBody)
+		t.Errorf("the real body was not selected: %q", p.TextBody)
 	}
 	if len(p.Attachments) != 1 || p.Attachments[0].Filename != "notes.txt" {
-		reviewFail(t, "attached text/plain not recorded: %+v", p.Attachments)
+		t.Errorf("attached text/plain not recorded: %+v", p.Attachments)
 	}
 }
 
@@ -170,10 +164,10 @@ func TestReviewOddHeaders(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !strings.Contains(p.TextBody, "just a body") {
-			reviewFail(t, "LF-only message with no Content-Type lost its body: %q", p.TextBody)
+			t.Errorf("LF-only message with no Content-Type lost its body: %q", p.TextBody)
 		}
 		if p.Subject != "plain" {
-			reviewFail(t, "subject = %q, want %q", p.Subject, "plain")
+			t.Errorf("subject = %q, want %q", p.Subject, "plain")
 		}
 	})
 
@@ -183,7 +177,7 @@ func TestReviewOddHeaders(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !strings.Contains(p.TextBody, "voilà — naïve café") {
-			reviewFail(t, "8bit UTF-8 without charset mangled: %q", p.TextBody)
+			t.Errorf("8bit UTF-8 without charset mangled: %q", p.TextBody)
 		}
 	})
 
@@ -194,7 +188,7 @@ func TestReviewOddHeaders(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !strings.Contains(p.Subject, "Café") || !strings.Contains(p.Subject, "meeting") || !strings.HasSuffix(p.Subject, "end") {
-			reviewFail(t, "mixed encoded-word subject = %q", p.Subject)
+			t.Errorf("mixed encoded-word subject = %q", p.Subject)
 		}
 	})
 
@@ -205,13 +199,13 @@ func TestReviewOddHeaders(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(p.To) != 2 {
-			reviewFail(t, "quoted names with commas split into %d recipients: %+v", len(p.To), p.To)
+			t.Errorf("quoted names with commas split into %d recipients: %+v", len(p.To), p.To)
 		} else {
 			if p.To[0].Email != "john@example.com" || p.To[0].Name != "Doe, John" {
-				reviewFail(t, "first recipient = %+v", p.To[0])
+				t.Errorf("first recipient = %+v", p.To[0])
 			}
 			if p.To[1].Email != "jane@example.com" {
-				reviewFail(t, "second recipient = %+v", p.To[1])
+				t.Errorf("second recipient = %+v", p.To[1])
 			}
 		}
 	})
@@ -229,14 +223,14 @@ func TestReviewOddHeaders(t *testing.T) {
 			}
 		}
 		if len(emails) != 2 {
-			reviewFail(t, "group address yielded %v, want both members: %+v", emails, p.To)
+			t.Errorf("group address yielded %v, want both members: %+v", emails, p.To)
 		}
 	})
 
 	t.Run("undisclosed recipients", func(t *testing.T) {
 		raw := crlf("From: a@example.com\nTo: undisclosed-recipients:;\nSubject: s\n\nbody\n")
 		if _, err := Parse(raw); err != nil {
-			reviewFail(t, "Parse failed on undisclosed-recipients: %v", err)
+			t.Errorf("Parse failed on undisclosed-recipients: %v", err)
 		}
 	})
 }
@@ -257,22 +251,22 @@ func TestReviewHTMLStyleAndTables(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(p.TextBody, "color: red") || strings.Contains(p.TextBody, "@media") {
-		reviewFail(t, "<style> content leaked into text_body:\n%s", p.TextBody)
+		t.Errorf("<style> content leaked into text_body:\n%s", p.TextBody)
 	}
 	if !strings.Contains(p.TextBody, "Hello there") {
-		reviewFail(t, "HTML body text lost:\n%s", p.TextBody)
+		t.Errorf("HTML body text lost:\n%s", p.TextBody)
 	}
 	for _, want := range []string{"Item", "Widget"} {
 		if !strings.Contains(p.TextBody, want) {
-			reviewFail(t, "table cell %q missing from:\n%s", want, p.TextBody)
+			t.Errorf("table cell %q missing from:\n%s", want, p.TextBody)
 		}
 	}
 	// Rows must not be glued into one line.
 	if strings.Contains(p.TextBody, "QtyWidget") {
-		reviewFail(t, "table rows glued together:\n%s", p.TextBody)
+		t.Errorf("table rows glued together:\n%s", p.TextBody)
 	}
 	if !strings.Contains(p.TextBody, "https://example.com/x") {
-		reviewFail(t, "link target dropped:\n%s", p.TextBody)
+		t.Errorf("link target dropped:\n%s", p.TextBody)
 	}
 }
 
@@ -311,7 +305,7 @@ func TestReviewStripQuotesFalsePositives(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := StripQuotes(tc.in)
 			if !strings.Contains(got, tc.mustKeep) {
-				reviewFail(t, "StripQuotes dropped %q.\n--- in ---\n%s\n--- out ---\n%s", tc.mustKeep, tc.in, got)
+				t.Errorf("StripQuotes dropped %q.\n--- in ---\n%s\n--- out ---\n%s", tc.mustKeep, tc.in, got)
 			}
 		})
 	}
@@ -322,10 +316,10 @@ func TestReviewStripQuotesTruePositives(t *testing.T) {
 	in := "Sounds good, thanks.\n\nOn Mon, 3 Feb 2025 at 09:14, Jane Doe <jane@example.com> wrote:\n> the original question\n> second line\n"
 	got := StripQuotes(in)
 	if strings.Contains(got, "original question") {
-		reviewFail(t, "quoted reply not stripped: %q", got)
+		t.Errorf("quoted reply not stripped: %q", got)
 	}
 	if !strings.Contains(got, "Sounds good") {
-		reviewFail(t, "reply text lost: %q", got)
+		t.Errorf("reply text lost: %q", got)
 	}
 }
 
@@ -349,7 +343,7 @@ func TestReviewBuildHeaderInjection(t *testing.T) {
 	head := string(raw[:headerEnd])
 	for _, bad := range []string{"\r\nBcc:", "\r\nX-Evil:", "\r\n\r\n"} {
 		if strings.Contains(head, bad) {
-			reviewFail(t, "header injection: %q appears in the header block:\n%s", bad, head)
+			t.Errorf("header injection: %q appears in the header block:\n%s", bad, head)
 		}
 	}
 	// Round-trip: the parsed message must not have gained recipients.
@@ -358,10 +352,10 @@ func TestReviewBuildHeaderInjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(p.Bcc) != 0 {
-		reviewFail(t, "injected Bcc survived the round-trip: %+v", p.Bcc)
+		t.Errorf("injected Bcc survived the round-trip: %+v", p.Bcc)
 	}
 	if len(p.To) != 1 {
-		reviewFail(t, "injected To produced %d recipients: %+v", len(p.To), p.To)
+		t.Errorf("injected To produced %d recipients: %+v", len(p.To), p.To)
 	}
 }
 
@@ -382,7 +376,7 @@ func TestReviewBuildLineLength(t *testing.T) {
 			}
 			for i, line := range strings.Split(string(raw), "\r\n") {
 				if len(line) > 998 {
-					reviewFail(t, "line %d is %d bytes (RFC 5322 limit is 998): %.80s…", i, len(line), line)
+					t.Errorf("line %d is %d bytes (RFC 5322 limit is 998): %.80s…", i, len(line), line)
 					break
 				}
 			}
@@ -407,13 +401,13 @@ func TestReviewBuildNonASCIIDisplayName(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.From.Name != "Renée Müller" {
-		reviewFail(t, "non-ASCII display name round-trip: %q", p.From.Name)
+		t.Errorf("non-ASCII display name round-trip: %q", p.From.Name)
 	}
 	if p.Subject != "Überraschung" {
-		reviewFail(t, "non-ASCII subject round-trip: %q", p.Subject)
+		t.Errorf("non-ASCII subject round-trip: %q", p.Subject)
 	}
 	if len(p.To) != 1 || p.To[0].Name != "Doe, John" || p.To[0].Email != "john@example.com" {
-		reviewFail(t, "display name with a comma round-trip: %+v", p.To)
+		t.Errorf("display name with a comma round-trip: %+v", p.To)
 	}
 }
 
@@ -432,9 +426,9 @@ func TestReviewCRLFvsLF(t *testing.T) {
 		t.Fatal(err)
 	}
 	if lf.TextBody != cr.TextBody {
-		reviewFail(t, "LF and CRLF forms differ:\nLF:   %q\nCRLF: %q", lf.TextBody, cr.TextBody)
+		t.Errorf("LF and CRLF forms differ:\nLF:   %q\nCRLF: %q", lf.TextBody, cr.TextBody)
 	}
 	if len(lf.AllParts) != len(cr.AllParts) {
-		reviewFail(t, "LF found %d parts, CRLF found %d", len(lf.AllParts), len(cr.AllParts))
+		t.Errorf("LF found %d parts, CRLF found %d", len(lf.AllParts), len(cr.AllParts))
 	}
 }

@@ -282,3 +282,58 @@ func TestStripQuotesIsPure(t *testing.T) {
 		t.Errorf("not idempotent: %q -> %q", first, StripQuotes(first))
 	}
 }
+
+// TestStripQuotesKeepsSenderText covers the shapes that used to be mistaken for
+// quoted material: prose that ends in "wrote:", a quote block with the sender's
+// own text after it, and a bare "--" used as a rule.
+func TestStripQuotesKeepsSenderText(t *testing.T) {
+	tests := []struct{ name, in, want string }{
+		{
+			name: "sentence ending in wrote: followed by prose",
+			in:   "On the subject of the contract, here is what their lawyer wrote:\n\nWe cannot accept clause 4.\n\nPlease read it before Friday.\n",
+			want: "On the subject of the contract, here is what their lawyer wrote:\n\nWe cannot accept clause 4.\n\nPlease read it before Friday.",
+		},
+		{
+			name: "repl transcript in the middle",
+			in:   "Repro:\n\n>>> import emlcal\n>>> emlcal.sync()\nboom\n\nAny ideas?\n",
+			want: "Repro:\n\n>>> import emlcal\n>>> emlcal.sync()\nboom\n\nAny ideas?",
+		},
+		{
+			name: "block quote the sender typed",
+			in:   "The spec says:\n\n> messages MUST be idempotent\n\nbut our code is not.\n",
+			want: "The spec says:\n\n> messages MUST be idempotent\n\nbut our code is not.",
+		},
+		{
+			name: "bare dash rule with the message continuing",
+			in:   "Options:\n\n--\nA) do nothing\nB) rewrite it\n\nWhich one?\n",
+			want: "Options:\n\n--\nA) do nothing\nB) rewrite it\n\nWhich one?",
+		},
+		{
+			name: "attribution without a date is still cut when a quote follows",
+			in:   "Sure.\n\nOn Friday, Jane wrote:\n> the original\n",
+			want: "Sure.",
+		},
+		{
+			name: "quoted block before a mobile footer",
+			in:   "Yes.\n\n> quoted\n\nSent from my iPhone\n",
+			want: "Yes.",
+		},
+		{
+			name: "mobile footer above the quoted block",
+			in:   "Yes.\n\nSent from my iPhone\n\n> quoted\n",
+			want: "Yes.",
+		},
+		{
+			name: "em dash signature",
+			in:   "Here you go.\n\n—\nBob\n",
+			want: "Here you go.",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StripQuotes(tc.in); got != tc.want {
+				t.Errorf("StripQuotes:\n got %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}

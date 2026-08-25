@@ -2,6 +2,7 @@ package mime
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -470,5 +471,78 @@ func TestParseCorpusNeverPanics(t *testing.T) {
 				t.Errorf("%s: PartContent(%q): %v", f, part.Path, err)
 			}
 		}
+	}
+}
+
+func TestParseAttachedMessage(t *testing.T) {
+	inner := "From: b@example.com\nSubject: Quarterly report\n\ninner body\n"
+	build := func(headers, inner string) []byte {
+		return []byte(strings.ReplaceAll("From: a@example.com\nSubject: fwd\nMIME-Version: 1.0\n"+
+			"Content-Type: multipart/mixed; boundary=BB\n\n--BB\n"+
+			"Content-Type: text/plain\n\nsee attached\n\n--BB\n"+headers+"\n"+inner+"\n--BB--\n", "\n", "\r\n"))
+	}
+	tests := []struct {
+		name, headers, inner, wantName string
+	}{
+		{"bare rfc822 named after its subject", "Content-Type: message/rfc822\n", inner, "Quarterly report.eml"},
+		{"no subject to borrow", "Content-Type: message/rfc822\n", "From: b@example.com\n\ninner body\n", "forwarded.eml"},
+		{"folded subject", "Content-Type: message/rfc822\n", "Subject: Quarterly\n report\n\ninner body\n", "Quarterly report.eml"},
+		{"encoded subject", "Content-Type: message/rfc822\n", "Subject: =?utf-8?q?Gr=C3=BC=C3=9Fe?=\n\ninner\n", "Grüße.eml"},
+		{
+			"explicit filename wins",
+			"Content-Type: message/rfc822\nContent-Disposition: attachment; filename=\"fwd.eml\"\n",
+			inner, "fwd.eml",
+		},
+		{"message/global", "Content-Type: message/global\n", inner, "Quarterly report.eml"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := Parse(build(tc.headers, tc.inner))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p.Attachments) != 1 {
+				t.Fatalf("attachments = %+v (parts %+v)", p.Attachments, p.AllParts)
+			}
+			if got := p.Attachments[0].Filename; got != tc.wantName {
+				t.Errorf("filename = %q, want %q", got, tc.wantName)
+			}
+			if p.TextBody != "see attached" {
+				t.Errorf("body = %q", p.TextBody)
+			}
+		})
+	}
+
+	t.Run("delivery-status is not an attachment", func(t *testing.T) {
+		raw := []byte(strings.ReplaceAll("From: a@example.com\nSubject: failed\nMIME-Version: 1.0\n"+
+			"Content-Type: multipart/report; report-type=delivery-status; boundary=BB\n\n--BB\n"+
+			"Content-Type: text/plain\n\nyour message bounced\n\n--BB\n"+
+			"Content-Type: message/delivery-status\n\nAction: failed\n\n--BB--\n", "\n", "\r\n"))
+		p, err := Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(p.Attachments) != 0 {
+			t.Errorf("delivery-status recorded as an attachment: %+v", p.Attachments)
+		}
+	})
+}
+
+func TestParseBeyondMaxDepthKeepsText(t *testing.T) {
+	inner := "Content-Type: text/plain\n\nthe innermost body text\n"
+	for i := maxDepth + 26; i >= 1; i-- {
+		b := fmt.Sprintf("B%d", i)
+		inner = fmt.Sprintf("Content-Type: multipart/mixed; boundary=%s\n\n--%s\n%s\n--%s--\n", b, b, inner, b)
+	}
+	raw := []byte(strings.ReplaceAll("From: a@example.com\nSubject: deep\nMIME-Version: 1.0\n"+inner, "\n", "\r\n"))
+	p, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.TextBody, "the innermost body text") {
+		t.Errorf("text below maxDepth=%d not retained: %q", maxDepth, p.TextBody)
+	}
+	if strings.Contains(p.TextBody, "Content-Type") || strings.Contains(p.TextBody, "--B") {
+		t.Errorf("MIME scaffolding indexed as body text: %q", p.TextBody)
 	}
 }

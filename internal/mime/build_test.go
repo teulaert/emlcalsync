@@ -281,3 +281,66 @@ func TestBuildManyRecipientsFold(t *testing.T) {
 		t.Errorf("round-tripped %d recipients, want 40", len(p.To))
 	}
 }
+
+func TestBuildLongUnfoldableHeaders(t *testing.T) {
+	longSubject := strings.Repeat("x", 2000)
+	urlSubject := "Re: see https://example.com/" + strings.Repeat("a", 1500)
+	for _, tc := range []struct {
+		name    string
+		draft   *Draft
+		subject string
+	}{
+		{"unbroken subject", &Draft{Subject: longSubject}, longSubject},
+		{"long url in subject", &Draft{Subject: urlSubject}, urlSubject},
+		{"long non-ascii subject", &Draft{Subject: strings.Repeat("Grüße", 300)}, strings.Repeat("Grüße", 300)},
+		{
+			"unbreakable reference",
+			&Draft{Subject: "s", References: []string{strings.Repeat("r", 1200) + "@example.com"}},
+			"s",
+		},
+		{
+			"one very long recipient",
+			&Draft{Subject: "s", To: []model.Address{{Email: strings.Repeat("t", 1200) + "@example.com"}}},
+			"s",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.draft.From = model.Address{Email: "a@example.com"}
+			tc.draft.TextBody = "hi"
+			tc.draft.Date = time.Unix(0, 0).UTC()
+			raw, err := Build(tc.draft)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkWireFormat(t, raw)
+			p, err := Parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.Subject != tc.subject {
+				t.Errorf("subject round-trip:\n got %q\nwant %q", p.Subject, tc.subject)
+			}
+		})
+	}
+}
+
+func TestBuildLongBodyLineWraps(t *testing.T) {
+	body := strings.Repeat("z", 5000)
+	raw, err := Build(&Draft{
+		From:     model.Address{Email: "a@example.com"},
+		Subject:  "long line",
+		TextBody: body,
+		Date:     time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkWireFormat(t, raw)
+	p, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.TextBody != body {
+		t.Errorf("5000-byte body line did not round-trip (%d bytes back)", len(p.TextBody))
+	}
+}

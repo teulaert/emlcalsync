@@ -24,6 +24,10 @@ const (
 	maxDepth     = 24
 	maxPartBytes = 64 << 20 // per leaf
 	maxTextBytes = 8 << 20  // retained per text leaf
+	// maxHeaderPeek is how much of an attached message is read to find its
+	// Subject; maxAttachedNameLen caps the filename derived from it.
+	maxHeaderPeek      = 64 << 10
+	maxAttachedNameLen = 200
 )
 
 // ErrEmpty is returned by Parse when raw contains no message at all.
@@ -94,20 +98,24 @@ func fallbackParse(raw []byte) *Parsed {
 // selectBody picks the display body: the first text/plain leaf that is not an
 // attachment, else the first text/html leaf converted to text.
 func selectBody(out *Parsed, leaves []leaf) {
-	var plain, html *leaf
+	var plain, html, container *leaf
 	for i := range leaves {
 		l := &leaves[i]
 		if isAttachmentPart(*l) {
 			continue
 		}
-		switch l.mediaType {
-		case "text/plain":
+		switch {
+		case l.mediaType == "text/plain":
 			if plain == nil {
 				plain = l
 			}
-		case "text/html":
+		case l.mediaType == "text/html":
 			if html == nil {
 				html = l
+			}
+		case strings.HasPrefix(l.mediaType, "multipart/") && len(l.text) > 0:
+			if container == nil {
+				container = l
 			}
 		}
 	}
@@ -120,7 +128,32 @@ func selectBody(out *Parsed, leaves []leaf) {
 		out.TextBody = normalizeText(decodeBytes(plain.text))
 	case html != nil:
 		out.TextBody = htmlToText(decodeBytes(html.text))
+	case container != nil:
+		// A multipart this parser refused to descend into: past maxDepth, or
+		// with a boundary nothing could be read from. Index its bytes rather
+		// than archive the message with nothing searchable at all.
+		out.TextBody = containerText(decodeBytes(container.text))
 	}
+}
+
+var (
+	reMIMEBoundary = regexp.MustCompile(`^\s*--\S`)
+	reMIMEHeader   = regexp.MustCompile(`(?i)^\s*(content-[a-z-]+|mime-version)\s*:`)
+)
+
+// containerText salvages readable text from a multipart body that was never
+// split into parts, dropping the boundary lines and part headers that would
+// otherwise be indexed as if they were prose.
+func containerText(s string) string {
+	lines := strings.Split(reCRLF.Replace(s), "\n")
+	out := lines[:0]
+	for _, l := range lines {
+		if reMIMEBoundary.MatchString(l) || reMIMEHeader.MatchString(l) {
+			continue
+		}
+		out = append(out, l)
+	}
+	return normalizeText(strings.Join(out, "\n"))
 }
 
 func isAttachmentPart(l leaf) bool {
@@ -131,8 +164,29 @@ func isAttachmentPart(l leaf) bool {
 		return true
 	case l.part.Inline && l.part.ContentID != "" && !strings.HasPrefix(l.mediaType, "text/"):
 		return true
+	case isAttachedMessage(l.mediaType):
+		// A forwarded message attached as a bare message/rfc822 part, which is
+		// what Apple Mail and several webmail clients send: no disposition and
+		// no filename, but an attachment all the same.
+		return true
 	}
 	return false
+}
+
+// isAttachedMessage reports whether a leaf of this media type is an attached
+// message. The status reports are excluded: they are machine-readable text that
+// belongs to the containing report, not a file a user would download.
+func isAttachedMessage(mt string) bool {
+	if !strings.HasPrefix(mt, "message/") {
+		return false
+	}
+	switch mt {
+	case "message/delivery-status", "message/global-delivery-status",
+		"message/disposition-notification", "message/global-disposition-notification",
+		"message/feedback-report", "message/external-body":
+		return false
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -197,15 +251,26 @@ func (w *walker) addLeaf(e *message.Entity, path, mt string) {
 		mediaType: mt,
 	}
 
-	keep := strings.HasPrefix(mt, "text/")
+	// A multipart leaf is a container this walker could not descend into (past
+	// maxDepth, or an unreadable boundary); its bytes are the only body left.
+	keep := strings.HasPrefix(mt, "text/") || strings.HasPrefix(mt, "multipart/")
 	if w.target != "" {
 		keep = path == w.target
 	}
+	// An attached message with no filename gets one from its own Subject, which
+	// means reading its header block.
+	head := 0
+	if !keep && filename == "" && isAttachedMessage(mt) {
+		head = maxHeaderPeek
+	}
 
-	n, data := drain(e.Body, keep)
+	n, data := drain(e.Body, keep, head)
 	l.part.Size = n
-	if keep {
+	switch {
+	case keep:
 		l.text = data
+	case head > 0:
+		l.part.Filename = attachedMessageName(data)
 	}
 	w.leaves = append(w.leaves, l)
 	if w.target != "" && path == w.target {
@@ -214,21 +279,64 @@ func (w *walker) addLeaf(e *message.Entity, path, mt string) {
 	}
 }
 
-// drain reads a part body, optionally retaining its bytes, and returns the
-// decoded size.
-func drain(r io.Reader, keep bool) (int64, []byte) {
+// drain reads a part body and returns its decoded size. It retains the whole
+// body (up to maxTextBytes) when keep is set, else the first head bytes when
+// head is positive, else nothing.
+func drain(r io.Reader, keep bool, head int) (int64, []byte) {
 	if r == nil {
 		return 0, nil
 	}
 	lr := io.LimitReader(r, maxPartBytes)
-	if !keep {
+	want := int64(head)
+	if keep {
+		want = maxTextBytes
+	}
+	if want <= 0 {
 		n, _ := io.Copy(io.Discard, lr)
 		return n, nil
 	}
 	var buf bytes.Buffer
-	n, _ := io.Copy(&buf, io.LimitReader(lr, maxTextBytes))
+	n, _ := io.Copy(&buf, io.LimitReader(lr, want))
 	rest, _ := io.Copy(io.Discard, lr)
 	return n + rest, buf.Bytes()
+}
+
+// attachedMessageName names an attached message after its own Subject, the way
+// a mail client does when it saves one to disk.
+func attachedMessageName(head []byte) string {
+	subject := ""
+	for _, raw := range strings.Split(reCRLF.Replace(decodeBytes(head)), "\n") {
+		if strings.TrimSpace(raw) == "" {
+			break // end of the attached message's header block
+		}
+		if subject != "" {
+			if raw[0] == ' ' || raw[0] == '\t' {
+				subject += " " + strings.TrimSpace(raw) // folded continuation
+				continue
+			}
+			break
+		}
+		if v, ok := cutHeader(raw, "subject"); ok {
+			subject = v
+		}
+	}
+	name := sanitizeFilename(decodeWord(subject))
+	if len(name) > maxAttachedNameLen {
+		name = strings.TrimSpace(name[:maxAttachedNameLen])
+	}
+	if name == "" {
+		return "forwarded.eml"
+	}
+	return name + ".eml"
+}
+
+// cutHeader returns the value of raw when it is the named header field.
+func cutHeader(raw, name string) (string, bool) {
+	i := strings.IndexByte(raw, ':')
+	if i < 0 || !strings.EqualFold(strings.TrimSpace(raw[:i]), name) {
+		return "", false
+	}
+	return strings.TrimSpace(raw[i+1:]), true
 }
 
 var reMediaType = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]+/[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]+$`)

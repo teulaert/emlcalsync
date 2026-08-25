@@ -68,9 +68,18 @@ func StripQuotes(text string) string {
 	if i := cutIndex(lines); i >= 0 {
 		lines = lines[:i]
 	}
-	lines = dropQuotedLines(lines)
 	lines = cutSignature(lines)
-	lines = dropMobileFooter(lines)
+	// A footer can sit either side of the quoted original ("Sent from my
+	// iPhone" above it on Apple Mail, below it on some Android clients), so
+	// peel the tail until nothing more comes off.
+	for {
+		n := len(lines)
+		lines = dropMobileFooter(lines)
+		lines = dropQuotedTail(lines)
+		if len(lines) == n {
+			break
+		}
+	}
 
 	out := normalizeText(strings.Join(lines, "\n"))
 	if strings.TrimSpace(out) == "" {
@@ -94,18 +103,18 @@ func cutIndex(lines []string) int {
 				return i
 			}
 		}
-		if matchesAttribution(l) {
+		if matchesAttribution(l) && attributionConfirmed(lines, i, l) {
 			return i
 		}
 		// Wrapped attribution: "On <date>,\nJane <j@x> wrote:".
 		if i+1 < len(lines) && looksLikeAttributionStart(l) {
 			joined := l + " " + strings.TrimSpace(lines[i+1])
-			if matchesAttribution(joined) {
+			if matchesAttribution(joined) && attributionConfirmed(lines, i, joined) {
 				return i
 			}
 			if i+2 < len(lines) {
 				joined += " " + strings.TrimSpace(lines[i+2])
-				if matchesAttribution(joined) {
+				if matchesAttribution(joined) && attributionConfirmed(lines, i, joined) {
 					return i
 				}
 			}
@@ -124,6 +133,43 @@ func matchesAttribution(l string) bool {
 	}
 	for _, re := range replyAttribution {
 		if re.MatchString(l) {
+			return true
+		}
+	}
+	return false
+}
+
+// maxSignatureLines is how long a block under a bare "--" may be before it
+// stops looking like a signature.
+const maxSignatureLines = 8
+
+// An attribution line proper carries a date, a time or an address; ordinary
+// prose that happens to end in "wrote:" does not.
+var (
+	reAttrEmail = regexp.MustCompile(`[^\s<>@,;:"]+@[^\s<>@,;:"]+\.[A-Za-z]{2,}`)
+	reAttrDate  = regexp.MustCompile(`\b\d{1,2}[:.\-/]\d{2}\b|\b(19|20)\d{2}\b`)
+)
+
+// attributionConfirmed guards against cutting a message in half at a sentence
+// that merely reads like an attribution ("... here is what their lawyer
+// wrote:"). A real attribution names a date, a time or an address, or is
+// immediately followed by the quoted material it introduces.
+func attributionConfirmed(lines []string, i int, text string) bool {
+	if reAttrEmail.MatchString(text) || reAttrDate.MatchString(text) {
+		return true
+	}
+	return quotedFollows(lines, i+1)
+}
+
+// quotedFollows reports whether one of the next three non-blank lines is quoted.
+func quotedFollows(lines []string, from int) bool {
+	seen := 0
+	for i := from; i < len(lines) && seen < 3; i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			continue
+		}
+		seen++
+		if reQuoted.MatchString(lines[i]) {
 			return true
 		}
 	}
@@ -181,29 +227,79 @@ func outlookHeaderAt(lines []string, i int) bool {
 	return sent && to && subject
 }
 
-func dropQuotedLines(lines []string) []string {
-	out := make([]string, 0, len(lines))
-	for _, l := range lines {
-		if reQuoted.MatchString(l) {
+// dropQuotedTail removes a trailing block of quoted lines: the original message
+// under a reply. A quoted block with the sender's own text after it is not a
+// quote of the thread but something they typed - a pasted REPL transcript
+// (">>> import x"), a markdown block quote, a diff - and is kept.
+func dropQuotedTail(lines []string) []string {
+	end := len(lines)
+	quoted := 0
+	for end > 0 {
+		l := lines[end-1]
+		if strings.TrimSpace(l) == "" {
+			end--
 			continue
 		}
-		out = append(out, l)
+		if reQuoted.MatchString(l) {
+			quoted++
+			end--
+			continue
+		}
+		break
 	}
-	return out
+	if quoted == 0 {
+		return lines
+	}
+	return lines[:end]
 }
 
 // cutSignature removes everything after an RFC 3676 "-- " signature delimiter.
+// The bare forms ("--", an em dash, a rule of underscores) are also used as a
+// visual separator in the middle of a message, so they only count when what
+// follows is shaped like a signature.
 func cutSignature(lines []string) []string {
 	for i, l := range lines {
 		t := strings.TrimRight(l, " \t")
-		if t == "--" || t == "__" {
-			if i == 0 {
-				continue // a message that opens with a rule is not a signature
-			}
+		if i == 0 || !isSignatureDelimiter(t) {
+			continue // a message that opens with a rule is not a signature
+		}
+		// RFC 3676: exactly "-- " (with the trailing space) is the delimiter and
+		// needs no corroboration.
+		if t == "--" && l != t {
+			return lines[:i]
+		}
+		if signatureBlock(lines[i+1:]) {
 			return lines[:i]
 		}
 	}
 	return lines
+}
+
+func isSignatureDelimiter(t string) bool {
+	switch t {
+	case "--", "—", "–", "__":
+		return true
+	}
+	return false
+}
+
+// signatureBlock reports whether rest looks like a signature: a short,
+// uninterrupted run of lines at the very end of the message. A blank line or a
+// quoted line means the message carries on past the delimiter, so the delimiter
+// was a rule rather than a signature marker.
+func signatureBlock(rest []string) bool {
+	for len(rest) > 0 && strings.TrimSpace(rest[len(rest)-1]) == "" {
+		rest = rest[:len(rest)-1]
+	}
+	if len(rest) == 0 || len(rest) > maxSignatureLines {
+		return false
+	}
+	for _, l := range rest {
+		if strings.TrimSpace(l) == "" || reQuoted.MatchString(l) {
+			return false
+		}
+	}
+	return true
 }
 
 func dropMobileFooter(lines []string) []string {

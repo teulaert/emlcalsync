@@ -16,6 +16,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/lennert/emlcal/internal/model"
 )
@@ -48,7 +49,18 @@ type DraftAttachment struct {
 	Data        []byte
 }
 
-const maxHeaderLine = 76 // fold target; the hard RFC 5322 limit is 998
+const (
+	// maxHeaderLine is the fold target: writeHeader breaks between tokens once a
+	// line would grow past it.
+	maxHeaderLine = 76
+	// hardFoldLimit is where a single token that cannot be folded at whitespace
+	// is split anyway. RFC 5322 caps a line at 998 bytes; staying well under it
+	// leaves room for the field name and for a transport that adds a prefix.
+	hardFoldLimit = 900
+	// maxEncodedWord is the RFC 2047 limit on one encoded word, including the
+	// charset, the encoding and the delimiters.
+	maxEncodedWord = 75
+)
 
 // Build renders d as an RFC 822 message with CRLF line endings and no line
 // longer than 998 bytes. The body is text/plain; charset=utf-8 encoded
@@ -193,11 +205,26 @@ func writeBase64(w io.Writer, data []byte) error {
 }
 
 // writeHeader writes one header field, folded so no line exceeds the RFC 5322
-// limit. Folding only happens at whitespace, which is safe for encoded words
-// (they never contain spaces) and for comma-separated address lists.
+// limit. Folding happens at whitespace, which is safe for encoded words (they
+// never contain spaces) and for comma-separated address lists. A token that is
+// on its own longer than hardFoldLimit is split anyway: an over-long line is
+// rejected outright by strict MTAs, an over-long unstructured value is not.
 func writeHeader(buf *bytes.Buffer, key, value string) {
 	value = strings.TrimSpace(unfold(value))
 	line := key + ":"
+	// hardFold splits a token no whitespace could break. The continuation is a
+	// fold, so the receiver reassembles it with one space where the break was.
+	hardFold := func() {
+		for len(line) > hardFoldLimit {
+			cut := hardFoldLimit
+			for cut > 1 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			buf.WriteString(line[:cut])
+			buf.WriteString("\r\n")
+			line = " " + line[cut:]
+		}
+	}
 	for _, tok := range strings.Split(value, " ") {
 		if tok == "" {
 			continue
@@ -210,16 +237,95 @@ func writeHeader(buf *bytes.Buffer, key, value string) {
 			line += " "
 		}
 		line += tok
+		hardFold()
 	}
 	buf.WriteString(line)
 	buf.WriteString("\r\n")
 }
 
+// encodeHeaderText prepares an unstructured header value (Subject) for the
+// wire. A value that would leave writeHeader with a token too long to fold is
+// forced into RFC 2047 encoded words, which are short and separated by spaces,
+// so folding works again and no line runs over the limit.
 func encodeHeaderText(s string) string {
+	if longestToken(s) > maxEncodedWord {
+		return encodeWordsForced(s)
+	}
 	if isPrintableASCII(s) {
 		return s
 	}
-	return stdmime.QEncoding.Encode("utf-8", s)
+	enc := stdmime.QEncoding.Encode("utf-8", s)
+	if longestToken(enc) > maxEncodedWord {
+		// A single word that Go declined to split (it never splits an already
+		// short input, but a pathological charset could still get here).
+		return encodeWordsForced(s)
+	}
+	return enc
+}
+
+// longestToken returns the length in bytes of the longest whitespace-free run
+// in s, which is the shortest line writeHeader can fold it onto.
+func longestToken(s string) int {
+	longest := 0
+	for _, tok := range strings.Fields(s) {
+		if len(tok) > longest {
+			longest = len(tok)
+		}
+	}
+	return longest
+}
+
+const encodedWordPrefix = "=?utf-8?q?"
+
+// encodeWordsForced Q-encodes s into RFC 2047 encoded words of at most
+// maxEncodedWord bytes each, whether or not s strictly needs encoding.
+// mime.WordEncoder returns a value it considers plain ASCII unchanged, which is
+// exactly the case that produces an unfoldable header line.
+func encodeWordsForced(s string) string {
+	budget := maxEncodedWord - len(encodedWordPrefix) - len("?=")
+	var (
+		words []string
+		cur   strings.Builder
+	)
+	for _, r := range s {
+		enc := qEncodeRune(r)
+		if cur.Len() > 0 && cur.Len()+len(enc) > budget {
+			words = append(words, encodedWordPrefix+cur.String()+"?=")
+			cur.Reset()
+		}
+		cur.WriteString(enc)
+	}
+	if cur.Len() > 0 {
+		words = append(words, encodedWordPrefix+cur.String()+"?=")
+	}
+	return strings.Join(words, " ")
+}
+
+// qEncodeRune renders one rune as RFC 2047 "Q" text. Everything outside a
+// conservative safe set is escaped, so the result is legal in both a phrase and
+// an unstructured field.
+func qEncodeRune(r rune) string {
+	if r == ' ' {
+		return "_"
+	}
+	if r < utf8.RuneSelf && isQSafe(byte(r)) {
+		return string(r)
+	}
+	var sb strings.Builder
+	var buf [4]byte
+	n := utf8.EncodeRune(buf[:], r)
+	for _, b := range buf[:n] {
+		sb.WriteString(fmt.Sprintf("=%02X", b))
+	}
+	return sb.String()
+}
+
+func isQSafe(b byte) bool {
+	switch {
+	case b >= 'A' && b <= 'Z', b >= 'a' && b <= 'z', b >= '0' && b <= '9':
+		return true
+	}
+	return strings.IndexByte("!*+-/", b) >= 0
 }
 
 func isPrintableASCII(s string) bool {
