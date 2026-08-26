@@ -28,7 +28,21 @@ func mailCmd(app *App) *cobra.Command {
 read half (mailboxes, list, search, read, thread, attachment list) and gate
 the write half (mark, move, archive, trash, draft, send, reply).
 
-All read commands work offline from the local index.`,
+All read commands work offline from the local index. The list-shaped commands
+(list, search) share these filters — see 'emlcal mail list --help':
+
+  --mailbox inbox|sent|archive|trash|<name>   what is actually in a mailbox
+  --unread  --flagged  --no-bulk              state filters
+  --since 2d  --until 2026-08-01              time window
+  --from X  --to X  --account A  --limit N    who / where / how many
+
+Examples:
+  emlcal mail list --mailbox inbox              everything still in the inbox
+  emlcal mail list --mailbox inbox --unread     unread inbox mail only
+  emlcal mail list --since 2d --no-bulk         last two days, no newsletters
+  emlcal mail search "invoice august" --from acme
+  emlcal mail read fastmail:Stn1JutmP6KN
+  emlcal mail thread fastmail:Stn1JutmP6KN`,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error { return c.Help() },
 	}
