@@ -152,7 +152,7 @@ func TestAccountRemove(t *testing.T) {
 
 func TestAccountGoogleClient(t *testing.T) {
 	env := newTestEnv(t)
-	env.MustRun("account", "google-client", "--id", "123456-abcdef.apps.googleusercontent.com", "--secret", "GOCSPX-GOCSPX-shh")
+	env.MustRun("account", "google-client", "--id", "123456-abcdef.apps.googleusercontent.com", "--secret", "GOCSPX-shh")
 	cfg, err := config.Load(env.Config)
 	if err != nil {
 		t.Fatal(err)
