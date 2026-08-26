@@ -3,8 +3,8 @@ package cli
 import (
 	"fmt"
 
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/output"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/output"
 )
 
 // IDGroup is a set of remote ids belonging to one account, in input order.

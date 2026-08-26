@@ -9,7 +9,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // Printer renders command results. Zero value is unusable: set at least W.

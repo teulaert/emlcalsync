@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // reviewFail reports a confirmed defect. Assertions only fail the build when

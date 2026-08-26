@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/mime"
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider/fake"
+	"github.com/teulaert/emlcalsync/internal/mime"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider/fake"
 )
 
 // ---------------------------------------------------------------------------

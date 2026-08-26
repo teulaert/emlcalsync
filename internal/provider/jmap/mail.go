@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // fetchWorkers is the number of concurrent blob downloads (DESIGN §7.6).

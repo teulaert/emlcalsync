@@ -9,8 +9,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/lennert/emlcal/internal/mime"
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/mime"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // messageCols is the cheap projection: everything except text_body, which is

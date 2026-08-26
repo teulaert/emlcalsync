@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lennert/emlcal/internal/calendar"
-	"github.com/lennert/emlcal/internal/config"
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/calendar"
+	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // calResource is the sync_state resource name for one calendar.

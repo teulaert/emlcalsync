@@ -8,9 +8,9 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/lennert/emlcal/internal/config"
-	"github.com/lennert/emlcal/internal/provider/fake"
-	"github.com/lennert/emlcal/internal/provider/oauth"
+	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/provider/fake"
+	"github.com/teulaert/emlcalsync/internal/provider/oauth"
 )
 
 // coreSeedSecrets gives every configured account the credential `doctor` looks

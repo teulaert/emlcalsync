@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // fileConfig mirrors config.toml with pointers everywhere a default has to be

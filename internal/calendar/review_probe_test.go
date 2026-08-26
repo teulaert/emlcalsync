@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 func reviewFail(t *testing.T, format string, args ...any) {

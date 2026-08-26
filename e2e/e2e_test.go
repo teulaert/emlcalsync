@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lennert/emlcal/internal/testutil/jmapfake"
+	"github.com/teulaert/emlcalsync/internal/testutil/jmapfake"
 )
 
 // ---------------------------------------------------------------------------

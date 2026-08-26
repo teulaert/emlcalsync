@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // Push tuning.

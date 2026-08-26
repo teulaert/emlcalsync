@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // eventPageMax bounds one CalendarEvent/query page during a full listing.

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 func load(t *testing.T, name string) []byte {

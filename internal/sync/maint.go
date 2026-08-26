@@ -7,10 +7,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/lennert/emlcal/internal/mime"
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
-	"github.com/lennert/emlcal/internal/store"
+	"github.com/teulaert/emlcalsync/internal/mime"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/store"
 )
 
 // ReindexReport summarises a Reindex pass.

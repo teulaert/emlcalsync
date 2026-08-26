@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // ---------------------------------------------------------------------------

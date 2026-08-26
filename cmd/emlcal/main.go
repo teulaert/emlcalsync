@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"github.com/lennert/emlcal/internal/cli"
+	"github.com/teulaert/emlcalsync/internal/cli"
 )
 
 func main() {

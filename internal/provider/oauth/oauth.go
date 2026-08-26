@@ -17,7 +17,7 @@ import (
 	calendar "google.golang.org/api/calendar/v3"
 	gmail "google.golang.org/api/gmail/v1"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // DefaultScopes is what emlcal asks for: gmail.modify covers read, label

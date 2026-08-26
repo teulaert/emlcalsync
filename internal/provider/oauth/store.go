@@ -22,7 +22,7 @@ import (
 
 	"golang.org/x/oauth2"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // TokenStore persists OAuth tokens per account. key is an opaque, filesystem

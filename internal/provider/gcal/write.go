@@ -8,7 +8,7 @@ import (
 
 	calendarapi "google.golang.org/api/calendar/v3"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // sendUpdatesAll is the value of the sendUpdates query parameter that makes

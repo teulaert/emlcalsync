@@ -8,8 +8,8 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/lennert/emlcal/internal/config"
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // Watch timings.

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/calendar"
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/calendar"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 func seedCalendars(f *fakeServer) {

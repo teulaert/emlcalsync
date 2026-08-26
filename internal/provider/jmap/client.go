@@ -33,7 +33,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // Capability URNs.

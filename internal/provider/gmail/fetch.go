@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	gmailapi "google.golang.org/api/gmail/v1"
 
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // FetchRaw downloads full messages (format=raw) and hands them to fn as they

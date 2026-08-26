@@ -15,7 +15,7 @@ import (
 	_ "github.com/emersion/go-message/charset" // registers charset decoders
 	gomail "github.com/emersion/go-message/mail"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // Limits that keep a hostile or corrupt message from exhausting memory.

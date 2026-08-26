@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/testutil/jmapfake"
+	"github.com/teulaert/emlcalsync/internal/testutil/jmapfake"
 )
 
 // ---------------------------------------------------------------------------

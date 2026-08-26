@@ -1,10 +1,10 @@
 package sync
 
 import (
-	"github.com/lennert/emlcal/internal/provider"
-	"github.com/lennert/emlcal/internal/provider/gcal"
-	"github.com/lennert/emlcal/internal/provider/gmail"
-	"github.com/lennert/emlcal/internal/provider/jmap"
+	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/provider/gcal"
+	"github.com/teulaert/emlcalsync/internal/provider/gmail"
+	"github.com/teulaert/emlcalsync/internal/provider/jmap"
 )
 
 // The engine reaches for FetchEnvelopes through an optional interface, which

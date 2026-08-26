@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/mime"
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/mime"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // base is the reference time every fixture hangs off.

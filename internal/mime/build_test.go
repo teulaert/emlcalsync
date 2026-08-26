@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 func checkWireFormat(t *testing.T, raw []byte) {

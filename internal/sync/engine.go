@@ -34,11 +34,11 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/lennert/emlcal/internal/blob"
-	"github.com/lennert/emlcal/internal/config"
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
-	"github.com/lennert/emlcal/internal/store"
+	"github.com/teulaert/emlcalsync/internal/blob"
+	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/store"
 )
 
 // ProviderFactory builds the provider clients for an account. The engine

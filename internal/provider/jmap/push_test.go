@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // waitFor polls cond until it holds or the deadline passes.

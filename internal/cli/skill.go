@@ -8,7 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lennert/emlcal/internal/skill"
+	"github.com/teulaert/emlcalsync/internal/skill"
 )
 
 func init() {

@@ -8,7 +8,7 @@ import (
 
 	gmailapi "google.golang.org/api/gmail/v1"
 
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // historyTypes are the record types we ask for. Gmail also has

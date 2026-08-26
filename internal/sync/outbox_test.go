@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 func TestApplyOnlineExecutesImmediately(t *testing.T) {

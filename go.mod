@@ -1,4 +1,4 @@
-module github.com/lennert/emlcal
+module github.com/teulaert/emlcalsync
 
 go 1.25.0
 

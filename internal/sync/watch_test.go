@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // watching reports whether a Pusher.Watch call is currently registered.

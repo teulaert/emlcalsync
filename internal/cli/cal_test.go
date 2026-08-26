@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/config"
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // calAgendaJSON is the shape `cal agenda` emits, for decoding in tests.

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/mime"
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/mime"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // seedCorpus builds a small two-account corpus used by the filter, thread and

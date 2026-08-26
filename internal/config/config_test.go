@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // exampleTOML is the configuration printed in DESIGN.md §11, verbatim.

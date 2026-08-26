@@ -28,8 +28,8 @@ import (
 	gmailapi "google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
 
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // FetchMode selects how FetchRaw retrieves messages.

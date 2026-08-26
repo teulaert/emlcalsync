@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 func newStore(t *testing.T) *Store {

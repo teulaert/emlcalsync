@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	gmailapi "google.golang.org/api/gmail/v1"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // SetFlags adds/removes the label equivalents of the flags: UNREAD for

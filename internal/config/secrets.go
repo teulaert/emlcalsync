@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // Secret backend names for general.secret_backend.

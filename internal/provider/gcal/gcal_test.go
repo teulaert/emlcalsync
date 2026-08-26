@@ -18,8 +18,8 @@ import (
 
 	calendarapi "google.golang.org/api/calendar/v3"
 
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // fakeCalendar is a stand-in for the Google Calendar API.

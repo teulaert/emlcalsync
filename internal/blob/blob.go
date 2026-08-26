@@ -26,7 +26,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // ErrCorrupt is returned by Get when the stored bytes do not decompress, or

@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 func testCtx(t *testing.T) context.Context {

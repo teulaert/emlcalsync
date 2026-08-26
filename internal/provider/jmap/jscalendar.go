@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // localDateTimeLayout is JSCalendar's LocalDateTime (RFC 8984 §1.4.4): a

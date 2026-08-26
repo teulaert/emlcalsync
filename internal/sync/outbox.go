@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lennert/emlcal/internal/calendar"
-	"github.com/lennert/emlcal/internal/config"
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
-	"github.com/lennert/emlcal/internal/store"
+	"github.com/teulaert/emlcalsync/internal/calendar"
+	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/store"
 )
 
 // OpKind identifies a queued write. The values are what lands in outbox.kind.

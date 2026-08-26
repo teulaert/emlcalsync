@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // baseTime is a stable anchor inside calendar.DefaultWindow(now).

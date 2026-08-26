@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // TestIsPreRequestFailure pins the classification the outbox relies on to

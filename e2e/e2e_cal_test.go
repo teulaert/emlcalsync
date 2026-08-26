@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/testutil/jmapfake"
+	"github.com/teulaert/emlcalsync/internal/testutil/jmapfake"
 )
 
 // calSeed is the calendar fixture: one weekly event repeated three times and

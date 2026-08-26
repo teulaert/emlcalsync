@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lennert/emlcal/internal/config"
-	"github.com/lennert/emlcal/internal/provider/fake"
+	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/provider/fake"
 )
 
 func coreDecodeRows[T any](t *testing.T, s string) []T {

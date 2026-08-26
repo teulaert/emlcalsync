@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/store"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/store"
 )
 
 func TestReindexRebuildsRowsFromBlobs(t *testing.T) {

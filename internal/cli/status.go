@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/lennert/emlcal/internal/output"
+	"github.com/teulaert/emlcalsync/internal/output"
 )
 
 func init() {

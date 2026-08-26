@@ -28,7 +28,7 @@ package mime
 import (
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // Parsed is the result of Parse.

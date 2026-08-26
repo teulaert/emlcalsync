@@ -18,8 +18,8 @@ import (
 	calendarapi "google.golang.org/api/calendar/v3"
 	"google.golang.org/api/option"
 
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // Options configures a Calendar provider.

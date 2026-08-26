@@ -8,14 +8,14 @@ import (
 	"strings"
 	stdsync "sync"
 
-	"github.com/lennert/emlcal/internal/config"
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/output"
-	"github.com/lennert/emlcal/internal/provider"
-	"github.com/lennert/emlcal/internal/provider/gcal"
-	"github.com/lennert/emlcal/internal/provider/gmail"
-	"github.com/lennert/emlcal/internal/provider/jmap"
-	"github.com/lennert/emlcal/internal/provider/oauth"
+	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/output"
+	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/provider/gcal"
+	"github.com/teulaert/emlcalsync/internal/provider/gmail"
+	"github.com/teulaert/emlcalsync/internal/provider/jmap"
+	"github.com/teulaert/emlcalsync/internal/provider/oauth"
 )
 
 // Secret keys (files under the secrets dir).

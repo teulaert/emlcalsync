@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/config"
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider"
-	"github.com/lennert/emlcal/internal/store"
+	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/store"
 )
 
 // rejectCal accepts every read but refuses every write, the way a provider

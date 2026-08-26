@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // ErrStateExpired is returned by Changes when the server can no longer

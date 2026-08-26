@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lennert/emlcal/internal/model"
-	"github.com/lennert/emlcal/internal/provider/fake"
-	"github.com/lennert/emlcal/internal/sync"
+	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider/fake"
+	"github.com/teulaert/emlcalsync/internal/sync"
 )
 
 // coreQueueWrite flags a message while the provider is unreachable, which is
