@@ -208,6 +208,11 @@ type Account struct {
 	IncludeSpamTrash bool `toml:"include_spam_trash"`
 	// RawMaxSize overrides General.RawMaxSize when non-nil.
 	RawMaxSize *Size `toml:"raw_max_size"`
+	// Mail enables the mail half of the account (default true). A Workspace
+	// account synced for its calendar only sets `mail = false`.
+	Mail bool `toml:"mail"`
+	// Calendar enables the calendar half of the account (default true).
+	Calendar bool `toml:"calendar"`
 	// Calendars lists calendar names to sync; ["*"] means all.
 	Calendars []string `toml:"calendars"`
 	// Concurrency is the number of in-flight provider requests.
@@ -231,6 +236,18 @@ func (a *Account) EffectiveRawMaxSize(g General) Size {
 		return *a.RawMaxSize
 	}
 	return g.RawMaxSize
+}
+
+// Syncs reports whether the account has this resource enabled. resource is
+// "mail" or "calendar"; anything else is false.
+func (a *Account) Syncs(resource string) bool {
+	switch resource {
+	case "mail":
+		return a.Mail
+	case "calendar":
+		return a.Calendar
+	}
+	return false
 }
 
 // SyncsAllCalendars reports whether Calendars is the "*" wildcard.

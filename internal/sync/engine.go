@@ -99,6 +99,12 @@ type Engine struct {
 	// deltaCount counts deltas per account (for the periodic mailbox refresh).
 	deltaCount map[string]int
 
+	// waitMin/waitMax bound the backoff of the one-shot offline ride-out
+	// (see offline.go). Fields rather than constants so a test can shrink
+	// them; production always gets oneShotWaitMin/Max.
+	waitMin time.Duration
+	waitMax time.Duration
+
 	watchMu  stdsync.Mutex
 	watchers map[string]*accountWatch
 }
@@ -147,6 +153,8 @@ func New(o Options) (*Engine, error) {
 		calP:      map[string]provider.CalendarProvider{},
 		retryAt:   map[int64]time.Time{},
 		watchers:  map[string]*accountWatch{},
+		waitMin:   oneShotWaitMin,
+		waitMax:   oneShotWaitMax,
 	}, nil
 }
 
@@ -156,6 +164,11 @@ type SyncOptions struct {
 	Full     bool
 	Mail     bool
 	Calendar bool
+	// WaitOffline is how long a resource whose provider cannot be reached
+	// keeps retrying (from its persisted cursor/state) before the pass gives
+	// up. Zero fails on the first transport error, which is what
+	// `--wait-offline 0` asks for.
+	WaitOffline time.Duration
 }
 
 func (o SyncOptions) resolved() SyncOptions {
@@ -221,28 +234,126 @@ func (e *Engine) syncAccount(ctx context.Context, acct config.Account, o SyncOpt
 		rep.Err = err
 		return rep, err
 	}
+
 	if o.Mail {
-		r, err := e.syncMail(ctx, acct, o.Full)
-		rep.Mail = r
-		if err != nil {
-			rep.Err = err
-			return rep, err
+		switch {
+		case !acct.Mail:
+			// The account is configured for calendar only.
+			rep.Mail = &ResourceReport{Kind: KindDisabled}
+			e.log.Debug("mail is switched off for this account", "account", acct.Name)
+		default:
+			// --full only applies to the first attempt: once a backfill row
+			// exists, a retry has to resume it rather than start over.
+			full := o.Full
+			r, err := e.syncResource(ctx, acct, o, resourceMail, func(c context.Context) (*ResourceReport, error) {
+				rr, err := e.syncMail(c, acct, full)
+				if rr != nil && (rr.Kind == KindBackfill || rr.Kind == KindResume) {
+					full = false
+				}
+				return rr, err
+			})
+			rep.Mail = r
+			if err != nil {
+				rep.Err = err
+				return rep, err
+			}
 		}
 	}
-	if o.Calendar && len(acct.Calendars) > 0 {
-		r, err := e.syncCalendar(ctx, acct, o.Full)
-		rep.Calendar = r
-		if err != nil {
-			if errors.Is(err, provider.ErrNotSupported) {
-				e.log.Info("calendar sync skipped", "account", acct.Name, "reason", err)
-				rep.Calendar = &ResourceReport{Kind: "skipped"}
-				return rep, nil
+
+	if o.Calendar {
+		switch {
+		case !acct.Calendar:
+			rep.Calendar = &ResourceReport{Kind: KindDisabled}
+			e.log.Debug("calendars are switched off for this account", "account", acct.Name)
+		case len(acct.Calendars) == 0:
+			// Nothing selected: not disabled, just empty.
+		default:
+			r, err := e.syncResource(ctx, acct, o, resourceCalendar, func(c context.Context) (*ResourceReport, error) {
+				return e.syncCalendar(c, acct, o.Full)
+			})
+			rep.Calendar = r
+			if err != nil {
+				if errors.Is(err, provider.ErrNotSupported) {
+					e.log.Info("calendar sync skipped", "account", acct.Name, "reason", err)
+					rep.Calendar = &ResourceReport{Kind: "skipped"}
+					return rep, nil
+				}
+				rep.Err = err
+				return rep, err
 			}
-			rep.Err = err
-			return rep, err
 		}
 	}
 	return rep, nil
+}
+
+// syncResource runs one resource of one account, riding out network outages
+// per SyncOptions.WaitOffline, and logs the start and the outcome. Every
+// attempt resumes from whatever the previous one persisted, so the reports of
+// all attempts add up to one pass.
+func (e *Engine) syncResource(ctx context.Context, acct config.Account, o SyncOptions, resource string, attempt func(context.Context) (*ResourceReport, error)) (*ResourceReport, error) {
+	started := time.Now()
+	e.log.Info("sync starting", "account", acct.Name, "resource", resource, "full", o.Full)
+
+	total := &ResourceReport{}
+	wait := e.oneShotWait(o.WaitOffline)
+	wait.waitIf = func() bool {
+		return e.workInFlight(ctx, acct.Name, resource, total.Added+total.Updated+total.Removed)
+	}
+	err := e.rideOut(ctx, wait, acct.Name, resource, func(c context.Context) error {
+		r, err := attempt(c)
+		mergeResource(total, r)
+		return err
+	})
+	total.Duration = time.Since(started)
+	if err != nil {
+		if errors.Is(err, provider.ErrNotSupported) {
+			// Not a failure: the caller turns this into a skipped resource.
+			return total, err
+		}
+		e.log.Warn("sync failed", "account", acct.Name, "resource", resource,
+			"added", total.Added, "duration", total.Duration.Round(time.Millisecond), "err", err)
+		return total, err
+	}
+	e.log.Info("sync finished", "account", acct.Name, "resource", resource, "kind", total.Kind,
+		"added", total.Added, "updated", total.Updated, "removed", total.Removed,
+		"duration", total.Duration.Round(time.Millisecond))
+	return total, nil
+}
+
+// workInFlight reports whether an outage has interrupted something worth
+// waiting for: work this pass has already done, or a backfill an earlier run
+// left half-finished. With nothing in flight there is no cursor to protect and
+// no partial result to lose, so a one-shot `emlcal sync` fails fast the way
+// DESIGN.md §12 promises, however generous --wait-offline is. The daemon does
+// not use this gate: waiting is its whole job.
+func (e *Engine) workInFlight(ctx context.Context, account, resource string, done int) bool {
+	if done > 0 {
+		return true
+	}
+	if resource != resourceMail {
+		return false
+	}
+	bf, err := e.st.GetBackfill(ctx, account, resourceMail)
+	return err == nil && bf != nil && !bf.Finished() && bf.Done > 0
+}
+
+// mergeResource folds one attempt's report into the total for the pass: the
+// counts add up, the kind stays the one the pass started with, and the state
+// moves to wherever the last attempt got.
+func mergeResource(dst, src *ResourceReport) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.add(src)
+	if dst.Kind == "" {
+		dst.Kind = src.Kind
+	}
+	if dst.StateBefore == "" {
+		dst.StateBefore = src.StateBefore
+	}
+	if src.StateAfter != "" {
+		dst.StateAfter = src.StateAfter
+	}
 }
 
 // syncAllConcurrency bounds how many accounts sync at once. Each account is

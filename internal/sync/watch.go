@@ -97,6 +97,9 @@ func (e *Engine) Watch(ctx context.Context) error {
 	for _, acct := range e.cfg.Accounts {
 		e.watcher(acct.Name)
 	}
+	e.log.Info("watch daemon started", "accounts", len(e.cfg.Accounts),
+		"outbox_every", outboxEvery, "reexpand_every", reexpandEvery)
+	defer e.log.Info("watch daemon stopped")
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, acct := range e.cfg.Accounts {
@@ -168,7 +171,10 @@ func (e *Engine) watchAccount(ctx context.Context, acct config.Account) error {
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
-	offline := time.Duration(0)
+	e.log.Info("watching account", "account", acct.Name, "poll", poll, "push", acct.Push,
+		"mail", acct.Mail, "calendar", acct.Calendar)
+	defer e.log.Info("stopped watching account", "account", acct.Name)
+
 	first := true
 	for {
 		var o SyncOptions
@@ -189,15 +195,14 @@ func (e *Engine) watchAccount(ctx context.Context, acct config.Account) error {
 			}
 		}
 
-		if err := e.pass(ctx, acct, o); err != nil && provider.IsOffline(err) {
-			offline = nextBackoff(offline, offlineMin, offlineMax)
-			e.log.Warn("offline, backing off", "account", acct.Name, "retry_in", offline)
-			if !sleepCtx(ctx, offline) {
-				return nil
-			}
-			continue
+		// The same ride-out as `emlcal sync --wait-offline`, with an unlimited
+		// budget: the daemon has nowhere to be.
+		_ = e.rideOut(ctx, daemonWait(), acct.Name, "sync", func(c context.Context) error {
+			return e.pass(c, acct, o)
+		})
+		if ctx.Err() != nil {
+			return nil
 		}
-		offline = 0
 	}
 }
 
@@ -224,10 +229,8 @@ func debounce(ctx context.Context, w *accountWatch, d time.Duration) bool {
 func (e *Engine) pass(ctx context.Context, acct config.Account, o SyncOptions) error {
 	rep, err := e.syncAccount(ctx, acct, o)
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			return err
-		}
-		e.log.Warn("sync failed", "account", acct.Name, "err", err)
+		// syncResource has already logged what went wrong, and an outage is
+		// the ride-out's business to report, not this one's.
 		return err
 	}
 	_ = rep
@@ -241,7 +244,14 @@ func (e *Engine) pass(ctx context.Context, acct config.Account, o SyncOptions) e
 // into a wake-up for the account loop.
 func (e *Engine) pushLoop(ctx context.Context, acct config.Account, p provider.Pusher, w *accountWatch) {
 	wait := time.Duration(0)
+	attempt := 0
 	for ctx.Err() == nil {
+		attempt++
+		if attempt == 1 {
+			e.log.Info("push stream connecting", "account", acct.Name)
+		} else {
+			e.log.Info("push stream reconnecting", "account", acct.Name, "attempt", attempt)
+		}
 		err := p.Watch(ctx, func(h provider.ChangeHint) { w.fire(h) })
 		if ctx.Err() != nil {
 			return

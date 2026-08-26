@@ -17,6 +17,14 @@ import (
 // resourceMail is the sync_state / backfill_progress resource name for mail.
 const resourceMail = "mail"
 
+// resourceCalendar names the calendar half of an account in reports, progress
+// events and logs (calendar state itself is stored per calendar, "cal:<id>").
+const resourceCalendar = "calendar"
+
+// backfillLogEvery is how many enumerated messages go by between the Info
+// lines a long backfill leaves in the log.
+const backfillLogEvery = 1000
+
 // Kinds reported in ResourceReport.Kind and sync_log.kind.
 const (
 	KindBackfill  = "backfill"
@@ -24,12 +32,42 @@ const (
 	KindDelta     = "delta"
 	KindReconcile = "reconcile"
 	KindCalendar  = "calendar"
+	// KindDisabled is reported for a resource the account has switched off
+	// with `mail = false` / `calendar = false`.
+	KindDisabled = "disabled"
 )
 
 // envelopeFetcher is the optional cheap-refresh interface some providers
 // implement (gmail.Mail does): current flags/mailboxes without the raw body.
 type envelopeFetcher interface {
 	FetchEnvelopes(ctx context.Context, ids []string, fn func(provider.Envelope) error) error
+}
+
+// totalHinter is the optional interface of a provider that can say up front
+// roughly how many messages the account holds — JMAP's Email/query
+// calculateTotal (jmap.Totaler), Gmail's messages.list resultSizeEstimate.
+// It feeds the percentage and the ETA only, so an approximate answer, or none
+// at all, costs nothing but a less informative progress line.
+type totalHinter interface {
+	Total(ctx context.Context) (int, error)
+}
+
+// totalHint asks the provider for the size of the job. Any failure is a
+// non-event: the backfill runs perfectly well without a denominator.
+func (r *mailRun) totalHint(ctx context.Context) int {
+	th, ok := r.mp.(totalHinter)
+	if !ok {
+		return 0
+	}
+	n, err := th.Total(ctx)
+	if err != nil {
+		r.e.log.Debug("no message-count hint from the provider", "account", r.account(), "err", err)
+		return 0
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 // syncMail picks the right mail path for the account's current state:
@@ -361,7 +399,7 @@ func (r *mailRun) resurrect(ctx context.Context, envs []provider.Envelope) error
 // indexBatch messages. tail runs inside the same transaction as the final
 // batch, which is how the delta state is advanced atomically with the work it
 // covers. Ids the provider no longer has come back in gone.
-func (r *mailRun) fetchIndex(ctx context.Context, ids []string, phase string, done *int, tail func(*store.Tx) error) (gone []string, err error) {
+func (r *mailRun) fetchIndex(ctx context.Context, ids []string, m *meter, done *int, tail func(*store.Tx) error) (gone []string, err error) {
 	if len(ids) == 0 {
 		if tail != nil {
 			return nil, r.e.st.Tx(ctx, tail)
@@ -389,12 +427,7 @@ func (r *mailRun) fetchIndex(ctx context.Context, ids []string, phase string, do
 			// goes under the same lock as the batch it belongs to.
 			mu.Lock()
 			*done += len(b)
-			n := *done
 			mu.Unlock()
-			r.e.emit(ProgressEvent{
-				Account: r.account(), Resource: resourceMail, Phase: phase,
-				Done: n, Total: len(ids),
-			})
 		}
 		return nil
 	}
@@ -409,6 +442,9 @@ func (r *mailRun) fetchIndex(ctx context.Context, ids []string, phase string, do
 		batch = append(batch, p)
 		full := len(batch) >= indexBatch
 		mu.Unlock()
+		// Counted per message, not per transaction: a 100-message batch takes
+		// long enough that a counter moving only at the commit looks stuck.
+		m.add(1)
 		if full {
 			return flush(nil)
 		}
@@ -461,8 +497,24 @@ func (r *mailRun) backfill(ctx context.Context, bf *store.Backfill) (*ResourceRe
 		return rep, err
 	}
 
+	// The denominator of the progress line and of `status`. Asked for once
+	// per backfill and persisted, so a resumed run keeps its percentage even
+	// when the provider would not answer twice.
+	if bf.TotalHint == 0 {
+		if n := r.totalHint(ctx); n > 0 {
+			bf.TotalHint = n
+			if err := r.e.st.SetBackfill(ctx, bf); err != nil {
+				return rep, err
+			}
+		}
+	}
+
 	done := bf.Done
 	cursor := bf.Cursor
+	m := r.e.newMeter(r.account(), resourceMail, kind, done, bf.TotalHint)
+	logged := done / backfillLogEvery
+	r.e.log.Info("mail backfill", "account", r.account(), "kind", kind,
+		"from", done, "total_hint", bf.TotalHint)
 	for {
 		page, next, err := r.mp.Enumerate(ctx, cursor, enumeratePage)
 		if err != nil {
@@ -515,7 +567,7 @@ func (r *mailRun) backfill(ctx context.Context, bf *store.Backfill) (*ResourceRe
 		}
 
 		added := 0
-		gone, err := r.fetchIndex(ctx, fetch, kind, &added, nil)
+		gone, err := r.fetchIndex(ctx, fetch, m, &added, nil)
 		rep.Added += added
 		if err != nil {
 			r.finish(ctx, kind, started, rep, err)
@@ -534,10 +586,14 @@ func (r *mailRun) backfill(ctx context.Context, bf *store.Backfill) (*ResourceRe
 		if err := r.e.st.SetBackfill(ctx, bf); err != nil {
 			return rep, err
 		}
-		r.e.emit(ProgressEvent{
-			Account: r.account(), Resource: resourceMail, Phase: kind,
-			Done: done, Message: "enumerated",
-		})
+		// The page boundary is the one count that is exactly right: the
+		// per-message counter skips whatever was already indexed.
+		m.set(done)
+		if done/backfillLogEvery > logged {
+			logged = done / backfillLogEvery
+			r.e.log.Info("mail backfill progress", "account", r.account(),
+				"done", done, "total_hint", bf.TotalHint, "added", rep.Added)
+		}
 		if next == "" {
 			break
 		}
@@ -729,8 +785,9 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 	}
 	stateAdvanced := fetchTail != nil
 
+	m := r.e.newMeter(r.account(), resourceMail, KindDelta, 0, len(fetch))
 	added := 0
-	gone, err := r.fetchIndex(ctx, fetch, KindDelta, &added, fetchTail)
+	gone, err := r.fetchIndex(ctx, fetch, m, &added, fetchTail)
 	rep.Added = added
 	if err != nil {
 		r.finish(ctx, KindDelta, started, rep, err)
@@ -739,7 +796,7 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 	removed = append(removed, gone...)
 
 	if len(refresh) > 0 {
-		n, err := r.refreshEnvelopes(ctx, ef, refresh)
+		n, err := r.refreshEnvelopes(ctx, ef, refresh, m)
 		rep.Updated += n
 		if err != nil {
 			r.finish(ctx, KindDelta, started, rep, err)
@@ -810,10 +867,10 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 		rep.StateAfter = since
 	}
 	rep.Duration = time.Since(started)
-	r.e.emit(ProgressEvent{
-		Account: r.account(), Resource: resourceMail, Phase: KindDelta,
-		Done: rep.Added + rep.Updated + rep.Removed, Message: "applied",
-	})
+	if n := rep.Added + rep.Updated + rep.Removed; n > 0 {
+		m.setTotal(0)
+		m.mark(n, "applied")
+	}
 	if rep.Added+rep.Updated+rep.Removed > 0 {
 		r.finish(ctx, KindDelta, started, rep, nil)
 	}
@@ -880,6 +937,7 @@ func (r *mailRun) reconcile(ctx context.Context, before string) (*ResourceReport
 	var existing []string
 	var resurrect []provider.Envelope
 	cursor := ""
+	m := r.e.newMeter(r.account(), resourceMail, KindReconcile, 0, len(localAll))
 
 	for {
 		page, next, err := r.mp.Enumerate(ctx, cursor, enumeratePage)
@@ -911,10 +969,7 @@ func (r *mailRun) reconcile(ctx context.Context, before string) (*ResourceReport
 			}
 		}
 
-		r.e.emit(ProgressEvent{
-			Account: r.account(), Resource: resourceMail, Phase: KindReconcile,
-			Done: len(remote), Message: "enumerated",
-		})
+		m.mark(len(remote), "enumerated")
 		if next == "" {
 			break
 		}
@@ -935,8 +990,10 @@ func (r *mailRun) reconcile(ctx context.Context, before string) (*ResourceReport
 		rep.Added += len(b)
 	}
 
+	m.setTotal(len(fetch))
+	m.set(0)
 	added := 0
-	gone, err := r.fetchIndex(ctx, fetch, KindReconcile, &added, nil)
+	gone, err := r.fetchIndex(ctx, fetch, m, &added, nil)
 	rep.Added += added
 	if err != nil {
 		r.finish(ctx, KindReconcile, started, rep, err)
@@ -961,7 +1018,7 @@ func (r *mailRun) reconcile(ctx context.Context, before string) (*ResourceReport
 	// Refresh flags/mailboxes for everything we already had, when the provider
 	// offers a cheap way to ask.
 	if canRefresh {
-		n, err := r.refreshEnvelopes(ctx, ef, existing)
+		n, err := r.refreshEnvelopes(ctx, ef, existing, m)
 		rep.Updated += n
 		if err != nil {
 			r.finish(ctx, KindReconcile, started, rep, err)
@@ -992,7 +1049,11 @@ func (r *mailRun) reconcile(ctx context.Context, before string) (*ResourceReport
 }
 
 // refreshEnvelopes re-applies current flags/mailboxes for ids in chunks.
-func (r *mailRun) refreshEnvelopes(ctx context.Context, ef envelopeFetcher, ids []string) (int, error) {
+func (r *mailRun) refreshEnvelopes(ctx context.Context, ef envelopeFetcher, ids []string, m *meter) (int, error) {
+	if len(ids) > 0 && m != nil {
+		m.setTotal(len(ids))
+		m.set(0)
+	}
 	updated := 0
 	for _, part := range chunk(ids, envelopeChunk) {
 		var envs []provider.Envelope
@@ -1024,10 +1085,7 @@ func (r *mailRun) refreshEnvelopes(ctx context.Context, ef envelopeFetcher, ids 
 		if err != nil {
 			return updated, err
 		}
-		r.e.emit(ProgressEvent{
-			Account: r.account(), Resource: resourceMail, Phase: KindReconcile,
-			Done: updated, Total: len(ids), Message: "refreshed",
-		})
+		m.mark(updated, "refreshed")
 	}
 	return updated, nil
 }

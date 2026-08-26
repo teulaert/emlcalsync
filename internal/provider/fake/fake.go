@@ -80,6 +80,8 @@ type Mail struct {
 	enumCalls   int
 
 	mailboxesChanged bool
+	// noTotal makes Total report that the provider cannot count.
+	noTotal bool
 
 	// recorded writes
 	sentRaw   [][]byte
@@ -272,6 +274,28 @@ func (f *Mail) envelopeLocked(m *Msg) provider.Envelope {
 		Flags:     m.flags,
 		Mailboxes: append([]string(nil), m.mailboxes...),
 	}
+}
+
+// Total implements the sync engine's optional total hint (the same shape as
+// jmap.Totaler): how many messages the account holds. SetNoTotal switches it
+// off, which is how a provider that cannot count behaves.
+func (f *Mail) Total(ctx context.Context) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return 0, err
+	}
+	if f.noTotal {
+		return 0, provider.ErrNotSupported
+	}
+	return len(f.order), nil
+}
+
+// SetNoTotal makes Total report that this provider cannot count messages.
+func (f *Mail) SetNoTotal(v bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.noTotal = v
 }
 
 func (f *Mail) Enumerate(ctx context.Context, cursor string, limit int) ([]provider.Envelope, string, error) {

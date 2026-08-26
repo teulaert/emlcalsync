@@ -39,7 +39,8 @@ type coreSyncRow struct {
 }
 
 func coreSyncCmd(app *App) *cobra.Command {
-	var full, watch, mailOnly, calOnly bool
+	var full, watch, mailOnly, calOnly, quiet bool
+	waitOffline := sync.DefaultWaitOffline
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Fetch new mail and calendar changes into the local archive",
@@ -49,17 +50,25 @@ The first pass is a resumable backfill of the whole account; later passes only
 apply the provider's delta. --watch turns the command into the daemon: push
 streams where the provider has them, polling where it does not, plus outbox
 retries. Running a manual sync while the daemon is up nudges the daemon instead
-of fighting it for the lock.`,
+of fighting it for the lock.
+
+A backfill of a large mailbox takes hours, so losing the network is treated as
+a pause rather than a failure: the pass waits up to --wait-offline for it to
+come back and then resumes from where it stopped. --wait-offline 0 restores the
+old behaviour of exiting 4 on the first transport error.`,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			if mailOnly && calOnly {
 				return output.Errorf(output.ExitUsage, "--mail-only and --calendar-only are mutually exclusive")
 			}
-			opts := sync.SyncOptions{Full: full, Mail: mailOnly, Calendar: calOnly}
+			if waitOffline < 0 {
+				return output.Errorf(output.ExitUsage, "--wait-offline must not be negative")
+			}
+			opts := sync.SyncOptions{Full: full, Mail: mailOnly, Calendar: calOnly, WaitOffline: waitOffline}
 			if watch {
 				return coreWatch(app, opts)
 			}
-			return coreSyncOnce(app, opts)
+			return coreSyncOnce(app, opts, quiet)
 		},
 	}
 	f := cmd.Flags()
@@ -67,13 +76,16 @@ of fighting it for the lock.`,
 	f.BoolVar(&watch, "watch", false, "run as a daemon: push, polling and outbox retries")
 	f.BoolVar(&mailOnly, "mail-only", false, "sync mail only")
 	f.BoolVar(&calOnly, "calendar-only", false, "sync calendars only")
+	f.DurationVar(&waitOffline, "wait-offline", sync.DefaultWaitOffline,
+		"how long to wait out a network outage before giving up (0 = fail immediately; --watch always waits)")
+	f.BoolVar(&quiet, "quiet", false, "do not print the live progress line")
 	return cmd
 }
 
 // ---------------------------------------------------------------------------
 // one-shot
 
-func coreSyncOnce(app *App, opts sync.SyncOptions) error {
+func coreSyncOnce(app *App, opts sync.SyncOptions, quiet bool) error {
 	names, err := app.AccountIDs()
 	if err != nil {
 		return err
@@ -81,7 +93,7 @@ func coreSyncOnce(app *App, opts sync.SyncOptions) error {
 	if len(names) == 0 {
 		return output.Errorf(output.ExitUsage, "no accounts configured; run `emlcal account add`")
 	}
-	if app.IsTTY {
+	if app.IsTTY && !quiet {
 		app.Progress = coreProgressPrinter(app)
 	}
 	eng, err := app.Engine()
@@ -165,16 +177,23 @@ func coreSyncRows(reports []*sync.Report) ([]coreSyncRow, error) {
 	return rows, worst
 }
 
-// coreProgressPrinter renders a single self-overwriting line on stderr.
+// coreProgressPrinter renders a single self-overwriting line on stderr:
+//
+//	work mail backfill 1 234/52 000 · 48/s · ~18m
+//
+// The engine composes the counts, rate and ETA into Message; only an event
+// without one (an older phase, or the outbox) falls back to the raw numbers.
 func coreProgressPrinter(app *App) func(sync.ProgressEvent) {
 	var last int
 	return func(ev sync.ProgressEvent) {
-		line := fmt.Sprintf("%s %s %s %d", ev.Account, ev.Resource, ev.Phase, ev.Done)
-		if ev.Total > 0 {
-			line = fmt.Sprintf("%s %s %s %d/%d", ev.Account, ev.Resource, ev.Phase, ev.Done, ev.Total)
-		}
-		if ev.Message != "" {
+		line := strings.TrimSpace(fmt.Sprintf("%s %s %s", ev.Account, ev.Resource, ev.Phase))
+		switch {
+		case ev.Message != "":
 			line += " " + ev.Message
+		case ev.Total > 0:
+			line += fmt.Sprintf(" %d/%d", ev.Done, ev.Total)
+		default:
+			line += fmt.Sprintf(" %d", ev.Done)
 		}
 		pad := ""
 		if n := last - len([]rune(line)); n > 0 {
@@ -190,7 +209,7 @@ func coreClearProgress(app *App) {
 		return
 	}
 	app.Progress = nil
-	fmt.Fprintf(app.Stderr, "\r%s\r", strings.Repeat(" ", 72))
+	fmt.Fprintf(app.Stderr, "\r%s\r", strings.Repeat(" ", 100))
 }
 
 // coreNudgeDaemon signals a running daemon to sync now. Not finding one is an

@@ -39,6 +39,8 @@ type fileAccount struct {
 	Push             *bool     `toml:"push"`
 	IncludeSpamTrash *bool     `toml:"include_spam_trash"`
 	RawMaxSize       *Size     `toml:"raw_max_size"`
+	Mail             *bool     `toml:"mail"`
+	Calendar         *bool     `toml:"calendar"`
 	Calendars        []string  `toml:"calendars"`
 	Concurrency      *int      `toml:"concurrency"`
 }
@@ -129,6 +131,8 @@ func merge(c *Config, fc *fileConfig) error {
 func materialize(fa fileAccount) (Account, error) {
 	a := Account{
 		IncludeSpamTrash: true,
+		Mail:             true,
+		Calendar:         true,
 		Calendars:        []string{"*"},
 		Concurrency:      DefaultConcurrency,
 	}
@@ -160,6 +164,12 @@ func materialize(fa fileAccount) (Account, error) {
 	if fa.RawMaxSize != nil {
 		v := *fa.RawMaxSize
 		a.RawMaxSize = &v
+	}
+	if fa.Mail != nil {
+		a.Mail = *fa.Mail
+	}
+	if fa.Calendar != nil {
+		a.Calendar = *fa.Calendar
 	}
 	if fa.Calendars != nil {
 		a.Calendars = fa.Calendars
@@ -301,6 +311,9 @@ func (c *Config) Validate() error {
 		}
 		if a.RawMaxSize != nil && *a.RawMaxSize < 0 {
 			add("%s: raw_max_size must not be negative", label)
+		}
+		if !a.Mail && !a.Calendar {
+			add("%s: mail and calendar are both false; the account would sync nothing", label)
 		}
 	}
 

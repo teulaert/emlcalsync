@@ -74,6 +74,10 @@ func sortCommands(c *cobra.Command) {
 func Execute(args []string, app *App) int {
 	root := NewRoot(app)
 	root.SetArgs(args)
+	if err := checkUnknownCommand(root, args); err != nil {
+		app.Close()
+		return app.Printer().Fail("", err)
+	}
 	err := root.Execute()
 	closeErr := app.Close()
 	if err == nil {
@@ -129,4 +133,124 @@ func Queued(n int) error {
 func stdinIsPipe() bool {
 	fi, err := os.Stdin.Stat()
 	return err == nil && fi.Mode()&os.ModeCharDevice == 0
+}
+
+// ---------------------------------------------------------------------------
+// Unknown commands
+//
+// cobra parses flags before it decides the command does not exist, so
+// `emlcal add fastmail --name x` used to fail with "unknown flag: --name" —
+// true, but useless: the real mistake is the missing `account`. The first
+// positional argument is therefore checked against the command tree before
+// cobra ever sees the flags.
+
+// checkUnknownCommand returns a usage error when the first word is not one of
+// the root's subcommands.
+func checkUnknownCommand(root *cobra.Command, args []string) error {
+	// The built-in commands only exist once cobra has run its own setup.
+	root.InitDefaultHelpCmd()
+	root.InitDefaultCompletionCmd(args...)
+
+	name := firstPositional(root, args)
+	if name == "" || strings.HasPrefix(name, "__") || findChild(root, name) != nil {
+		// "__complete" and friends are cobra's own completion machinery; it
+		// registers them later, during Execute.
+		return nil
+	}
+	msg := fmt.Sprintf("unknown command %q for %q", name, root.CommandPath())
+	if hint := commandHint(root, name); hint != "" {
+		msg += fmt.Sprintf("; did you mean `%s`?", hint)
+	}
+	return output.Errorf(output.ExitUsage, "%s", msg)
+}
+
+// firstPositional returns the first argument that is not a flag or a flag's
+// value, mirroring how cobra itself strips flags when it looks for a
+// subcommand: an unknown long flag is assumed to take a value.
+func firstPositional(cmd *cobra.Command, args []string) string {
+	fs := cmd.Flags()
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		case strings.HasPrefix(a, "--"):
+			if strings.Contains(a, "=") {
+				continue
+			}
+			if f := fs.Lookup(strings.TrimPrefix(a, "--")); f == nil || f.NoOptDefVal == "" {
+				i++ // the value is the next argument
+			}
+		case strings.HasPrefix(a, "-") && a != "-":
+			if strings.Contains(a, "=") {
+				continue
+			}
+			short := strings.TrimPrefix(a, "-")
+			if len(short) != 1 {
+				continue // a bundle like -av: no separate value
+			}
+			if f := fs.ShorthandLookup(short); f == nil || f.NoOptDefVal == "" {
+				i++
+			}
+		default:
+			return a
+		}
+	}
+	return ""
+}
+
+func findChild(cmd *cobra.Command, name string) *cobra.Command {
+	for _, c := range cmd.Commands() {
+		if c.Name() == name {
+			return c
+		}
+		for _, a := range c.Aliases {
+			if a == name {
+				return c
+			}
+		}
+	}
+	return nil
+}
+
+// commandHint looks for the word deeper in the tree, so `emlcal add` can point
+// at `emlcal account add`. The shortest match wins, which keeps the suggestion
+// to the most direct spelling.
+func commandHint(root *cobra.Command, name string) string {
+	best := ""
+	var walk func(c *cobra.Command)
+	walk = func(c *cobra.Command) {
+		for _, sub := range c.Commands() {
+			if sub.Hidden {
+				continue
+			}
+			if matchesCommand(sub, name) {
+				path := sub.CommandPath()
+				if best == "" || len(path) < len(best) {
+					best = path
+				}
+			}
+			walk(sub)
+		}
+	}
+	walk(root)
+	return best
+}
+
+// matchesCommand is the deliberately simple "close enough" test: the same
+// name, one containing the other, or an alias.
+func matchesCommand(cmd *cobra.Command, name string) bool {
+	n := cmd.Name()
+	if n == name || strings.Contains(n, name) || strings.Contains(name, n) {
+		return true
+	}
+	for _, a := range cmd.Aliases {
+		if a == name {
+			return true
+		}
+	}
+	return false
 }

@@ -129,6 +129,8 @@ func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult
 		if err := e.st.MarkOutboxDone(ctx, id); err != nil {
 			return res, err
 		}
+		e.log.Info("outbox item done", "account", account, "kind", op.Kind,
+			"outbox", id, "messages", len(op.IDs), "remote", remote)
 		if err := e.afterExecute(ctx, *acct, op, remote); err != nil {
 			return res, err
 		}
@@ -803,6 +805,8 @@ func (e *Engine) RetryOutbox(ctx context.Context, account string) (*OutboxReport
 			if err := e.st.MarkOutboxDone(ctx, it.ID); err != nil {
 				return rep, err
 			}
+			e.log.Info("outbox item done", "account", it.AccountID, "kind", it.Kind,
+				"outbox", it.ID, "attempts", it.Attempts+1, "remote", remote)
 			if err := e.afterExecute(ctx, *acct, op, remote); err != nil {
 				e.log.Warn("outbox post-apply", "outbox", it.ID, "err", err)
 			}

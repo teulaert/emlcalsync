@@ -82,6 +82,18 @@ func render(c *Config) []byte {
 			b.WriteString("# Overrides general.raw_max_size for this account.\n")
 			fmt.Fprintf(&b, "raw_max_size = %s\n", quote(a.RawMaxSize.String()))
 		}
+		// Only a one-sided toggle is written. Both false is not a state
+		// config.toml can express — Validate refuses it — and it is what a
+		// zero-value Account built in Go looks like, so Save must not turn
+		// one of those into a file it would then refuse to load.
+		if !a.Mail && a.Calendar {
+			b.WriteString("# false syncs no mail for this account (calendar only).\n")
+			b.WriteString("mail     = false\n")
+		}
+		if a.Mail && !a.Calendar {
+			b.WriteString("# false syncs no calendars for this account (mail only).\n")
+			b.WriteString("calendar = false\n")
+		}
 		if !equalStrings(a.Calendars, def.Calendars) {
 			b.WriteString("# \"*\" syncs every calendar; otherwise list them by name.\n")
 			fmt.Fprintf(&b, "calendars = %s\n", quoteList(a.Calendars))

@@ -62,6 +62,8 @@ func newHarness(t *testing.T) *harness {
 			Provider:    model.ProviderGmail,
 			Email:       "user@example.com",
 			Poll:        config.Duration(time.Hour),
+			Mail:        true,
+			Calendar:    true,
 			Calendars:   []string{"*"},
 			Concurrency: 2,
 		}},
@@ -526,7 +528,7 @@ func TestSyncAllReportsPerAccount(t *testing.T) {
 	h := newHarness(t)
 	h.cfg.Accounts = append(h.cfg.Accounts, config.Account{
 		Name: "personal", Provider: model.ProviderFastmail, Email: "me@example.com",
-		Poll: config.Duration(time.Hour), Calendars: []string{"*"},
+		Poll: config.Duration(time.Hour), Mail: true, Calendar: true, Calendars: []string{"*"},
 	})
 	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one")})
 

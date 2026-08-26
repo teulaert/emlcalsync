@@ -656,3 +656,131 @@ email = "c@d.example"
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Per-account mail/calendar toggles
+
+// An absent key means the half is on: only an explicit false switches it off.
+func TestAccountResourceTogglesDefaultToTrue(t *testing.T) {
+	path := writeTemp(t, "config.toml", `
+[[accounts]]
+name = "work"
+provider = "gmail"
+email = "me@work.example"
+
+[[accounts]]
+name = "cal-only"
+provider = "gmail"
+email = "me@corp.example"
+mail = false
+
+[[accounts]]
+name = "mail-only"
+provider = "fastmail"
+email = "me@fastmail.example"
+calendar = false
+`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name           string
+		mail, calendar bool
+	}{
+		{"work", true, true},
+		{"cal-only", false, true},
+		{"mail-only", true, false},
+	} {
+		a, ok := c.Account(tc.name)
+		if !ok {
+			t.Fatalf("no account %q", tc.name)
+		}
+		if a.Mail != tc.mail || a.Calendar != tc.calendar {
+			t.Errorf("%s: mail=%v calendar=%v, want mail=%v calendar=%v",
+				tc.name, a.Mail, a.Calendar, tc.mail, tc.calendar)
+		}
+		if a.Syncs("mail") != tc.mail || a.Syncs("calendar") != tc.calendar {
+			t.Errorf("%s: Syncs disagrees with the fields", tc.name)
+		}
+		if a.Syncs("contacts") {
+			t.Errorf("%s: Syncs said yes to a resource that does not exist", tc.name)
+		}
+	}
+}
+
+// An account with both halves off would sync nothing, which is a mistake worth
+// naming rather than a configuration to honour.
+func TestValidateRejectsAnAccountWithBothResourcesOff(t *testing.T) {
+	path := writeTemp(t, "config.toml", `
+[[accounts]]
+name = "work"
+provider = "gmail"
+email = "me@work.example"
+mail = false
+calendar = false
+`)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	err = c.Validate()
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("error should wrap ErrInvalid: %v", err)
+	}
+	if !strings.Contains(err.Error(), "mail and calendar are both false") {
+		t.Errorf("error %q does not explain the problem", err)
+	}
+}
+
+// Save writes a one-sided toggle and nothing else; a config built in Go
+// without the fields must not become a file that Load then refuses.
+func TestSaveRoundTripsResourceToggles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	c := Default()
+	c.Accounts = []Account{
+		{Name: "cal-only", Provider: model.ProviderGmail, Email: "a@b.example",
+			Mail: false, Calendar: true, Calendars: []string{"*"}, Concurrency: DefaultConcurrency},
+		// Zero value for both, the way a Go caller that predates the toggles
+		// builds an account.
+		{Name: "legacy", Provider: model.ProviderGmail, Email: "c@d.example"},
+	}
+	if err := Save(path, c); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "mail     = false") {
+		t.Errorf("the switched-off half was not written:\n%s", b)
+	}
+	if strings.Contains(string(b), "calendar = false") {
+		t.Errorf("Save wrote a config it would refuse to load:\n%s", b)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("Validate after round trip: %v", err)
+	}
+	a, _ := got.Account("cal-only")
+	if a.Mail || !a.Calendar {
+		t.Errorf("cal-only came back as mail=%v calendar=%v", a.Mail, a.Calendar)
+	}
+	l, _ := got.Account("legacy")
+	if !l.Mail || !l.Calendar {
+		t.Errorf("legacy came back as mail=%v calendar=%v, want both on", l.Mail, l.Calendar)
+	}
+}

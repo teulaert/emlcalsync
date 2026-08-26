@@ -75,6 +75,11 @@ type fakeMail struct {
 	enumCalls   int
 
 	mailboxesChanged bool
+	// noTotal makes Total report that the provider cannot count.
+	noTotal bool
+	// failWith is returned by the next call instead of a transport error, for
+	// the paths that have to tell a rejection from an outage.
+	failWith error
 
 	// recorded writes
 	sentRaw   [][]byte
@@ -224,7 +229,20 @@ func (f *fakeMail) Push(h provider.ChangeHint) {
 	}
 }
 
+// FailNextWith makes the next provider call fail with err — a rejection, not
+// an outage, unless err says otherwise.
+func (f *fakeMail) FailNextWith(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failWith = err
+}
+
 func (f *fakeMail) fail() error {
+	if f.failWith != nil {
+		err := f.failWith
+		f.failWith = nil
+		return err
+	}
 	if f.failNext > 0 {
 		f.failNext--
 		return errOffline("mail")
@@ -267,6 +285,21 @@ func (f *fakeMail) envelopeLocked(m *fakeMsg) provider.Envelope {
 		Flags:     m.flags,
 		Mailboxes: append([]string(nil), m.mailboxes...),
 	}
+}
+
+// Total implements the engine's totalHinter (jmap.Totaler): how many messages
+// the account holds, for the backfill percentage and ETA. noTotal switches it
+// off, which is how a provider without the capability behaves.
+func (f *fakeMail) Total(ctx context.Context) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return 0, err
+	}
+	if f.noTotal {
+		return 0, provider.ErrNotSupported
+	}
+	return len(f.order), nil
 }
 
 func (f *fakeMail) Enumerate(ctx context.Context, cursor string, limit int) ([]provider.Envelope, string, error) {

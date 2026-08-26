@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/output"
 )
 
@@ -31,6 +32,11 @@ type coreStatusRow struct {
 	Backfill        string      `json:"backfill,omitempty" table:"BACKFILL"`
 	BackfillPercent float64     `json:"backfill_percent,omitempty"`
 	OutboxPending   int         `json:"outbox_pending"   table:"OUTBOX"`
+	// Mail/Calendar are the per-account toggles; Disabled is the same fact
+	// spelled for the table ("mail off").
+	Mail     bool   `json:"mail"`
+	Calendar bool   `json:"calendar"`
+	Disabled string `json:"disabled,omitempty" table:"DISABLED"`
 }
 
 type coreDaemonInfo struct {
@@ -81,7 +87,10 @@ func coreStatus(app *App) error {
 		if err != nil {
 			return err
 		}
-		row := coreStatusRow{Name: name, Provider: string(acct.Provider), Email: acct.Email}
+		row := coreStatusRow{
+			Name: name, Provider: string(acct.Provider), Email: acct.Email,
+			Mail: acct.Mail, Calendar: acct.Calendar, Disabled: coreDisabledLabel(acct),
+		}
 		if st != nil {
 			if s, err := st.AccountStats(ctx, name); err == nil {
 				row.Messages = s.Messages
@@ -131,6 +140,21 @@ func coreStatus(app *App) error {
 	fmt.Fprintf(app.Stdout, "blobs: %d (%s) in %s; index %s\n",
 		out.Blobs.Count, coreHumanBytes(out.Blobs.Bytes), out.Blobs.Dir, out.DB)
 	return nil
+}
+
+// coreDisabledLabel spells out a switched-off half of an account. Both off is
+// not a configuration Validate allows, so it can only come from a Config built
+// in code; it is still worth showing rather than silently picking one.
+func coreDisabledLabel(acct *config.Account) string {
+	switch {
+	case !acct.Mail && !acct.Calendar:
+		return "mail off, calendar off"
+	case !acct.Mail:
+		return "mail off"
+	case !acct.Calendar:
+		return "calendar off"
+	}
+	return ""
 }
 
 func corePercent(done, total int) float64 {
