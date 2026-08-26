@@ -9,6 +9,29 @@
 //	*Mail     provider.MailProvider     (c.Mail())
 //	*Calendar provider.CalendarProvider (c.Calendar())
 //
+// Beyond provider.MailProvider, *Mail offers two things the sync engine picks
+// up through optional interfaces:
+//
+//	Total(ctx) (int, error)                                   Totaler
+//	FetchEnvelopes(ctx, ids, func(provider.Envelope) error)    cheap refresh
+//
+// Total answers Email/query with limit 0 and calculateTotal, giving a backfill
+// a denominator that Enumerate has nowhere to return; the answer is cached, so
+// a run that already enumerated its first page pays nothing for it.
+// FetchEnvelopes reads current flags and mailboxes without downloading bodies,
+// which is what a reconcile needs.
+//
+// The Enumerate cursor is a JSON object, opaque to the engine but persisted
+// across restarts in the backfill row:
+//
+//	{"anchor":"<last Email id of the previous page>","n":<ids so far>,"sort":"desc"}
+//
+// A backfill enumerates newest first, so the mail most likely to be wanted is
+// archived first. "sort" pins the direction for the life of one backfill: a
+// cursor written before the marker existed (or a bare number, older still)
+// came from a run walking oldest-first, and that run finishes the way it
+// started rather than re-enumerating one end of the mailbox forever.
+//
 // References:
 //
 //	RFC 8620  JMAP core
@@ -450,10 +473,118 @@ func IsMethodError(err error, typ string) bool {
 type AuthError struct {
 	Status int
 	Body   string
+	// Scopes names the API token scopes the refused request needed, rendered
+	// for a human ("the Calendars scope"). It is filled in where the caller
+	// knows which capabilities it claimed, and left empty where it does not
+	// (the session fetch, a blob download), so `emlcal doctor` can say which
+	// box to tick in the Fastmail token settings.
+	Scopes string
 }
 
 func (e *AuthError) Error() string {
-	return fmt.Sprintf("jmap: authentication failed (HTTP %d): %s", e.Status, e.Body)
+	s := fmt.Sprintf("jmap: authentication failed (HTTP %d): %s", e.Status, e.Body)
+	if e.Scopes != "" {
+		s += fmt.Sprintf(" (the API token must exist and carry %s)", e.Scopes)
+	}
+	return s
+}
+
+// ---------------------------------------------------------------------------
+// Token scopes
+
+// tokenScopeFor names the Fastmail API token scope that grants a JMAP
+// capability, for error messages a user can act on. Unknown capabilities and
+// the core capability (which every token has) yield "".
+func tokenScopeFor(urn string) string {
+	switch {
+	case urn == CapCore:
+		return ""
+	case urn == CapMail, urn == CapSubmission:
+		return "Mail"
+	case isCalendarURN(urn):
+		return "Calendars"
+	case strings.HasSuffix(urn, ":contacts"), strings.HasSuffix(urn, "/contacts"):
+		return "Contacts"
+	}
+	return ""
+}
+
+// scopeHint renders the token scopes a request's capabilities require, as a
+// noun phrase ("the Mail scope", "the Mail and Calendars scopes"), or "" when
+// none of them maps to a scope worth naming.
+func scopeHint(using []string) string {
+	var names []string
+	for _, u := range using {
+		if s := tokenScopeFor(u); s != "" && !slices.Contains(names, s) {
+			names = append(names, s)
+		}
+	}
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return "the " + names[0] + " scope"
+	default:
+		return "the " + strings.Join(names[:len(names)-1], ", ") + " and " +
+			names[len(names)-1] + " scopes"
+	}
+}
+
+// withScopeHint fills in AuthError.Scopes from the capabilities the refused
+// request claimed. Other errors pass through untouched.
+func withScopeHint(err error, using []string) error {
+	var ae *AuthError
+	if errors.As(err, &ae) && ae.Scopes == "" {
+		ae.Scopes = scopeHint(using)
+	}
+	return err
+}
+
+// beyondMail reports whether a request asked only for capabilities outside
+// mail — which on Fastmail is exactly where a token scope can be missing while
+// the token itself is perfectly valid.
+func beyondMail(using []string) bool {
+	found := false
+	for _, u := range using {
+		switch {
+		case u == CapCore:
+		case u == CapMail, u == CapSubmission:
+			return false
+		default:
+			found = true
+		}
+	}
+	return found
+}
+
+// decorateMethodError gives a capability-level refusal a message the user can
+// act on, and marks it provider.ErrNotSupported where the whole resource is
+// out of reach so the sync engine skips that resource instead of failing the
+// account.
+//
+// "accountNotSupportedByMethod" is unambiguous: this account cannot serve this
+// method at all. "forbidden" is not — on a mail account it is at least as
+// likely to be one operation an ACL refuses as a missing scope — so it only
+// counts as resource-level for a capability other than mail; a forbidden mail
+// call still fails the sync, it just says which scope it wanted.
+func decorateMethodError(err *MethodError, using []string) error {
+	hint := scopeHint(using)
+	switch err.Type {
+	case "accountNotSupportedByMethod":
+	case "forbidden":
+		if !beyondMail(using) {
+			if hint == "" {
+				return err
+			}
+			return fmt.Errorf("%w (this API token may lack %s)", err, hint)
+		}
+	default:
+		return err
+	}
+	if hint == "" {
+		return fmt.Errorf("%w: %w", provider.ErrNotSupported, err)
+	}
+	return fmt.Errorf("%w: %w (the API token needs %s)", provider.ErrNotSupported, err, hint)
 }
 
 // RequestError is a non-auth HTTP-level failure (e.g. a 400 problem+json).
@@ -527,7 +658,7 @@ func (c *Client) request(ctx context.Context, using []string, calls []Invocation
 	}
 	defer httpResp.Body.Close()
 	if err := checkStatus(httpResp); err != nil {
-		return nil, err
+		return nil, withScopeHint(err, using)
 	}
 
 	var resp Response
@@ -546,7 +677,7 @@ func (c *Client) request(ctx context.Context, using []string, calls []Invocation
 			me.Type = "unknownError"
 		}
 		me.Method = methodNameFor(calls, mr.ID)
-		return &resp, me
+		return &resp, decorateMethodError(me, using)
 	}
 	return &resp, nil
 }
@@ -646,7 +777,8 @@ func (c *Client) Download(ctx context.Context, accountID, blobID, name, typ stri
 	}
 	defer resp.Body.Close()
 	if err := checkStatus(resp); err != nil {
-		return nil, fmt.Errorf("jmap: downloading blob %s: %w", blobID, err)
+		return nil, fmt.Errorf("jmap: downloading blob %s: %w", blobID,
+			withScopeHint(err, []string{CapMail}))
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -697,7 +829,7 @@ func (c *Client) Upload(ctx context.Context, accountID, typ string, data []byte)
 	}
 	defer resp.Body.Close()
 	if err := checkStatus(resp); err != nil {
-		return "", 0, fmt.Errorf("jmap: upload: %w", err)
+		return "", 0, fmt.Errorf("jmap: upload: %w", withScopeHint(err, []string{CapMail}))
 	}
 	var ur uploadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ur); err != nil {

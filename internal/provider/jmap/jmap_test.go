@@ -222,14 +222,23 @@ func TestEnumeratePaging(t *testing.T) {
 	if len(all) != 25 {
 		t.Fatalf("got %d envelopes, want 25", len(all))
 	}
+	// Newest first: a first sync archives this year's mail before 2005's.
 	for i := 1; i < len(all); i++ {
-		if all[i].Received.Before(all[i-1].Received) {
-			t.Fatalf("envelopes out of order at %d", i)
+		if all[i].Received.After(all[i-1].Received) {
+			t.Fatalf("envelopes out of order at %d: %s after %s",
+				i, all[i].RemoteID, all[i-1].RemoteID)
 		}
 	}
 	first := all[0]
-	if first.RemoteID != "e000" || first.ThreadID != "t000" {
-		t.Errorf("first envelope = %+v", first)
+	if first.RemoteID != "e024" || first.ThreadID != "t012" {
+		t.Errorf("first envelope = %+v, want the newest message e024", first)
+	}
+	if last := all[len(all)-1]; last.RemoteID != "e000" {
+		t.Errorf("last envelope = %q, want the oldest message e000", last.RemoteID)
+	}
+	if q := f.captured("Email/query")[0]; !reflect.DeepEqual(q["sort"],
+		[]any{map[string]any{"property": "receivedAt", "isAscending": false}}) {
+		t.Errorf("sort = %#v, want receivedAt descending", q["sort"])
 	}
 	if first.Flags.Unread {
 		t.Error("$seen keyword should clear Unread")
@@ -258,9 +267,10 @@ func TestEnumeratePaging(t *testing.T) {
 	}
 }
 
-// TestEnumerateSurvivesDeleteBehindCursor deletes a message that has already
-// been enumerated. A position cursor would shift down by one and skip an
-// unenumerated message; the anchor cursor must not.
+// TestEnumerateSurvivesDeleteBehindCursor deletes messages that have already
+// been enumerated. A position cursor would shift down by one per deletion and
+// skip an unenumerated message; the anchor cursor must not. Enumeration runs
+// newest first, so "behind the cursor" is the newest end of the mailbox.
 func TestEnumerateSurvivesDeleteBehindCursor(t *testing.T) {
 	f := newFakeServer(t)
 	seedEmails(f, 25)
@@ -283,11 +293,12 @@ func TestEnumerateSurvivesDeleteBehindCursor(t *testing.T) {
 			break
 		}
 		cursor = next
-		// Delete a message from the page we have just consumed, plus one from
-		// the very first page, so the whole list shifts under the cursor.
+		// Delete two messages from the page we have just consumed (e024 is the
+		// newest message of all, e021 sits in the middle of that page), so the
+		// whole list shifts under the cursor.
 		if pages == 1 {
-			f.deleteEmail("e000")
-			f.deleteEmail("e003")
+			f.deleteEmail("e024")
+			f.deleteEmail("e021")
 		}
 		if pages > 10 {
 			t.Fatal("Enumerate did not terminate")
@@ -304,7 +315,7 @@ func TestEnumerateSurvivesDeleteBehindCursor(t *testing.T) {
 	// Everything except the two deleted messages must have been seen.
 	for i := range 25 {
 		id := fmt.Sprintf("e%03d", i)
-		if id == "e000" || id == "e003" {
+		if id == "e024" || id == "e021" {
 			continue
 		}
 		if !seen[id] {
@@ -333,12 +344,12 @@ func TestEnumerateAnchorNotFound(t *testing.T) {
 	if err := json.Unmarshal([]byte(cursor), &cur); err != nil {
 		t.Fatalf("cursor %q is not JSON: %v", cursor, err)
 	}
-	if cur.Anchor != "e009" || cur.N != 10 {
-		t.Fatalf("cursor = %+v, want anchor e009 and n 10", cur)
+	if cur.Anchor != "e015" || cur.N != 10 || cur.Sort != sortDesc {
+		t.Fatalf("cursor = %+v, want anchor e015, n 10 and a desc marker", cur)
 	}
 
 	// The anchor is destroyed before the next page is requested.
-	f.deleteEmail("e009")
+	f.deleteEmail("e015")
 	f.resetCalls()
 
 	page2, cursor2, err := m.Enumerate(ctx, cursor, 10)
@@ -355,8 +366,8 @@ func TestEnumerateAnchorNotFound(t *testing.T) {
 	if queries[1]["position"].(float64) != 9 {
 		t.Errorf("retry position = %v, want 9 (one back, the anchor itself is gone)", queries[1]["position"])
 	}
-	if len(page2) != 10 || page2[0].RemoteID != "e010" {
-		t.Fatalf("second page = %d envelopes starting at %q, want e010 (nothing skipped)",
+	if len(page2) != 10 || page2[0].RemoteID != "e014" {
+		t.Fatalf("second page = %d envelopes starting at %q, want e014 (nothing skipped)",
 			len(page2), page2[0].RemoteID)
 	}
 	if cursor2 == "" {
@@ -379,7 +390,7 @@ func TestEnumerateEmptyAccount(t *testing.T) {
 func TestEnumerateBadCursor(t *testing.T) {
 	f := newFakeServer(t)
 	m := f.client(t).Mail()
-	for _, bad := range []string{"not-a-number", "-3", `{"n":-1}`, "{oops"} {
+	for _, bad := range []string{"not-a-number", "-3", `{"n":-1}`, "{oops", `{"n":1,"sort":"sideways"}`} {
 		if _, _, err := m.Enumerate(testCtx(t), bad, 10); err == nil {
 			t.Errorf("cursor %q should have been rejected", bad)
 		}
@@ -416,6 +427,221 @@ func TestEnumerateClampsLimit(t *testing.T) {
 	// maxObjectsInGet is 50 in the fake session.
 	if q["limit"].(float64) != 50 {
 		t.Errorf("limit = %v, want it clamped to the server maximum 50", q["limit"])
+	}
+}
+
+// TestEnumerateLegacyAscendingCursorFinishesAscending: a cursor written before
+// the direction was recorded belongs to a backfill that was walking the
+// mailbox oldest-first. Re-sorting it mid-run would re-enumerate the newest
+// mail and never reach the middle, so that run stays ascending — and keeps
+// saying so in every cursor it writes.
+func TestEnumerateLegacyAscendingCursorFinishesAscending(t *testing.T) {
+	f := newFakeServer(t)
+	seedEmails(f, 25)
+	m := f.client(t).Mail()
+	ctx := testCtx(t)
+
+	page, next, err := m.Enumerate(ctx, `{"anchor":"e005","n":6}`, 10)
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if len(page) != 10 || page[0].RemoteID != "e006" {
+		t.Fatalf("page = %d envelopes starting at %q, want 10 starting at e006",
+			len(page), page[0].RemoteID)
+	}
+	if q := f.captured("Email/query")[0]; !reflect.DeepEqual(q["sort"],
+		[]any{map[string]any{"property": "receivedAt", "isAscending": true}}) {
+		t.Errorf("sort = %#v, want receivedAt ascending for a legacy cursor", q["sort"])
+	}
+	var cur enumCursor
+	if err := json.Unmarshal([]byte(next), &cur); err != nil {
+		t.Fatalf("cursor %q is not JSON: %v", next, err)
+	}
+	if cur.Anchor != "e015" || cur.N != 16 || cur.Sort != sortAsc {
+		t.Fatalf("cursor = %+v, want anchor e015, n 16 and an asc marker", cur)
+	}
+
+	// And the run really does finish oldest-to-newest from there.
+	page2, _, err := m.Enumerate(ctx, next, 10)
+	if err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	if page2[0].RemoteID != "e016" {
+		t.Errorf("second page starts at %q, want e016", page2[0].RemoteID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Total
+
+func TestTotal(t *testing.T) {
+	f := newFakeServer(t)
+	seedEmails(f, 7)
+	m := f.client(t).Mail()
+	ctx := testCtx(t)
+
+	n, err := m.Total(ctx)
+	if err != nil {
+		t.Fatalf("Total: %v", err)
+	}
+	if n != 7 {
+		t.Errorf("Total = %d, want 7", n)
+	}
+	queries := f.captured("Email/query")
+	if len(queries) != 1 {
+		t.Fatalf("got %d Email/query calls, want 1", len(queries))
+	}
+	if queries[0]["limit"].(float64) != 0 {
+		t.Errorf("limit = %v, want 0: a count must not drag ids along", queries[0]["limit"])
+	}
+	if queries[0]["calculateTotal"] != true {
+		t.Error("Total must ask for calculateTotal")
+	}
+	// No Email/get: the count is the whole point.
+	if got := f.captured("Email/get"); len(got) != 0 {
+		t.Errorf("Total issued %d Email/get calls", len(got))
+	}
+
+	// The answer is cached, so a backfill polling it costs nothing and its
+	// denominator does not move while mail arrives.
+	f.resetCalls()
+	seedEmails(f, 9)
+	again, err := m.Total(ctx)
+	if err != nil {
+		t.Fatalf("Total: %v", err)
+	}
+	if again != 7 {
+		t.Errorf("second Total = %d, want the cached 7", again)
+	}
+	if len(f.captured("Email/query")) != 0 {
+		t.Error("second Total went back to the server")
+	}
+}
+
+// TestTotalComesFreeWithEnumerate: Enumerate's first page already asks for a
+// total, so a backfill that enumerates and then wants a denominator makes no
+// extra round trip.
+func TestTotalComesFreeWithEnumerate(t *testing.T) {
+	f := newFakeServer(t)
+	seedEmails(f, 12)
+	m := f.client(t).Mail()
+	ctx := testCtx(t)
+
+	if _, _, err := m.Enumerate(ctx, "", 5); err != nil {
+		t.Fatalf("Enumerate: %v", err)
+	}
+	f.resetCalls()
+	n, err := m.Total(ctx)
+	if err != nil {
+		t.Fatalf("Total: %v", err)
+	}
+	if n != 12 {
+		t.Errorf("Total = %d, want 12", n)
+	}
+	if len(f.captured("Email/query")) != 0 {
+		t.Error("Total re-queried what the first page already reported")
+	}
+}
+
+// The engine reaches for the total through a structural interface; keep the
+// shape it asserts on honest.
+func TestMailSatisfiesTotaler(t *testing.T) {
+	var mp provider.MailProvider = (&Client{}).Mail()
+	if _, ok := mp.(interface {
+		Total(ctx context.Context) (int, error)
+	}); !ok {
+		t.Fatal("*Mail no longer satisfies the Totaler shape the sync engine asserts on")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FetchEnvelopes
+
+func TestFetchEnvelopes(t *testing.T) {
+	f := newFakeServer(t)
+	ids := seedEmails(f, 120) // maxObjectsInGet is 50 in the fake session
+	m := f.client(t).Mail()
+
+	// One id the server no longer knows, in the middle of a chunk.
+	f.deleteEmail("e060")
+
+	var got []provider.Envelope
+	if err := m.FetchEnvelopes(testCtx(t), ids, func(env provider.Envelope) error {
+		got = append(got, env)
+		return nil
+	}); err != nil {
+		t.Fatalf("FetchEnvelopes: %v", err)
+	}
+	if len(got) != 119 {
+		t.Fatalf("got %d envelopes, want 119 (the deleted one skipped)", len(got))
+	}
+	for _, env := range got {
+		if env.RemoteID == "e060" {
+			t.Fatal("a notFound id must not be reported")
+		}
+	}
+	first := got[0]
+	if first.RemoteID != "e000" || first.ThreadID != "t000" ||
+		first.Flags.Unread || !reflect.DeepEqual(first.Mailboxes, []string{"mb-inbox"}) {
+		t.Errorf("first envelope = %+v", first)
+	}
+	if first.Size == 0 || first.Received.IsZero() {
+		t.Errorf("envelope is missing metadata: %+v", first)
+	}
+
+	gets := f.captured("Email/get")
+	if len(gets) != 3 {
+		t.Fatalf("got %d Email/get calls, want 3 chunks of at most 50", len(gets))
+	}
+	for i, g := range gets {
+		props, _ := g["properties"].([]any)
+		var names []string
+		for _, p := range props {
+			names = append(names, p.(string))
+		}
+		want := []string{"id", "threadId", "mailboxIds", "keywords", "receivedAt", "size"}
+		if !reflect.DeepEqual(names, want) {
+			t.Errorf("call %d properties = %v, want %v (no blobId: nothing is downloaded)", i, names, want)
+		}
+		if n := len(g["ids"].([]any)); n > 50 {
+			t.Errorf("call %d asked for %d ids, over maxObjectsInGet", i, n)
+		}
+	}
+}
+
+func TestFetchEnvelopesEmpty(t *testing.T) {
+	f := newFakeServer(t)
+	m := f.client(t).Mail()
+	if err := m.FetchEnvelopes(testCtx(t), nil, func(provider.Envelope) error {
+		t.Fatal("fn called for an empty id list")
+		return nil
+	}); err != nil {
+		t.Fatalf("FetchEnvelopes: %v", err)
+	}
+	if len(f.captured("Email/get")) != 0 {
+		t.Error("an empty id list should not reach the server")
+	}
+}
+
+func TestFetchEnvelopesCallbackErrorAborts(t *testing.T) {
+	f := newFakeServer(t)
+	ids := seedEmails(f, 120)
+	m := f.client(t).Mail()
+
+	boom := errors.New("boom")
+	calls := 0
+	err := m.FetchEnvelopes(testCtx(t), ids, func(provider.Envelope) error {
+		calls++
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("FetchEnvelopes returned %v, want the callback error", err)
+	}
+	if calls != 1 {
+		t.Errorf("callback ran %d times after failing", calls)
+	}
+	if len(f.captured("Email/get")) != 1 {
+		t.Error("the fetch kept going after the callback failed")
 	}
 }
 
@@ -1100,6 +1326,110 @@ func TestForbiddenIsNotAnAuthError(t *testing.T) {
 	}
 	if re.Detail != "no calendars scope" {
 		t.Errorf("problem+json detail = %q", re.Detail)
+	}
+}
+
+// TestForbiddenCalendarMethodIsNotSupported: a method-level "forbidden" for the
+// calendars capability is what a Fastmail token without the Calendars scope
+// looks like once the session has (misleadingly) advertised the capability. It
+// must name the scope and mark the resource unsupported, so the sync engine
+// skips calendars instead of failing the whole account.
+func TestForbiddenCalendarMethodIsNotSupported(t *testing.T) {
+	f := newFakeServer(t)
+	f.refuseMethod("Calendar/get", "forbidden")
+	cal := f.client(t).Calendar()
+
+	_, err := cal.Calendars(testCtx(t))
+	if err == nil {
+		t.Fatal("Calendars succeeded despite a forbidden Calendar/get")
+	}
+	if !errors.Is(err, provider.ErrNotSupported) {
+		t.Errorf("error %v does not wrap provider.ErrNotSupported", err)
+	}
+	if !IsMethodError(err, "forbidden") {
+		t.Errorf("error %v lost the underlying *MethodError", err)
+	}
+	if !strings.Contains(err.Error(), "Calendars scope") {
+		t.Errorf("error %q does not name the missing token scope", err)
+	}
+}
+
+// TestForbiddenMailMethodStillFails: on mail, "forbidden" is at least as likely
+// to be one operation an ACL refuses as a missing scope, so it must stay a hard
+// failure — with a hint, but not a licence to skip the mailbox.
+func TestForbiddenMailMethodStillFails(t *testing.T) {
+	f := newFakeServer(t)
+	f.refuseMethod("Email/query", "forbidden")
+	m := f.client(t).Mail()
+
+	_, _, err := m.Enumerate(testCtx(t), "", 10)
+	if err == nil {
+		t.Fatal("Enumerate succeeded despite a forbidden Email/query")
+	}
+	if errors.Is(err, provider.ErrNotSupported) {
+		t.Errorf("a forbidden mail call must not be reported as an unsupported resource: %v", err)
+	}
+	if !IsMethodError(err, "forbidden") {
+		t.Errorf("error %v is not a *MethodError", err)
+	}
+	if !strings.Contains(err.Error(), "Mail scope") {
+		t.Errorf("error %q does not mention the scope the call needed", err)
+	}
+}
+
+// TestAccountNotSupportedByMethodIsNotSupported: unlike "forbidden", this one
+// is unambiguous — the account cannot serve the method at all.
+func TestAccountNotSupportedByMethodIsNotSupported(t *testing.T) {
+	f := newFakeServer(t)
+	f.refuseMethod("Email/query", "accountNotSupportedByMethod")
+	m := f.client(t).Mail()
+
+	_, _, err := m.Enumerate(testCtx(t), "", 10)
+	if !errors.Is(err, provider.ErrNotSupported) {
+		t.Fatalf("error %v does not wrap provider.ErrNotSupported", err)
+	}
+	if !IsMethodError(err, "accountNotSupportedByMethod") {
+		t.Errorf("error %v lost the underlying *MethodError", err)
+	}
+}
+
+// TestAuthErrorNamesScope: a 401 on an API request knows which capabilities the
+// request claimed, so `emlcal doctor` can say which box to tick.
+func TestAuthErrorNamesScope(t *testing.T) {
+	f := newFakeServer(t)
+	f.failMethod["Email/query"] = []int{http.StatusUnauthorized}
+	m := f.client(t).Mail()
+
+	_, _, err := m.Enumerate(testCtx(t), "", 10)
+	var ae *AuthError
+	if !errors.As(err, &ae) {
+		t.Fatalf("error = %v, want an *AuthError", err)
+	}
+	if ae.Scopes != "the Mail scope" {
+		t.Errorf("AuthError.Scopes = %q, want %q", ae.Scopes, "the Mail scope")
+	}
+	if !strings.Contains(err.Error(), "the Mail scope") {
+		t.Errorf("error %q does not name the scope", err)
+	}
+}
+
+func TestScopeHint(t *testing.T) {
+	for _, tc := range []struct {
+		using []string
+		want  string
+	}{
+		{nil, ""},
+		{[]string{CapCore}, ""},
+		{[]string{CapCore, CapMail}, "the Mail scope"},
+		{[]string{CapMail, CapSubmission}, "the Mail scope"}, // one scope covers both
+		{[]string{CapCalendars}, "the Calendars scope"},
+		{[]string{"https://www.fastmail.com/dev/calendars"}, "the Calendars scope"},
+		{[]string{CapMail, CapCalendars}, "the Mail and Calendars scopes"},
+		{[]string{"urn:example:unknown"}, ""},
+	} {
+		if got := scopeHint(tc.using); got != tc.want {
+			t.Errorf("scopeHint(%v) = %q, want %q", tc.using, got, tc.want)
+		}
 	}
 }
 

@@ -101,6 +101,10 @@ type fakeServer struct {
 	// attempts counts how often each method name reached the server, failed
 	// requests included. Unlike calls it is not reset by resetCalls.
 	attempts map[string]int
+	// methodErrors maps a method name to a JMAP method-level error type it
+	// answers with ("forbidden", "accountNotSupportedByMethod"), as a server
+	// refusing a capability the token does not carry would.
+	methodErrors map[string]string
 
 	// submissionPrimary overrides primaryAccounts[urn:...:submission].
 	submissionPrimary string
@@ -137,6 +141,7 @@ func newFakeServer(t *testing.T) *fakeServer {
 		eventState:     "cal-0",
 		failMethod:     map[string][]int{},
 		attempts:       map[string]int{},
+		methodErrors:   map[string]string{},
 	}
 	f.mailboxes = []map[string]any{
 		{"id": "mb-inbox", "name": "Inbox", "parentId": nil, "role": "inbox", "sortOrder": 1, "totalEmails": 3, "unreadEmails": 1},
@@ -211,6 +216,13 @@ func (f *fakeServer) deleteEmail(id string) {
 	defer f.mu.Unlock()
 	delete(f.emails, id)
 	f.order = slices.DeleteFunc(f.order, func(v string) bool { return v == id })
+}
+
+// refuseMethod makes one method answer with a JMAP method-level error.
+func (f *fakeServer) refuseMethod(name, typ string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.methodErrors[name] = typ
 }
 
 func (f *fakeServer) email(id string) *fakeEmail {
@@ -612,6 +624,10 @@ func (f *fakeServer) dispatch(name string, args map[string]any, using []string) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	if typ, ok := f.methodErrors[name]; ok {
+		return "error", methodErrorArgs(typ, "scripted "+typ+" for "+name)
+	}
+
 	// RFC 8620 §3.2: a method whose capability the request did not claim in
 	// "using" is an unknownMethod.
 	if strings.HasPrefix(name, "Calendar") {
@@ -672,16 +688,17 @@ func (f *fakeServer) dispatch(name string, args map[string]any, using []string) 
 	case "Email/query":
 		position := argInt(args, "position", 0)
 		limit := argInt(args, "limit", 50)
+		// f.order is receivedAt ascending; a query sorting the other way sees
+		// the mirror image, positions and anchors included.
+		order := f.order
+		if !argAscending(args) {
+			order = slices.Clone(f.order)
+			slices.Reverse(order)
+		}
 		if anchor, ok := args["anchor"].(string); ok && anchor != "" {
 			// RFC 8620 §5.5: the anchor's index plus anchorOffset replaces
 			// position, and a missing anchor is an "anchorNotFound" error.
-			idx := -1
-			for i, id := range f.order {
-				if id == anchor {
-					idx = i
-					break
-				}
-			}
+			idx := slices.Index(order, anchor)
 			if idx < 0 {
 				return "error", methodErrorArgs("anchorNotFound", anchor)
 			}
@@ -691,8 +708,8 @@ func (f *fakeServer) dispatch(name string, args map[string]any, using []string) 
 			}
 		}
 		ids := []string{}
-		for i := position; i < len(f.order) && len(ids) < limit; i++ {
-			ids = append(ids, f.order[i])
+		for i := position; i < len(order) && len(ids) < limit; i++ {
+			ids = append(ids, order[i])
 		}
 		out := map[string]any{
 			"accountId": testAccount, "queryState": f.emailState,
@@ -1057,6 +1074,21 @@ func argInt(args map[string]any, key string, def int) int {
 		return int(v)
 	}
 	return def
+}
+
+// argAscending reads the direction of the first "sort" comparator. RFC 8620
+// §5.5 makes isAscending default to true, and so does a query with no sort.
+func argAscending(args map[string]any) bool {
+	sorts, ok := args["sort"].([]any)
+	if !ok || len(sorts) == 0 {
+		return true
+	}
+	first, ok := sorts[0].(map[string]any)
+	if !ok {
+		return true
+	}
+	asc, ok := first["isAscending"].(bool)
+	return !ok || asc
 }
 
 func (f *fakeServer) hasMailbox(id string) bool {

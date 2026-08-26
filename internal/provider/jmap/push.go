@@ -120,7 +120,8 @@ func (c *Client) streamOnce(ctx context.Context, lastEventID string, seen map[st
 	}
 	defer resp.Body.Close()
 	if err := checkStatus(resp); err != nil {
-		return false, "", err
+		// A 401 here ends the Watch for good, so say what the token needs.
+		return false, "", withScopeHint(err, []string{CapMail})
 	}
 
 	c.log.Debug("jmap push stream open", "url", s.EventSourceURL)

@@ -27,6 +27,12 @@ var envelopeProperties = []string{
 	"id", "blobId", "threadId", "mailboxIds", "keywords", "receivedAt", "size",
 }
 
+// envelopeOnlyProperties is envelopeProperties without blobId, for the refresh
+// path (FetchEnvelopes) that never downloads anything.
+var envelopeOnlyProperties = []string{
+	"id", "threadId", "mailboxIds", "keywords", "receivedAt", "size",
+}
+
 // Mail implements provider.MailProvider against a JMAP mail account.
 type Mail struct {
 	c *Client
@@ -35,6 +41,8 @@ type Mail struct {
 	accountID string
 	roles     map[model.MailboxRole]string // cached role → mailbox id
 	identity  string                       // cached Identity id
+	total     int                          // cached Email/query total
+	totalOK   bool
 }
 
 // Mail returns the mail provider bound to the token's primary mail account.
@@ -353,9 +361,15 @@ func (m *Mail) State(ctx context.Context) (string, error) {
 // ---------------------------------------------------------------------------
 // Enumerate
 
+// Sort directions recorded in an enumCursor.
+const (
+	sortAsc  = "asc"
+	sortDesc = "desc"
+)
+
 // enumCursor is the opaque Enumerate cursor:
 //
-//	{"anchor":"<last Email id of the previous page>","n":<ids enumerated so far>}
+//	{"anchor":"<last Email id of the previous page>","n":<ids enumerated so far>,"sort":"desc"}
 //
 // Anchoring on the last id of the previous page (RFC 8620 §5.5: anchor +
 // anchorOffset) is what makes paging safe against concurrent deletes. A plain
@@ -365,10 +379,24 @@ func (m *Mail) State(ctx context.Context) (string, error) {
 // n is only the fallback: when the anchor itself has been destroyed the server
 // answers "anchorNotFound", and resuming from position n is better than
 // failing the whole enumeration.
+//
+// sort records the receivedAt direction the run was started in. A fresh
+// enumeration goes newest first ("desc") so a multi-hour first sync archives
+// this year's mail before 2005's. The marker exists because the direction
+// cannot be changed mid-run: an anchor and a count only mean anything within
+// one ordering, and re-sorting a half-finished backfill would re-enumerate one
+// end of the mailbox and never reach the other. A cursor with no "sort" member
+// was written by an older build that always sorted ascending, so that run
+// keeps enumerating ascending until it finishes; only the next backfill (which
+// starts from an empty cursor) switches to newest first.
 type enumCursor struct {
 	Anchor string `json:"anchor"`
 	N      int    `json:"n"`
+	Sort   string `json:"sort,omitempty"`
 }
+
+// ascending reports the direction this cursor enumerates in.
+func (c enumCursor) ascending() bool { return c.Sort != sortDesc }
 
 func (c enumCursor) String() string {
 	b, err := json.Marshal(c)
@@ -381,14 +409,15 @@ func (c enumCursor) String() string {
 func parseEnumCursor(s string) (enumCursor, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return enumCursor{}, nil
+		// A new enumeration: newest first.
+		return enumCursor{Sort: sortDesc}, nil
 	}
 	if !strings.HasPrefix(s, "{") {
-		// A bare number is a cursor written by an older build, persisted in a
-		// half-finished backfill. Resume from that position; the next page
-		// picks up an anchor again.
+		// A bare number is a cursor written by a much older build, persisted in
+		// a half-finished backfill. Those runs sorted ascending, so this one
+		// continues ascending; the next page picks up an anchor again.
 		if n, err := strconv.Atoi(s); err == nil && n >= 0 {
-			return enumCursor{N: n}, nil
+			return enumCursor{N: n, Sort: sortAsc}, nil
 		}
 		return enumCursor{}, fmt.Errorf("jmap: bad enumerate cursor %q", s)
 	}
@@ -396,13 +425,27 @@ func parseEnumCursor(s string) (enumCursor, error) {
 	if json.Unmarshal([]byte(s), &c) != nil || c.N < 0 {
 		return enumCursor{}, fmt.Errorf("jmap: bad enumerate cursor %q", s)
 	}
+	switch c.Sort {
+	case sortAsc, sortDesc:
+	case "":
+		// Written before the direction was recorded, i.e. by a build that
+		// always sorted ascending. Finish that backfill the way it started.
+		c.Sort = sortAsc
+	default:
+		return enumCursor{}, fmt.Errorf("jmap: bad enumerate cursor %q: unknown sort %q", s, c.Sort)
+	}
 	return c, nil
 }
 
-// Enumerate lists messages ordered by receivedAt ascending. The cursor anchors
-// on the last id of the previous page, so a restart resumes exactly where it
-// stopped even if mail arrived (new mail sorts after everything already
-// enumerated) or was deleted behind the cursor.
+// Enumerate lists messages ordered by receivedAt, newest first, so a backfill
+// archives recent mail before old mail. The cursor anchors on the last id of
+// the previous page, so a restart resumes exactly where it stopped even if
+// mail arrived or was deleted behind the cursor — which matters more in this
+// direction than the other, since new mail lands at position 0 and shifts
+// every remaining page along.
+//
+// A cursor left behind by a build that enumerated ascending keeps enumerating
+// ascending to the end of that backfill; see enumCursor.
 func (m *Mail) Enumerate(ctx context.Context, cursor string, limit int) ([]provider.Envelope, string, error) {
 	acct, err := m.AccountID(ctx)
 	if err != nil {
@@ -423,7 +466,7 @@ func (m *Mail) Enumerate(ctx context.Context, cursor string, limit int) ([]provi
 
 	queryArgs := map[string]any{
 		"accountId": acct,
-		"sort":      []map[string]any{{"property": "receivedAt", "isAscending": true}},
+		"sort":      []map[string]any{{"property": "receivedAt", "isAscending": cur.ascending()}},
 		"limit":     limit,
 	}
 	switch {
@@ -448,10 +491,12 @@ func (m *Mail) Enumerate(ctx context.Context, cursor string, limit int) ([]provi
 		// The anchor was destroyed between pages. Fall back to a plain
 		// position, one short of the count so far: the anchor's own removal
 		// has shifted everything after it down by one, so that lands exactly
-		// on the next unenumerated message. Further deletions behind the
-		// cursor can still shift it, and re-delivering an envelope is the
-		// harmless direction (upserts are idempotent) where skipping one is
-		// not, so this errs towards overlap.
+		// on the next unenumerated message. Positions count along the sort
+		// order itself, so this holds in either direction. Further deletions
+		// behind the cursor can still shift it (and mail arriving during a
+		// descending run shifts it the other way), and re-delivering an
+		// envelope is the harmless direction (upserts are idempotent) where
+		// skipping one is not, so this errs towards overlap.
 		pos := max(0, cur.N-1)
 		m.c.log.Debug("jmap enumerate anchor is gone, falling back to position",
 			"anchor", cur.Anchor, "position", pos)
@@ -476,13 +521,17 @@ func (m *Mail) Enumerate(ctx context.Context, cursor string, limit int) ([]provi
 		}
 	}
 
+	if q.Total != nil {
+		m.setTotal(*q.Total)
+	}
+
 	// The server may have applied a smaller limit than we asked for; compare
 	// against what it actually used, or we would stop one page early.
 	effLimit := limit
 	if q.Limit != nil && *q.Limit > 0 {
 		effLimit = *q.Limit
 	}
-	next := enumCursor{N: cur.N + len(q.IDs)}
+	next := enumCursor{N: cur.N + len(q.IDs), Sort: cur.Sort}
 	done := len(q.IDs) == 0 || len(q.IDs) < effLimit
 	if q.Total != nil && next.N >= *q.Total {
 		done = true
@@ -492,6 +541,65 @@ func (m *Mail) Enumerate(ctx context.Context, cursor string, limit int) ([]provi
 	}
 	next.Anchor = q.IDs[len(q.IDs)-1]
 	return page, next.String(), nil
+}
+
+// Totaler is the optional interface a mail provider implements when it can
+// state how many messages the account holds. provider.MailProvider.Enumerate
+// has nowhere to return that, and the sync engine wants a denominator for
+// backfill progress, so it asks for one separately:
+//
+//	if t, ok := mp.(interface{ Total(context.Context) (int, error) }); ok { … }
+//
+// A provider that cannot answer returns an error; the engine treats the total
+// as unknown and reports progress without one.
+type Totaler interface {
+	Total(ctx context.Context) (int, error)
+}
+
+var _ Totaler = (*Mail)(nil)
+
+// Total reports how many messages the account holds, via Email/query with
+// limit 0 and calculateTotal.
+//
+// The first answer is cached — including the one Enumerate's first page
+// already asks for, so a backfill that calls Total costs no extra round trip —
+// and reused for the life of the *Mail. A backfill is meant to see a stable
+// denominator; mail arriving while it runs must not make the bar go backwards.
+func (m *Mail) Total(ctx context.Context) (int, error) {
+	m.mu.Lock()
+	n, ok := m.total, m.totalOK
+	m.mu.Unlock()
+	if ok {
+		return n, nil
+	}
+	acct, err := m.AccountID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var q queryResponse
+	if err := m.c.call(ctx, m.using(), "Email/query", map[string]any{
+		"accountId":      acct,
+		"limit":          0,
+		"calculateTotal": true,
+	}, &q); err != nil {
+		return 0, err
+	}
+	if q.Total == nil {
+		return 0, fmt.Errorf("jmap: Email/query did not return a total: %w", provider.ErrNotSupported)
+	}
+	m.setTotal(*q.Total)
+	return *q.Total, nil
+}
+
+func (m *Mail) setTotal(n int) {
+	if n < 0 {
+		return
+	}
+	m.mu.Lock()
+	if !m.totalOK {
+		m.total, m.totalOK = n, true
+	}
+	m.mu.Unlock()
 }
 
 // queryPage runs one Email/query chained into an Email/get.
@@ -622,6 +730,53 @@ feed:
 		return firstErr
 	}
 	return parent.Err()
+}
+
+// FetchEnvelopes reads the current flags, mailboxes and metadata of ids and
+// hands each one to fn. It is not part of provider.MailProvider: the sync
+// engine reaches for it through an optional interface during a reconcile, to
+// refresh messages whose raw bytes it already has without downloading them
+// again (the same contract gmail.Mail implements).
+//
+// It is Email/get with the envelope properties minus blobId, chunked by the
+// session's maxObjectsInGet. Calls are serial — a reconcile walks the whole
+// mailbox and there is no reason to spend the account's concurrency budget on
+// it — and so is fn. Ids the server no longer knows come back in notFound and
+// are skipped silently.
+func (m *Mail) FetchEnvelopes(ctx context.Context, ids []string, fn func(provider.Envelope) error) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	acct, err := m.AccountID(ctx)
+	if err != nil {
+		return err
+	}
+	s, err := m.c.Session(ctx)
+	if err != nil {
+		return err
+	}
+	for chunk := range slices.Chunk(ids, max(1, s.Core.MaxObjectsInGet)) {
+		var got emailGetResponse
+		if err := m.c.call(ctx, m.using(), "Email/get", map[string]any{
+			"accountId":  acct,
+			"ids":        chunk,
+			"properties": envelopeOnlyProperties,
+		}, &got); err != nil {
+			return err
+		}
+		if len(got.NotFound) > 0 {
+			m.c.log.Debug("jmap Email/get notFound", "count", len(got.NotFound), "of", "FetchEnvelopes")
+		}
+		for _, e := range got.List {
+			if err := fn(e.envelope()); err != nil {
+				return err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
