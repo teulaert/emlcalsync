@@ -34,13 +34,19 @@ output, so tools like Claude Code can use it with nothing but a shell.
 
 ## Install
 
-Requires Go 1.24+.
+Requires Go 1.25+.
 
 ```bash
 git clone https://github.com/teulaert/emlcalsync
 cd emlcalsync
-go build -o bin/emlcal ./cmd/emlcal      # pure Go, no CGO; cross-compiles freely
+make                 # builds ./emlcal — pure Go, no CGO, cross-compiles freely
+make install         # copies it to ~/.local/bin
 ```
+
+`make install` honours `PREFIX` (default `~/.local`), `BINDIR` and `DESTDIR`,
+so `sudo make install PREFIX=/usr/local` works too. `make install-completions`
+adds bash, zsh and fish completions; `make check` runs what CI runs (gofmt,
+vet, race tests).
 
 ## Set up accounts
 
