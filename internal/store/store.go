@@ -111,7 +111,7 @@ func Open(path string) (*Store, error) {
 }
 
 // pragmas is appended to every DSN; modernc applies them per connection.
-const pragmas = "&_txlock=immediate&_pragma=busy_timeout(30000)" +
+const pragmas = "&_pragma=busy_timeout(30000)" +
 	"&_pragma=journal_mode(WAL)" +
 	"&_pragma=synchronous(NORMAL)" +
 	"&_pragma=foreign_keys(1)"
