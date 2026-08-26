@@ -137,7 +137,9 @@ func TestTimeMarshalsRFC3339Local(t *testing.T) {
 	if got.AtUTC != tm.Unix() {
 		t.Errorf("at_utc = %d, want %d", got.AtUTC, tm.Unix())
 	}
-	if strings.HasSuffix(got.At, "Z") && time.Local != time.UTC {
+	// Only meaningful when the local zone actually has an offset; CI runners
+	// sit in UTC, where "Z" is the correct rendering.
+	if _, off := tm.In(time.Local).Zone(); off != 0 && strings.HasSuffix(got.At, "Z") {
 		t.Errorf("At should carry a local offset, got %q", got.At)
 	}
 
