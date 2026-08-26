@@ -25,6 +25,12 @@ type Preset struct {
 	// /<dsid>/calendars/ and the numeric dsid cannot be guessed, so a wrong
 	// guess would look like an empty account rather than a failure.
 	HomeFallback func(base *url.URL, user string) string
+	// PrimarySegments are the last path segments the vendor gives its default
+	// calendar. These are checked before PrimaryNames because the server
+	// assigns them: a display name is user-editable and, on iCloud,
+	// localized — a Dutch account's default calendar is called "Privé" while
+	// still living at .../calendars/home/.
+	PrimarySegments []string
 	// PrimaryNames are the display names the vendor gives the default calendar.
 	PrimaryNames []string
 }
@@ -37,14 +43,16 @@ var presets = map[model.Vendor]Preset{
 		HomeFallback: func(base *url.URL, user string) string {
 			return strings.TrimSuffix(base.Path, "/") + "/calendars/user/" + user + "/"
 		},
-		PrimaryNames: []string{"Calendar"},
+		PrimarySegments: []string{"Default"},
+		PrimaryNames:    []string{"Calendar"},
 	},
 	model.VendorICloud: {
-		BaseURL:        "https://caldav.icloud.com/",
-		CredentialURL:  "https://account.apple.com/account/manage",
-		CredentialName: "app-specific password",
-		HomeFallback:   nil, // discovery is mandatory
-		PrimaryNames:   []string{"Home", "Calendar"},
+		BaseURL:         "https://caldav.icloud.com/",
+		CredentialURL:   "https://account.apple.com/account/manage",
+		CredentialName:  "app-specific password",
+		HomeFallback:    nil, // discovery is mandatory
+		PrimarySegments: []string{"home"},
+		PrimaryNames:    []string{"Home", "Calendar"},
 	},
 }
 

@@ -238,3 +238,38 @@ func TestICloudUsernameDiffersFromEmail(t *testing.T) {
 		t.Fatalf("Calendars with a distinct Apple ID: %v", err)
 	}
 }
+
+// A real iCloud account localizes and lets the user rename the default
+// calendar — a Dutch one is "Privé" — while the server keeps it at
+// .../calendars/home/. Matching on the display name alone flagged whichever
+// calendar happened to come back first, which on a real account was an empty
+// test calendar.
+func TestICloudPrimaryFollowsThePathNotTheDisplayName(t *testing.T) {
+	srv := caldavfake.New()
+	t.Cleanup(srv.Close)
+	srv.Root = "/"
+	srv.User, srv.Password = testEmail, testPass
+	srv.Principal, srv.Home = dsid+"/principal/", dsid+"/calendars/"
+	// Ordered the way the real account came back: a UUID collection first,
+	// and nothing called "Home" anywhere.
+	srv.AddCalendar(caldavfake.Calendar{Path: srv.Home + "DA69BB82-3AB1-4DF8-84CD-762F5490917C/", Name: "onoma-test"})
+	srv.AddCalendar(caldavfake.Calendar{Path: srv.Home + "home/", Name: "Privé"})
+	srv.AddCalendar(caldavfake.Calendar{Path: srv.Home + "work/", Name: "Werk"})
+
+	c, err := New(Options{
+		Email: testEmail, Password: testPass, Vendor: model.VendorICloud,
+		BaseURL: srv.BaseURL(), Logger: quietLogger(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cals, err := c.Calendars(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cal := range cals {
+		if cal.Primary != strings.HasSuffix(cal.RemoteID, "/home/") {
+			t.Errorf("%q (%s) primary = %v", cal.Name, cal.RemoteID, cal.Primary)
+		}
+	}
+}

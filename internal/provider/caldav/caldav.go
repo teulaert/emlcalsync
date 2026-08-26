@@ -376,7 +376,7 @@ func (c *Calendar) Calendars(ctx context.Context) ([]model.Calendar, error) {
 			AccessRole: accessRole(prop.Privileges),
 		})
 	}
-	markPrimary(out, c.preset.PrimaryNames)
+	markPrimary(out, c.preset)
 	return out, nil
 }
 
@@ -432,24 +432,34 @@ func normaliseColor(s string) string {
 	return s
 }
 
-// markPrimary flags the account's main calendar: one the vendor names as its
-// default, else the collection at .../Default/, else the first.
-func markPrimary(cals []model.Calendar, names []string) {
+// markPrimary flags the account's main calendar.
+//
+// The vendor's path segment wins over its display name: the server assigns the
+// segment, while the name is the user's and, on iCloud, localized — a Dutch
+// account's default calendar is "Privé" at .../calendars/home/, and matching on
+// the name alone picked whichever calendar happened to sort first.
+func markPrimary(cals []model.Calendar, p Preset) {
 	if len(cals) == 0 {
 		return
 	}
-	for _, want := range names {
+	segments := p.PrimarySegments
+	if len(segments) == 0 {
+		segments = []string{"Default"}
+	}
+	for _, want := range segments {
 		for i := range cals {
-			if strings.EqualFold(cals[i].Name, want) {
+			if strings.EqualFold(strings.Trim(lastSegment(cals[i].RemoteID), "/"), want) {
 				cals[i].Primary = true
 				return
 			}
 		}
 	}
-	for i := range cals {
-		if strings.EqualFold(strings.Trim(lastSegment(cals[i].RemoteID), "/"), "Default") {
-			cals[i].Primary = true
-			return
+	for _, want := range p.PrimaryNames {
+		for i := range cals {
+			if strings.EqualFold(cals[i].Name, want) {
+				cals[i].Primary = true
+				return
+			}
 		}
 	}
 	cals[0].Primary = true
