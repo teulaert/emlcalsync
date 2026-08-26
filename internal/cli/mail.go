@@ -73,6 +73,7 @@ type mailMessageRow struct {
 	Flagged        bool     `json:"flagged"`
 	Answered       bool     `json:"answered"`
 	HasAttachments bool     `json:"has_attachments"`
+	Deleted        bool     `json:"deleted,omitempty"`
 	Mailboxes      []string `json:"mailboxes"`
 
 	Account string `json:"account"                    table:"ACCOUNT"`
@@ -194,6 +195,10 @@ func (idx mailNameIndex) names(account string, remotes []string) []string {
 
 // mailRowOf builds a list row from an indexed message.
 func mailRowOf(m *model.Message, idx mailNameIndex, now time.Time) mailMessageRow {
+	flags := mailFlagsString(m.Flags, m.HasAttachments)
+	if m.DeletedAt != nil {
+		flags += "D"
+	}
 	return mailMessageRow{
 		ID:             m.PublicID(),
 		ThreadID:       model.ThreadPublicID(m.AccountID, m.ThreadID),
@@ -204,7 +209,8 @@ func mailRowOf(m *model.Message, idx mailNameIndex, now time.Time) mailMessageRo
 		FromShort:      mailShortAddr(m.From),
 		Subject:        m.Subject,
 		Snippet:        m.Snippet,
-		FlagStr:        mailFlagsString(m.Flags, m.HasAttachments),
+		FlagStr:        flags,
+		Deleted:        m.DeletedAt != nil,
 		Unread:         m.Flags.Unread,
 		Flagged:        m.Flags.Flagged,
 		Answered:       m.Flags.Answered,
@@ -219,17 +225,18 @@ func mailRowOf(m *model.Message, idx mailNameIndex, now time.Time) mailMessageRo
 
 // mailFilterFlags holds the filter set every list-shaped command accepts.
 type mailFilterFlags struct {
-	mailbox  string
-	unread   bool
-	flagged  bool
-	from     string
-	to       string
-	since    string
-	until    string
-	noBulk   bool
-	byThread bool
-	limit    int
-	offset   int
+	mailbox        string
+	unread         bool
+	flagged        bool
+	from           string
+	to             string
+	since          string
+	until          string
+	noBulk         bool
+	includeDeleted bool
+	byThread       bool
+	limit          int
+	offset         int
 }
 
 // register binds the filter flags; withThread adds --thread (list only).
@@ -243,6 +250,7 @@ func (f *mailFilterFlags) register(cmd *cobra.Command, withThread bool) {
 	fl.StringVar(&f.since, "since", "", "only messages received after (2d, 12h, 2026-08-01)")
 	fl.StringVar(&f.until, "until", "", "only messages received before (2d, 12h, 2026-08-01)")
 	fl.BoolVar(&f.noBulk, "no-bulk", false, "exclude mailing lists and automated mail")
+	fl.BoolVar(&f.includeDeleted, "include-deleted", false, "also show messages that no longer exist on the server (kept in the archive)")
 	if withThread {
 		fl.BoolVar(&f.byThread, "thread", false, "group results by thread")
 	}
@@ -254,12 +262,13 @@ func (f *mailFilterFlags) register(cmd *cobra.Command, withThread bool) {
 // selected accounts.
 func (f *mailFilterFlags) build(cmd *cobra.Command, app *App, st *store.Store, accounts []string) (store.MessageFilter, error) {
 	filter := store.MessageFilter{
-		Accounts: accounts,
-		From:     f.from,
-		To:       f.to,
-		NoBulk:   f.noBulk,
-		Limit:    f.limit,
-		Offset:   f.offset,
+		Accounts:       accounts,
+		From:           f.from,
+		To:             f.to,
+		NoBulk:         f.noBulk,
+		IncludeDeleted: f.includeDeleted,
+		Limit:          f.limit,
+		Offset:         f.offset,
 	}
 	if cmd.Flags().Changed("unread") {
 		v := f.unread
