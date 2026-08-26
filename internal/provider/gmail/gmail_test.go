@@ -162,6 +162,21 @@ func TestState(t *testing.T) {
 	}
 }
 
+func TestTotal(t *testing.T) {
+	f := newFakeGmail(t)
+	for i := range 7 {
+		f.addMessage(fmt.Sprintf("m%d", i), "", nil, "")
+	}
+	m := newMail(t, f, nil)
+	n, err := m.Total(context.Background())
+	if err != nil {
+		t.Fatalf("Total: %v", err)
+	}
+	if n != 7 {
+		t.Errorf("Total = %d, want 7", n)
+	}
+}
+
 func TestEnumeratePaging(t *testing.T) {
 	f := newFakeGmail(t)
 	f.pageSize = 2

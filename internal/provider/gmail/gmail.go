@@ -334,9 +334,9 @@ func (m *Mail) fillCounts(ctx context.Context, boxes []model.Mailbox, userCount 
 // ---------------------------------------------------------------------------
 // State and enumeration
 
-// State returns the mailbox's current historyId, the token Changes deltas
-// from.
-func (m *Mail) State(ctx context.Context) (string, error) {
+// profile reads users.getProfile, the one cheap call that carries both the
+// history id and the mailbox size.
+func (m *Mail) profile(ctx context.Context) (*gmailapi.Profile, error) {
 	var p *gmailapi.Profile
 	err := m.do(ctx, "users.getProfile", unitsGetProfile, func() error {
 		var err error
@@ -344,9 +344,38 @@ func (m *Mail) State(ctx context.Context) (string, error) {
 		return err
 	})
 	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// State returns the mailbox's current historyId, the token Changes deltas
+// from.
+func (m *Mail) State(ctx context.Context) (string, error) {
+	p, err := m.profile(ctx)
+	if err != nil {
 		return "", err
 	}
 	return strconv.FormatUint(p.HistoryId, 10), nil
+}
+
+// Total reports how many messages the mailbox holds, satisfying the sync
+// engine's optional size-hint interface so a Gmail backfill can show a
+// percentage and an ETA instead of a bare running count.
+//
+// This is users.getProfile's messagesTotal, which counts the whole mailbox
+// including SPAM and TRASH. That matches the default backfill
+// (include_spam_trash = true); with the option off the denominator is an
+// overestimate and the percentage stops short of 100. messages.list's
+// resultSizeEstimate tracks the actual query but is, by Google's own
+// description, an estimate — and a poor one on large mailboxes. Since the
+// number feeds only the progress line, the exact-but-broader count wins.
+func (m *Mail) Total(ctx context.Context) (int, error) {
+	p, err := m.profile(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return int(p.MessagesTotal), nil
 }
 
 // Enumerate lists message ids page by page. cursor is Gmail's pageToken.

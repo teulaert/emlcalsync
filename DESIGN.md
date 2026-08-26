@@ -857,7 +857,7 @@ first full build and the two adversarial reviews (`docs/reviews/`).
   the older ascending run keeps its order until that backfill finishes.
 - **`sync --wait-offline` (default 10 m)** rides out network drops in a
   one-shot sync; `--quiet` hides the progress line; progress carries the
-  total (JMAP `Total()`, Gmail size estimate), rate and ETA.
+  total (JMAP `Total()`, Gmail `users.getProfile` `messagesTotal`), rate and ETA.
 - **Per-account `mail = false` / `calendar = false`** toggles in config.
 - **Per-account Google OAuth client** in `secrets/<name>.google-client.json`
   (`account add gmail --client-id/--client-secret`).

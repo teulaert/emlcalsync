@@ -45,9 +45,10 @@ type envelopeFetcher interface {
 
 // totalHinter is the optional interface of a provider that can say up front
 // roughly how many messages the account holds — JMAP's Email/query
-// calculateTotal (jmap.Totaler), Gmail's messages.list resultSizeEstimate.
-// It feeds the percentage and the ETA only, so an approximate answer, or none
-// at all, costs nothing but a less informative progress line.
+// calculateTotal (jmap.Totaler), Gmail's users.getProfile messagesTotal
+// (gmail.Mail.Total). It feeds the percentage and the ETA only, so an
+// approximate answer, or none at all, costs nothing but a less informative
+// progress line.
 type totalHinter interface {
 	Total(ctx context.Context) (int, error)
 }
