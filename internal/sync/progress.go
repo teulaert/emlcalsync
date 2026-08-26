@@ -150,20 +150,6 @@ func (m *meter) rateLocked(now time.Time) float64 {
 	return float64(m.done-m.startDone) / elapsed.Seconds()
 }
 
-// humanCount groups thousands with a space: 52000 → "52 000".
-func humanCount(n int) string {
-	s := strconv.Itoa(n)
-	neg := strings.HasPrefix(s, "-")
-	s = strings.TrimPrefix(s, "-")
-	var b strings.Builder
-	if neg {
-		b.WriteByte('-')
-	}
-	for i := 0; i < len(s); i++ {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
-}
+// humanCount renders a count as plain digits. No thousands separator: a
+// space reads as two numbers on a terminal ("66 808" looked like 66 and 808).
+func humanCount(n int) string { return strconv.Itoa(n) }

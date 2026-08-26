@@ -431,8 +431,8 @@ func TestBackfillWithoutATotalHint(t *testing.T) {
 
 func TestHumanCountAndShortDur(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
-		{"0", "0"}, {"999", "999"}, {"1234", "1 234"}, {"52000", "52 000"},
-		{"1234567", "1 234 567"}, {"-1234", "-1 234"},
+		{"0", "0"}, {"999", "999"}, {"1234", "1234"}, {"52000", "52000"},
+		{"1234567", "1234567"}, {"-1234", "-1234"},
 	} {
 		var n int
 		fmt.Sscanf(tc.in, "%d", &n)
