@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -17,6 +17,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/provider/caldav"
 	"github.com/teulaert/emlcalsync/internal/provider/oauth"
 	"github.com/teulaert/emlcalsync/internal/store"
 )
@@ -36,6 +37,10 @@ type coreAccountRow struct {
 	Push      bool   `json:"push"     table:"PUSH"`
 	Messages  int    `json:"messages" table:"MESSAGES"`
 	Mailboxes int    `json:"mailboxes,omitempty" table:"-"`
+	// Calendars says which calendar backend this account will use. It is
+	// derived from the secrets that are present, not from a network call.
+	Calendars   int    `json:"calendars,omitempty" table:"-"`
+	CalendarAPI string `json:"calendar_api,omitempty" table:"CALENDARS"`
 }
 
 func coreRow(a config.Account) coreAccountRow {
@@ -46,6 +51,23 @@ func coreRow(a config.Account) coreAccountRow {
 		Poll:     a.Poll.String(),
 		Push:     a.Push,
 	}
+}
+
+// coreCalendarAPI names the calendar backend an account will use. Fastmail
+// calendars need an app password (CalDAV); an account with only an API token
+// has no calendar access at all, because Fastmail tokens carry no calendars
+// scope.
+func coreCalendarAPI(app *App, a config.Account) string {
+	switch a.Provider {
+	case model.ProviderFastmail:
+		if app.FastmailAppPassword(a) != "" {
+			return "caldav"
+		}
+		return "none"
+	case model.ProviderGmail:
+		return "gcal"
+	}
+	return ""
 }
 
 func coreAccountCmd(app *App) *cobra.Command {
@@ -67,45 +89,76 @@ func coreAccountCmd(app *App) *cobra.Command {
 	cmd.AddCommand(coreAccountListCmd(app))
 	cmd.AddCommand(coreAccountRemoveCmd(app))
 	cmd.AddCommand(coreGoogleClientCmd(app))
+	cmd.AddCommand(coreFastmailPasswordCmd(app))
 	return cmd
 }
 
 func coreAccountAddCmd(app *App, prov model.Provider) *cobra.Command {
-	var name, email string
-	var tokenStdin bool
+	opts := coreAddOptions{Provider: prov}
 	cmd := &cobra.Command{
 		Use:   string(prov),
 		Short: fmt.Sprintf("Add a %s account", prov),
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return coreAddAccount(app, prov, name, email, tokenStdin)
+			return coreAddAccount(app, opts)
 		},
 	}
-	cmd.Flags().StringVar(&name, "name", "", "short account name, used in ids ([a-z0-9-])")
-	cmd.Flags().StringVar(&email, "email", "", "the account's email address")
+	cmd.Flags().StringVar(&opts.Name, "name", "", "short account name, used in ids ([a-z0-9-])")
+	cmd.Flags().StringVar(&opts.Email, "email", "", "the account's email address")
 	_ = cmd.MarkFlagRequired("name")
 	_ = cmd.MarkFlagRequired("email")
 	if prov == model.ProviderFastmail {
-		cmd.Flags().BoolVar(&tokenStdin, "token-stdin", false, "read the API token from stdin instead of prompting")
+		cmd.Flags().BoolVar(&opts.TokenStdin, "token-stdin", false, "read the API token from stdin instead of prompting")
+		cmd.Flags().StringVar(&opts.AppPassword, "app-password", "", "Fastmail app password for CalDAV calendars")
+		cmd.Flags().BoolVar(&opts.AppPasswordStdin, "app-password-stdin", false,
+			"read the app password from stdin (after the API token, one per line, when both are read from stdin)")
+		cmd.Long = "Adds a Fastmail account.\n\n" +
+			"Mail uses JMAP: create an API token at\n" +
+			"https://app.fastmail.com/settings/security/tokens and paste it when prompted.\n\n" +
+			"Calendars need a separate credential. Fastmail API tokens have no calendar\n" +
+			"scope, so emlcal reaches calendars over CalDAV with an **app password**:\n" +
+			"create one at https://app.fastmail.com/settings/security/devices\n" +
+			"(\"New app password\", access \"Calendars (CalDAV)\") and pass it with\n" +
+			"--app-password or --app-password-stdin. Without it calendars are skipped;\n" +
+			"`emlcal account fastmail-password` adds it later."
 	}
 	if prov == model.ProviderGmail {
+		cmd.Flags().StringVar(&opts.ClientID, "client-id", "", "OAuth client id for just this account")
+		cmd.Flags().StringVar(&opts.ClientSecret, "client-secret", "", "OAuth client secret for just this account")
 		cmd.Long = "Adds a Gmail account and runs the Google OAuth consent flow in a browser.\n" +
-			"The OAuth client must be configured first: `emlcal account google-client --id ID --secret SECRET`."
-	} else {
-		cmd.Long = "Adds a Fastmail account. Create an API token with mail and calendar\n" +
-			"scopes at https://app.fastmail.com/settings/security/tokens and paste it when prompted."
+			"The OAuth client must be configured first: `emlcal account google-client --id ID --secret SECRET`,\n" +
+			"or pass --client-id/--client-secret here to use a client for this account only."
 	}
 	return cmd
 }
 
+// coreAddOptions is everything `account add` collected from flags.
+type coreAddOptions struct {
+	Provider         model.Provider
+	Name             string
+	Email            string
+	TokenStdin       bool
+	AppPassword      string
+	AppPasswordStdin bool
+	ClientID         string
+	ClientSecret     string
+}
+
 // coreAddAccount writes the account to config.toml, stores its secret and
 // verifies the login by listing mailboxes.
-func coreAddAccount(app *App, prov model.Provider, name, email string, tokenStdin bool) error {
+func coreAddAccount(app *App, opts coreAddOptions) error {
+	prov, name, email := opts.Provider, opts.Name, opts.Email
 	if !model.ValidAccountID(name) {
 		return output.Errorf(output.ExitUsage, "account name %q must be 1-32 characters of [a-z0-9-]", name)
 	}
 	if !strings.Contains(email, "@") {
 		return output.Errorf(output.ExitUsage, "email %q does not look like an address", email)
+	}
+	if opts.AppPassword != "" && opts.AppPasswordStdin {
+		return output.Errorf(output.ExitUsage, "--app-password and --app-password-stdin are mutually exclusive")
+	}
+	if (opts.ClientID == "") != (opts.ClientSecret == "") {
+		return output.Errorf(output.ExitUsage, "--client-id and --client-secret must be given together")
 	}
 	cfg, err := app.Config()
 	if err != nil {
@@ -131,6 +184,22 @@ func coreAddAccount(app *App, prov model.Provider, name, email string, tokenStdi
 		acct.Poll = config.Duration(config.DefaultPollGmail)
 	}
 
+	// Read every credential before the account is written, so a typo on the
+	// command line does not leave a half-configured account behind.
+	var token, appPassword string
+	if prov == model.ProviderFastmail {
+		stdin := coreStdinReader(app)
+		if token, err = coreReadToken(app, stdin, opts.TokenStdin); err != nil {
+			return err
+		}
+		if token == "" {
+			return output.Errorf(output.ExitUsage, "no Fastmail API token given")
+		}
+		if appPassword, err = coreReadAppPassword(app, stdin, opts.AppPassword, opts.AppPasswordStdin); err != nil {
+			return err
+		}
+	}
+
 	cfg.Accounts = append(cfg.Accounts, acct)
 	if err := config.Save(coreConfigPath(app, cfg), cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
@@ -140,10 +209,24 @@ func coreAddAccount(app *App, prov model.Provider, name, email string, tokenStdi
 	ctx := app.Context()
 	switch prov {
 	case model.ProviderFastmail:
-		if err := coreStoreFastmailToken(app, acct, tokenStdin); err != nil {
+		sec, err := app.Secrets()
+		if err != nil {
 			return err
 		}
+		if err := sec.Set(FastmailTokenKey(acct), []byte(token)); err != nil {
+			return fmt.Errorf("store token: %w", err)
+		}
+		if appPassword != "" {
+			if err := sec.Set(FastmailAppPasswordKey(acct), []byte(appPassword)); err != nil {
+				return fmt.Errorf("store app password: %w", err)
+			}
+		}
 	default:
+		if opts.ClientID != "" {
+			if err := coreStoreGoogleClient(app, GoogleClientKeyFor(acct), opts.ClientID, opts.ClientSecret); err != nil {
+				return err
+			}
+		}
 		if err := coreGoogleLogin(ctx, app, acct); err != nil {
 			return err
 		}
@@ -162,47 +245,92 @@ func coreConfigPath(app *App, cfg *config.Config) string {
 	return config.DefaultPath()
 }
 
-func coreStoreFastmailToken(app *App, acct config.Account, tokenStdin bool) error {
-	token, err := coreReadToken(app, tokenStdin)
-	if err != nil {
-		return err
+// coreStdinReader wraps the app's stdin once, so a command that reads two
+// secrets from it (an API token and an app password) gets one line each
+// instead of the first reader swallowing everything.
+func coreStdinReader(app *App) *bufio.Reader {
+	in := app.Stdin
+	if in == nil {
+		in = strings.NewReader("")
 	}
-	if token == "" {
-		return output.Errorf(output.ExitUsage, "no Fastmail API token given")
+	return bufio.NewReader(in)
+}
+
+// coreReadLine reads one line, treating EOF after some text as a complete
+// line (a pipe without a trailing newline).
+func coreReadLine(r *bufio.Reader) (string, error) {
+	line, err := r.ReadString('\n')
+	if err != nil && line == "" {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func coreReadToken(app *App, r *bufio.Reader, tokenStdin bool) (string, error) {
+	if tokenStdin {
+		tok, err := coreReadLine(r)
+		if err != nil {
+			return "", fmt.Errorf("read token from stdin: %w", err)
+		}
+		return tok, nil
+	}
+	fmt.Fprint(app.Stdout, "Fastmail API token: ")
+	line, err := coreReadLine(r)
+	if err != nil {
+		return "", output.Errorf(output.ExitUsage, "no Fastmail API token on stdin (use --token-stdin when scripting)")
+	}
+	fmt.Fprintln(app.Stdout)
+	return line, nil
+}
+
+// coreReadAppPassword resolves the CalDAV app password from the flags. It
+// returns "" when neither was given, which means "no calendars for now".
+func coreReadAppPassword(app *App, r *bufio.Reader, value string, fromStdin bool) (string, error) {
+	if value != "" {
+		return strings.TrimSpace(value), nil
+	}
+	if !fromStdin {
+		return "", nil
+	}
+	pw, err := coreReadLine(r)
+	if err != nil {
+		return "", fmt.Errorf("read app password from stdin: %w", err)
+	}
+	if pw == "" {
+		return "", output.Errorf(output.ExitUsage, "--app-password-stdin was given but stdin held no app password")
+	}
+	return pw, nil
+}
+
+// coreStoreGoogleClient writes an OAuth client document to a secrets key after
+// checking that the values look like Google's.
+func coreStoreGoogleClient(app *App, key, id, secret string) error {
+	id, secret = strings.TrimSpace(id), strings.TrimSpace(secret)
+	if !coreGoogleClientID.MatchString(id) {
+		return output.Errorf(output.ExitUsage, "--client-id %q does not look like a Google OAuth client id (expected <digits>-<hash>.apps.googleusercontent.com — paste only the id, without a label)", id)
+	}
+	if !strings.HasPrefix(secret, "GOCSPX-") {
+		return output.Errorf(output.ExitUsage, "--client-secret does not look like a Google OAuth client secret (expected GOCSPX-…)")
 	}
 	sec, err := app.Secrets()
 	if err != nil {
 		return err
 	}
-	if err := sec.Set(FastmailTokenKey(acct), []byte(token)); err != nil {
-		return fmt.Errorf("store token: %w", err)
+	b, err := json.Marshal(struct {
+		ID     string `json:"client_id"`
+		Secret string `json:"client_secret"`
+	}{id, secret})
+	if err != nil {
+		return err
+	}
+	if err := sec.Set(key, b); err != nil {
+		return fmt.Errorf("store client credentials: %w", err)
 	}
 	return nil
 }
 
-func coreReadToken(app *App, tokenStdin bool) (string, error) {
-	in := app.Stdin
-	if in == nil {
-		in = strings.NewReader("")
-	}
-	if tokenStdin {
-		b, err := io.ReadAll(in)
-		if err != nil {
-			return "", fmt.Errorf("read token from stdin: %w", err)
-		}
-		return strings.TrimSpace(string(b)), nil
-	}
-	fmt.Fprint(app.Stdout, "Fastmail API token: ")
-	line, err := bufio.NewReader(in).ReadString('\n')
-	if err != nil && line == "" {
-		return "", output.Errorf(output.ExitUsage, "no Fastmail API token on stdin (use --token-stdin when scripting)")
-	}
-	fmt.Fprintln(app.Stdout)
-	return strings.TrimSpace(line), nil
-}
-
 func coreGoogleLogin(ctx context.Context, app *App, acct config.Account) error {
-	cfg, err := app.GoogleOAuthConfig()
+	cfg, err := app.GoogleOAuthConfig(acct)
 	if err != nil {
 		return err
 	}
@@ -227,9 +355,12 @@ func coreGoogleLogin(ctx context.Context, app *App, acct config.Account) error {
 	return nil
 }
 
-// coreVerifyAccount confirms the credentials work and prints the new row.
+// coreVerifyAccount confirms the credentials work and prints the new row: the
+// mail login by listing mailboxes, and — when the account has a CalDAV app
+// password — the calendar login by listing calendars.
 func coreVerifyAccount(ctx context.Context, app *App, acct config.Account) error {
 	row := coreRow(acct)
+	row.CalendarAPI = coreCalendarAPI(app, acct)
 	mp, err := app.Factory.Mail(ctx, acct)
 	if err == nil {
 		var mbs []model.Mailbox
@@ -237,16 +368,60 @@ func coreVerifyAccount(ctx context.Context, app *App, acct config.Account) error
 		row.Mailboxes = len(mbs)
 	}
 	if err != nil {
-		code := output.ExitProvider
-		if provider.IsOffline(err) {
-			code = output.ExitOffline
-		}
-		return output.Errorf(code,
-			"account %q was written to %s but could not be verified: %v (run `emlcal doctor` once the problem is fixed)",
-			acct.Name, coreConfigPathOf(app), err)
+		return coreVerifyFailed(app, acct, "", err)
 	}
-	fmt.Fprintf(app.Stderr, "account %q added; run `emlcal sync` to start the backfill\n", acct.Name)
+
+	if row.CalendarAPI == "caldav" {
+		cals, err := coreListCalendars(ctx, app, acct)
+		if err != nil {
+			return coreVerifyFailed(app, acct, "app password", err)
+		}
+		row.Calendars = len(cals)
+	}
+
+	fmt.Fprintf(app.Stderr, "account %q added: %d mailboxes", acct.Name, row.Mailboxes)
+	if row.CalendarAPI == "caldav" {
+		fmt.Fprintf(app.Stderr, ", %d calendars over CalDAV", row.Calendars)
+	}
+	fmt.Fprint(app.Stderr, "; run `emlcal sync` to start the backfill\n")
 	return app.Printer().Print(row)
+}
+
+// coreListCalendars asks the account's calendar provider for its calendars.
+// provider.ErrNotSupported is not a failure: it is what the JMAP client says
+// about an account with no app password, and the sync engine skips calendars.
+func coreListCalendars(ctx context.Context, app *App, acct config.Account) ([]model.Calendar, error) {
+	cp, err := app.Factory.Calendar(ctx, acct)
+	if err != nil {
+		return nil, err
+	}
+	cals, err := cp.Calendars(ctx)
+	if errors.Is(err, provider.ErrNotSupported) {
+		return nil, nil
+	}
+	return cals, err
+}
+
+// coreVerifyFailed reports a credential that did not work, leaving the account
+// in config.toml so the user can fix just the broken half.
+func coreVerifyFailed(app *App, acct config.Account, credential string, err error) error {
+	code := output.ExitProvider
+	switch {
+	case provider.IsOffline(err):
+		code = output.ExitOffline
+	case caldav.IsAuth(err):
+		code = output.ExitProvider
+	}
+	what := "could not be verified"
+	if credential != "" {
+		what = "was written, but its " + credential + " could not be verified"
+	}
+	hint := "run `emlcal doctor` once the problem is fixed"
+	if credential == "app password" {
+		hint = fmt.Sprintf("fix it with `emlcal account fastmail-password --name %s`", acct.Name)
+	}
+	return output.Errorf(code, "account %q %s in %s: %v (%s)",
+		acct.Name, what, coreConfigPathOf(app), err, hint)
 }
 
 func coreConfigPathOf(app *App) string {
@@ -271,6 +446,7 @@ func coreAccountListCmd(app *App) *cobra.Command {
 			st := coreOpenStoreIfExists(app)
 			for _, a := range cfg.Accounts {
 				row := coreRow(a)
+				row.CalendarAPI = coreCalendarAPI(app, a)
 				if st != nil {
 					if s, err := st.AccountStats(app.Context(), a.Name); err == nil {
 						row.Messages = s.Messages
@@ -383,9 +559,9 @@ func coreSecretKeys(a config.Account) []string {
 	keys := []string{a.SecretKey()}
 	switch a.Provider {
 	case model.ProviderFastmail:
-		keys = append(keys, FastmailTokenKey(a))
+		keys = append(keys, FastmailTokenKey(a), FastmailAppPasswordKey(a))
 	case model.ProviderGmail:
-		keys = append(keys, GoogleTokenKey(a)+".json")
+		keys = append(keys, GoogleTokenKey(a)+".json", GoogleClientKeyFor(a))
 	}
 	return keys
 }
@@ -397,32 +573,16 @@ func coreGoogleClientCmd(app *App) *cobra.Command {
 		Short: "Store the Google OAuth desktop client id and secret",
 		Long: "Stores the OAuth client credentials used by `account add gmail`.\n" +
 			"Create a \"Desktop app\" OAuth client in a Google Cloud project with the\n" +
-			"Gmail and Calendar APIs enabled, then pass its id and secret here.",
+			"Gmail and Calendar APIs enabled, then pass its id and secret here.\n" +
+			"`account add gmail --client-id … --client-secret …` stores one for a\n" +
+			"single account instead, and that one wins.",
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			if strings.TrimSpace(id) == "" || strings.TrimSpace(secret) == "" {
 				return output.Errorf(output.ExitUsage, "--id and --secret are both required")
 			}
-			id, secret = strings.TrimSpace(id), strings.TrimSpace(secret)
-			if !coreGoogleClientID.MatchString(id) {
-				return output.Errorf(output.ExitUsage, "--id %q does not look like a Google OAuth client id (expected <digits>-<hash>.apps.googleusercontent.com — paste only the id, without a label)", id)
-			}
-			if !strings.HasPrefix(secret, "GOCSPX-") {
-				return output.Errorf(output.ExitUsage, "--secret does not look like a Google OAuth client secret (expected GOCSPX-…)")
-			}
-			sec, err := app.Secrets()
-			if err != nil {
-				return err
-			}
-			b, err := json.Marshal(struct {
-				ID     string `json:"client_id"`
-				Secret string `json:"client_secret"`
-			}{strings.TrimSpace(id), strings.TrimSpace(secret)})
-			if err != nil {
-				return err
-			}
-			if err := sec.Set(GoogleClientKey, b); err != nil {
-				return fmt.Errorf("store client credentials: %w", err)
+			if err := coreStoreGoogleClient(app, GoogleClientKey, id, secret); err != nil {
+				return coreRenameClientFlags(err)
 			}
 			cfg, err := app.Config()
 			if err != nil {
@@ -439,6 +599,87 @@ func coreGoogleClientCmd(app *App) *cobra.Command {
 	cmd.Flags().StringVar(&id, "id", "", "OAuth client id")
 	cmd.Flags().StringVar(&secret, "secret", "", "OAuth client secret")
 	return cmd
+}
+
+// coreRenameClientFlags rewrites the validation messages of
+// coreStoreGoogleClient, which name the `account add gmail` flags, for the
+// `google-client` command's own flag names.
+func coreRenameClientFlags(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.NewReplacer("--client-id", "--id", "--client-secret", "--secret").Replace(err.Error())
+	var oe *output.ExitError
+	if errors.As(err, &oe) {
+		return output.Errorf(oe.Code, "%s", msg)
+	}
+	return errors.New(msg)
+}
+
+// coreFastmailPasswordCmd sets or replaces the CalDAV app password of an
+// existing Fastmail account.
+func coreFastmailPasswordCmd(app *App) *cobra.Command {
+	var name, value string
+	var fromStdin bool
+	cmd := &cobra.Command{
+		Use:   "fastmail-password",
+		Short: "Store the Fastmail app password used for CalDAV calendars",
+		Long: "Fastmail API tokens carry no calendar scope, so emlcal reads and writes\n" +
+			"calendars over CalDAV with an app password. Create one at\n" +
+			"https://app.fastmail.com/settings/security/devices (\"New app password\",\n" +
+			"access \"Calendars (CalDAV)\") and store it here. The password is verified\n" +
+			"immediately by listing the account's calendars.",
+		Args: cobra.NoArgs,
+		RunE: func(c *cobra.Command, _ []string) error {
+			return coreSetFastmailPassword(app, name, value, fromStdin)
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", "account to set the app password for")
+	cmd.Flags().StringVar(&value, "app-password", "", "the app password (prefer --stdin)")
+	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read the app password from stdin")
+	_ = cmd.MarkFlagRequired("name")
+	return cmd
+}
+
+func coreSetFastmailPassword(app *App, name, value string, fromStdin bool) error {
+	if value != "" && fromStdin {
+		return output.Errorf(output.ExitUsage, "--app-password and --stdin are mutually exclusive")
+	}
+	acct, err := app.ResolveAccount(name)
+	if err != nil {
+		return err
+	}
+	if acct.Provider != model.ProviderFastmail {
+		return output.Errorf(output.ExitUsage,
+			"account %q is a %s account; app passwords are a Fastmail credential", name, acct.Provider)
+	}
+	pw, err := coreReadAppPassword(app, coreStdinReader(app), value, fromStdin)
+	if err != nil {
+		return err
+	}
+	if pw == "" {
+		return output.Errorf(output.ExitUsage, "no app password given: pass --app-password or --stdin")
+	}
+	sec, err := app.Secrets()
+	if err != nil {
+		return err
+	}
+	if err := sec.Set(FastmailAppPasswordKey(*acct), []byte(pw)); err != nil {
+		return fmt.Errorf("store app password: %w", err)
+	}
+
+	// The factory caches providers per account, so a fresh one is built here
+	// and picks up the password that was just written.
+	cals, err := coreListCalendars(app.Context(), app, *acct)
+	if err != nil {
+		return coreVerifyFailed(app, *acct, "app password", err)
+	}
+	return app.Printer().Print(struct {
+		Name      string `json:"name"      table:"NAME"`
+		Stored    bool   `json:"stored"    table:"STORED"`
+		API       string `json:"calendar_api" table:"CALENDARS"`
+		Calendars int    `json:"calendars" table:"COUNT"`
+	}{acct.Name, true, "caldav", len(cals)})
 }
 
 // coreNow is the app clock, defaulting to time.Now for Apps built by hand.
