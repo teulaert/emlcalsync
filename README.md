@@ -47,11 +47,13 @@ go build -o bin/emlcal ./cmd/emlcal      # pure Go, no CGO; cross-compiles freel
 ### Fastmail
 
 Create an API token at https://app.fastmail.com/settings/security/tokens with
-the **Mail** and **Submission** scopes (Fastmail tokens do not offer a
-calendar scope yet; Fastmail calendars are on the roadmap via CalDAV).
+the **Mail** and **Submission** scopes. Fastmail tokens have no calendar
+scope, so calendars use CalDAV with an **app password** (Settings → Privacy &
+Security → Integrations → New app password, access "Calendars (CalDAV)").
 
 ```bash
 emlcal account add fastmail --name fm --email you@fastmail.com   # prompts for the token
+emlcal account fastmail-password --name fm                       # prompts for the app password (calendars)
 ```
 
 ### Gmail / Google Calendar
@@ -81,9 +83,12 @@ emlcal status                    # counts, backfill progress, last sync
 emlcal sync                      # afterwards: incremental delta in seconds
 ```
 
-Backfill runs oldest-first at roughly 50 msg/s on Fastmail and ~16 msg/s on
-Gmail (Google's quota). Interrupt it any time; the next run continues from
-the cursor. Attachments are archived in full by default (`raw_max_size` in
+Backfill runs newest-first, so recent mail is searchable within minutes, at
+roughly 50 msg/s on Fastmail and ~16 msg/s on Gmail (Google's quota). It
+shows rate and ETA, rides out network drops (`--wait-offline`, default 10 m)
+and can be interrupted any time; the next run continues from the cursor.
+Per account you can switch a resource off in the config (`mail = false` or
+`calendar = false`) — e.g. a work account synced for its calendar only. Attachments are archived in full by default (`raw_max_size` in
 the config caps that).
 
 ### Keep it synced
@@ -163,5 +168,5 @@ Layout: `internal/store` (SQLite), `internal/blob`, `internal/mime`,
 
 ## Status
 
-v0.1 — mail and Google Calendar work end-to-end against real accounts.
-Not yet: Fastmail calendars (CalDAV), a TUI, embeddings for semantic search.
+v0.1 — mail, Google Calendar and Fastmail calendars (CalDAV) work end-to-end against real accounts.
+Not yet: a TUI, embeddings for semantic search, contacts.

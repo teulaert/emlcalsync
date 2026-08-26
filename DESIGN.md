@@ -850,6 +850,18 @@ first full build and the two adversarial reviews (`docs/reviews/`).
   `EMLCAL_REVIEW=1 go test -run TestReview ./internal/...` runs the review
   probes that are still open.
 
+- **Fastmail calendars** go through CalDAV (`internal/provider/caldav`, app
+  password in `secrets/<name>.fastmail.app-password`); the JMAP calendar path
+  stays as fallback and is skipped when the token lacks the scope.
+- **Backfill is newest-first** for both providers; a JMAP cursor written by
+  the older ascending run keeps its order until that backfill finishes.
+- **`sync --wait-offline` (default 10 m)** rides out network drops in a
+  one-shot sync; `--quiet` hides the progress line; progress carries the
+  total (JMAP `Total()`, Gmail size estimate), rate and ETA.
+- **Per-account `mail = false` / `calendar = false`** toggles in config.
+- **Per-account Google OAuth client** in `secrets/<name>.google-client.json`
+  (`account add gmail --client-id/--client-secret`).
+
 ### Still to verify against live accounts
 
 See `docs/reviews/2026-08-25-providers.md` (checklist at the end). Highest
