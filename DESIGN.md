@@ -28,8 +28,13 @@ Omarchy integrations, are views on it.
 
 ### Non-goals (for now)
 
-- Generic IMAP / CalDAV support. Two providers, two purpose-built clients.
-  The `Provider` interface leaves the door open.
+- Generic IMAP support. Mail has two purpose-built clients (Gmail API, JMAP).
+  The `MailProvider` interface leaves the door open.
+- An open-ended CalDAV server list. The CalDAV *client* is vendor-neutral —
+  it has to be, since Fastmail and iCloud differ only in preset — but the
+  supported vendors stay a curated set (§6.4), because what a server does at
+  the edges (discovery, redirects, scheduling) can only be verified against
+  one that is actually being used.
 - An MCP server. Trivial to add later on top of the same internal API.
 - Contacts sync (possible later via People API / JMAP Contacts).
 - Being a mail *client* with a rendering engine — HTML is stored, not rendered.
@@ -409,14 +414,58 @@ type Pusher interface {                      // optional
 - Poll every 120 s. Writes via `events.insert/patch/delete`; `raw_json` holds
   the last server object so patches are minimal.
 
-### 6.4 Fastmail Calendar (JMAP Calendars)
+### 6.4 CalDAV calendars — Fastmail, iCloud (`internal/provider/caldav`)
 
-- `urn:ietf:params:jmap:calendars`: `Calendar/get`, `CalendarEvent/query` +
-  `/get` + `/changes` (JSCalendar objects, RFC 8984). Same delta engine as
-  mail; same push stream.
-- Risk: JMAP Calendars is newer than the mail spec. Fallback is CalDAV at
-  `caldav.fastmail.com` via `emersion/go-webdav` + `go-ical` — the internal
-  event model is provider-neutral so swapping is contained.
+The primary calendar path for everything that is not Google. RFC 4791 for the
+objects, RFC 6578 `sync-collection` for deltas, `calendar-multiget` to fetch
+the changed `.ics` text, `If-Match` on PUT. Parsing is `emersion/go-ical`; the
+WebDAV transport is this package's own (`dav.go`), because go-webdav's client
+exposes neither the raw `.ics`, nor sync-collection, nor `If-Match` — nor the
+*host* of an href, which §6.4.1 turns out to need.
+
+What differs between servers is a preset (`presets.go`) keyed by vendor: the
+DAV root, where the user creates a password, the default calendar's name, and
+whether the conventional home path can be guessed at all.
+
+| | Fastmail | iCloud |
+|---|---|---|
+| root | `caldav.fastmail.com/dav/` | `caldav.icloud.com/` |
+| home | `/dav/calendars/user/<email>/`, guessable | `/<dsid>/calendars/`, **not** guessable |
+| credential | app password | app-specific password (2FA required) |
+| auth user | the address | the Apple ID, often *not* the address |
+
+Authentication is HTTP basic with a per-application password, never a login
+password: Fastmail's JMAP API tokens carry no calendars scope, and iCloud has
+no other option. A CalDAV backend with no stored password reports
+`provider.ErrNotSupported`, so the engine skips calendars and the rest of the
+account keeps working.
+
+JMAP Calendars (`internal/provider/jmap/calendar.go`) still exists and is
+selectable as `backend = "jmap"`, for a JMAP server whose token does grant
+`urn:ietf:params:jmap:calendars`. Fastmail's does not, which is what made the
+backend a per-resource choice in the first place (§11).
+
+#### 6.4.1 Hosts, hrefs and redirects
+
+Remote ids are bare paths, never absolute URLs, because they are persisted in
+`events.remote_id`. iCloud answers discovery with a calendar home on a
+*different*, per-user host (`p<NN>-caldav.icloud.com`), so the client records
+that host separately and resolves later paths against it — stored ids are
+untouched, and they survive Apple moving an account between partitions.
+
+This is why discovery is two PROPFINDs of our own rather than go-webdav's:
+`FindCurrentUserPrincipal` and `FindCalendarHomeSet` both return only the
+*path* of the href they found, discarding exactly the host that matters.
+
+Redirects are refused, not followed. Go rewrites a redirected PROPFIND, REPORT
+or PUT into a GET, so following one appears to succeed while doing nothing —
+in testing it surfaced as "calendar not found", which is a misdiagnosis rather
+than a failure. Only discovery adopts a redirect, and it does so by taking the
+new host explicitly.
+
+Discovery runs on entry to every public method, not as a side effect of
+`Calendars()`: the outbox reaches `CreateEvent` and friends on a client that
+has never listed anything (§7).
 
 ---
 
@@ -656,6 +705,12 @@ mail) and exits 0 without touching the outbox.
 
 ## 11. Configuration and secrets
 
+An account is one identity — one name, one id prefix — with a backend declared
+per resource. A block's presence is what switches that resource on: an account
+with no `[accounts.mail]` simply syncs no mail. This is not a cosmetic split;
+a Fastmail account genuinely is JMAP mail plus CalDAV calendars, with separate
+credentials and separate sync state.
+
 ```toml
 # ~/.config/emlcal/config.toml
 [general]
@@ -665,23 +720,51 @@ raw_max_size   = "0"                    # global default, per-account override
 
 [[accounts]]
 name     = "work"
-provider = "gmail"
 email    = "lennert@example.com"
 poll     = "60s"
 include_spam_trash = true
 
+  [accounts.mail]
+  backend = "gmail"
+
+  [accounts.calendar]
+  backend = "gcal"
+
 [[accounts]]
 name     = "personal"
-provider = "fastmail"
 email    = "lennert@fastmail.example"
 push     = true
 calendars = ["*"]                       # or explicit list of names
+
+  [accounts.mail]
+  backend = "jmap"
+
+  [accounts.calendar]
+  backend = "caldav"
+  vendor  = "fastmail"
+
+[[accounts]]
+name     = "apple"
+email    = "lennert@icloud.example"
+
+  # No [accounts.mail]: iCloud offers mail over IMAP, which emlcal
+  # does not speak, so this account syncs calendars only.
+  [accounts.calendar]
+  backend  = "caldav"
+  vendor   = "icloud"
+  username = "lennert@example.com"      # Apple ID, when it is not the address
 ```
+
+Backends: mail is `jmap` or `gmail`; calendar is `caldav`, `gcal` or `jmap`.
+`vendor` selects the CalDAV preset (§6.4) and may be replaced by an explicit
+`base_url` for a self-hosted server. `push` requires a JMAP mail backend.
 
 Secrets are never in `config.toml`:
 
-- Default: `~/.config/emlcal/secrets/<name>.<provider>.json`, mode 0600,
-  directory 0700.
+- Default: `~/.config/emlcal/secrets/`, mode 0600, directory 0700. Keys are
+  scoped by **backend**, since one account's resources authenticate separately:
+  `<name>.jmap.token`, `<name>.caldav.password`, `<name>.google.json`, plus the
+  shared `google-client.json` and its per-account override.
 - Optional: `secret_backend = "libsecret"` stores/reads via the freedesktop
   Secret Service (`secret-tool` equivalent, using `zalando/go-keyring`).
   Useful on Omarchy if a keyring is unlocked at login; otherwise the file
@@ -850,9 +933,46 @@ first full build and the two adversarial reviews (`docs/reviews/`).
   `EMLCAL_REVIEW=1 go test -run TestReview ./internal/...` runs the review
   probes that are still open.
 
-- **Fastmail calendars** go through CalDAV (`internal/provider/caldav`, app
-  password in `secrets/<name>.fastmail.app-password`); the JMAP calendar path
-  stays as fallback and is skipped when the token lacks the scope.
+- **Backends are per resource** (§11), replacing the single `provider` field.
+  It conflated *who runs the service* with *what protocol reaches it*, which
+  held only while JMAP was expected to serve Fastmail's calendars too. It does
+  not, so `model.Provider` split into `Vendor` and `Backend`, and the choice
+  that used to be inferred at runtime from which secrets existed is now stated
+  in config. Consequences worth knowing:
+  - `config.Account`'s zero value used to mean "both halves on" and now syncs
+    nothing; build accounts with `config.NewAccount`.
+  - The `accounts.provider` column keeps its name and holds the vendor.
+    Nothing branches on it — it is informational, and an account may mix
+    vendors across its resources — so there was no migration.
+  - Secret keys moved to `<name>.jmap.token`, `<name>.caldav.password` and
+    `<name>.google.json`. There is no compatibility shim, because nothing was
+    in production. Migrating an existing install by hand:
+
+    ```bash
+    # 1. rewrite each [[accounts]] entry in config.toml to the form in §11
+    # 2. rename its secrets
+    cd ~/.config/emlcal/secrets
+    mv <name>.fastmail.token        <name>.jmap.token
+    mv <name>.fastmail.app-password <name>.caldav.password
+    mv <name>.gmail.json            <name>.google.json
+    # 3. check, then sync
+    emlcal doctor && emlcal sync
+    ```
+
+    The index is derived, so `emlcal sync --full` rebuilds it if anything
+    looks wrong.
+- **iCloud calendars** (§6.4) needed no new client, only the vendor preset and
+  the two things iCloud does that Fastmail does not: serve the calendar home
+  from a per-user partition host, and authenticate an Apple ID that is often
+  not the account's address. `emlcal account add icloud` writes a
+  calendar-only account.
+- **Redirects are refused** by the CalDAV client (§6.4.1). Go downgrades a
+  redirected PROPFIND/REPORT/PUT to a GET, so following one is silently
+  wrong; `caldavfake` grew a `RedirectTo` knob so the whole class stays
+  covered.
+- **`doctor` checks the CalDAV password**, which nothing did before — a
+  Fastmail account without one silently synced no calendars at all. It warns
+  rather than fails, since the mail half still works.
 - **Backfill is newest-first** for both providers; a JMAP cursor written by
   the older ascending run keeps its order until that backfill finishes.
 - **`sync --wait-offline` (default 10 m)** rides out network drops in a

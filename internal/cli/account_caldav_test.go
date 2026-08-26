@@ -447,3 +447,27 @@ func TestFactoryBuildsAnICloudCalDAVClient(t *testing.T) {
 		t.Errorf("Mail error = %v, want provider.ErrNotSupported", err)
 	}
 }
+
+// The online probe reaches a calendar-only account through its calendars.
+// Asking such an account for mailboxes reported the absent mail block as a
+// failure, which is the configuration working as intended.
+func TestDoctorProbesCalendarsOnAMailLessAccount(t *testing.T) {
+	acct := config.NewAccount("apple", "me@icloud.example", model.VendorICloud)
+	env := newTestEnv(t, acct)
+	env.Cal["apple"] = fake.NewCalendar()
+
+	out := env.MustRun("doctor")
+	for _, c := range coreDecodeRows[coreCheck](t, out) {
+		if c.Name != "online:apple" {
+			continue
+		}
+		if !c.OK {
+			t.Fatalf("online check failed: %s", c.Detail)
+		}
+		if !strings.Contains(c.Detail, "calendar") {
+			t.Errorf("detail = %q, want a calendar count", c.Detail)
+		}
+		return
+	}
+	t.Fatal("doctor ran no online check for the account")
+}

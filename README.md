@@ -1,8 +1,8 @@
 # emlcal
 
-A complete, offline-first local archive of your mail and calendars — Gmail and
-Fastmail, as many accounts as you have — behind one CLI that is built for both
-humans and AI agents.
+A complete, offline-first local archive of your mail and calendars — Gmail,
+Fastmail and iCloud, as many accounts as you have — behind one CLI that is
+built for both humans and AI agents.
 
 ```
 $ emlcal mail list --unread --since 2d
@@ -59,7 +59,29 @@ Security → Integrations → New app password, access "Calendars (CalDAV)").
 
 ```bash
 emlcal account add fastmail --name fm --email you@fastmail.com   # prompts for the token
-emlcal account fastmail-password --name fm                       # prompts for the app password (calendars)
+emlcal account caldav-password --name fm                         # prompts for the app password (calendars)
+```
+
+### iCloud
+
+iCloud accounts sync **calendars only** — iCloud offers mail over IMAP, which
+emlcal does not speak.
+
+Calendars use CalDAV with an **app-specific password**, not your Apple ID
+password. Create one at <https://account.apple.com/account/manage> under
+Sign-In and Security → App-Specific Passwords; two-factor authentication has
+to be on for that option to appear.
+
+```bash
+emlcal account add icloud --name ic --email you@icloud.com       # prompts for the password
+```
+
+If your Apple ID is not the same as your iCloud mail address, pass it as
+`--username`: that is what authenticates, while `--email` stays the address
+that identifies you on invitations.
+
+```bash
+emlcal account add icloud --name ic --email you@icloud.com --username you@example.com
 ```
 
 ### Gmail / Google Calendar
@@ -110,7 +132,7 @@ Read commands never need the network and are safe to allowlist for an agent;
 write commands go to the provider (and are queued in an outbox when offline).
 
 ```
-account   add gmail|fastmail · list · remove · google-client
+account   add gmail|fastmail|icloud · list · remove · google-client · caldav-password
 sync      [--account] [--full] [--watch] [--mail-only|--calendar-only]
 status · doctor · outbox · reindex · gc · export (--mbox | --maildir) · service · skill
 
@@ -174,5 +196,7 @@ Layout: `internal/store` (SQLite), `internal/blob`, `internal/mime`,
 
 ## Status
 
-v0.1 — mail, Google Calendar and Fastmail calendars (CalDAV) work end-to-end against real accounts.
+v0.1 — mail, Google Calendar and Fastmail calendars (CalDAV) work end-to-end
+against real accounts. iCloud calendars are implemented and covered by tests
+against a fake server, but have not yet been run against a real account.
 Not yet: a TUI, embeddings for semantic search, contacts.

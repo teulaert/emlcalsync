@@ -245,15 +245,15 @@ func coreCheckOnline(app *App, cfg *config.Config) []coreCheck {
 	for _, a := range cfg.Accounts {
 		name := "online:" + a.Name
 		ctx, cancel := context.WithTimeout(app.Context(), coreOnlineTimeout)
-		mp, err := app.Factory.Mail(ctx, a)
-		var mbs []model.Mailbox
-		if err == nil {
-			mbs, err = mp.Mailboxes(ctx)
-		}
+		detail, err := coreProbeAccount(ctx, app, a)
 		cancel()
 		switch {
 		case err == nil:
-			out = append(out, coreOK(name, fmt.Sprintf("%d mailboxes", len(mbs))))
+			out = append(out, coreOK(name, detail))
+		case errors.Is(err, provider.ErrNotSupported):
+			// Nothing to reach: the account's only backend has no credential
+			// yet, which the secret checks already reported.
+			out = append(out, coreWarn(name, err.Error()))
 		case provider.IsOffline(err) || errors.Is(err, context.DeadlineExceeded):
 			out = append(out, coreWarn(name, "offline: "+err.Error()))
 		default:
@@ -261,4 +261,31 @@ func coreCheckOnline(app *App, cfg *config.Config) []coreCheck {
 		}
 	}
 	return out
+}
+
+// coreProbeAccount reaches the account's server the cheapest way it can:
+// mailboxes when there is a mail backend, calendars otherwise. A calendar-only
+// account has no mailboxes to list, and asking for them would report the
+// missing mail block as a failure rather than as the configuration it is.
+func coreProbeAccount(ctx context.Context, app *App, a config.Account) (string, error) {
+	if a.SyncsMail() {
+		mp, err := app.Factory.Mail(ctx, a)
+		if err != nil {
+			return "", err
+		}
+		mbs, err := mp.Mailboxes(ctx)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%d mailboxes", len(mbs)), nil
+	}
+	cp, err := app.Factory.Calendar(ctx, a)
+	if err != nil {
+		return "", err
+	}
+	cals, err := cp.Calendars(ctx)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d calendars", len(cals)), nil
 }

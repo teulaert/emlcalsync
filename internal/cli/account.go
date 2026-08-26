@@ -111,11 +111,34 @@ func coreVendorCommand(v model.Vendor) string {
 	return string(v)
 }
 
+// coreVendorArticle is the vendor's name with its indefinite article, so the
+// help line reads "Add an iCloud account" rather than "Add a icloud account".
+func coreVendorArticle(v model.Vendor) string {
+	name := coreVendorTitle(v)
+	if v == model.VendorICloud {
+		return "an " + name
+	}
+	return "a " + name
+}
+
+// coreVendorTitle is the vendor's own spelling, for help text.
+func coreVendorTitle(v model.Vendor) string {
+	switch v {
+	case model.VendorGoogle:
+		return "Gmail"
+	case model.VendorFastmail:
+		return "Fastmail"
+	case model.VendorICloud:
+		return "iCloud"
+	}
+	return string(v)
+}
+
 func coreAccountAddCmd(app *App, prov model.Vendor) *cobra.Command {
 	opts := coreAddOptions{Vendor: prov}
 	cmd := &cobra.Command{
 		Use:   coreVendorCommand(prov),
-		Short: fmt.Sprintf("Add a %s account", coreVendorCommand(prov)),
+		Short: fmt.Sprintf("Add %s account", coreVendorArticle(prov)),
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return coreAddAccount(app, opts)
