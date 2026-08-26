@@ -62,6 +62,19 @@ type Server struct {
 	// the DAV:valid-sync-token precondition. Set it above the current
 	// version with ExpireTokens.
 	MinToken int64
+	// Principal and Home override the conventional paths, so the fake can
+	// serve an iCloud-shaped layout: a numeric account id rather than
+	// /dav/calendars/user/<email>/.
+	Principal string
+	Home      string
+	// HrefHost, when set, makes every href the fake emits an absolute URL on
+	// that origin instead of a bare path. Real servers do both, and iCloud
+	// answers discovery with a home on a *different* host from the one the
+	// request went to — which is the case worth testing.
+	HrefHost string
+	// redirectTo, when set, makes every request answer 301 to the same path
+	// on that origin. See RedirectTo.
+	redirectTo string
 
 	ts *httptest.Server
 
@@ -85,10 +98,42 @@ func (s *Server) Close() { s.ts.Close() }
 func (s *Server) BaseURL() string { return s.ts.URL + s.Root }
 
 // PrincipalPath is where the fake advertises the current user principal.
-func (s *Server) PrincipalPath() string { return s.Root + "principals/user/" }
+func (s *Server) PrincipalPath() string {
+	if s.Principal != "" {
+		return s.Principal
+	}
+	return s.Root + "principals/user/"
+}
 
 // HomePath is the calendar-home-set the principal points at.
-func (s *Server) HomePath(email string) string { return s.Root + "calendars/user/" + email + "/" }
+func (s *Server) HomePath(email string) string {
+	if s.Home != "" {
+		return s.Home
+	}
+	return s.Root + "calendars/user/" + email + "/"
+}
+
+// URL is the fake's origin, for HrefHost.
+func (s *Server) URL() string { return s.ts.URL }
+
+// RedirectTo makes this server 301 every request to the same path on other,
+// which is how iCloud sends a client from its front door to the per-user
+// partition host that actually holds the data. The front server keeps
+// recording requests, so a test can assert what reached it.
+func (s *Server) RedirectTo(other *Server) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.redirectTo = other.ts.URL
+}
+
+// href renders a path the way this server advertises it: bare, or absolute on
+// HrefHost.
+func (s *Server) href(path string) string {
+	if s.HrefHost == "" {
+		return path
+	}
+	return strings.TrimSuffix(s.HrefHost, "/") + path
+}
 
 // AddCalendar registers a collection and returns its path.
 func (s *Server) AddCalendar(c Calendar) string {
@@ -208,6 +253,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	})
 	s.mu.Unlock()
 
+	s.mu.Lock()
+	to := s.redirectTo
+	s.mu.Unlock()
+	if to != "" {
+		w.Header().Set("Location", to+r.URL.Path)
+		w.WriteHeader(http.StatusMovedPermanently)
+		return
+	}
+
 	if s.User != "" {
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != s.User || pass != s.Password {
@@ -244,11 +298,11 @@ func (s *Server) propfind(w http.ResponseWriter, r *http.Request, body string) {
 			http.Error(w, "no principal here", http.StatusNotFound)
 			return
 		}
-		writeMultistatus(w, respElem(path, `<d:current-user-principal><d:href>`+
-			s.PrincipalPath()+`</d:href></d:current-user-principal>`), "")
+		writeMultistatus(w, respElem(s.href(path), `<d:current-user-principal><d:href>`+
+			s.href(s.PrincipalPath())+`</d:href></d:current-user-principal>`), "")
 	case strings.Contains(body, "calendar-home-set"):
 		home := s.homeFor(path)
-		writeMultistatus(w, respElem(path, `<c:calendar-home-set><d:href>`+home+
+		writeMultistatus(w, respElem(s.href(path), `<c:calendar-home-set><d:href>`+s.href(home)+
 			`</d:href></c:calendar-home-set>`), "")
 	default:
 		s.propfindCalendars(w, path)
@@ -260,6 +314,9 @@ func (s *Server) propfind(w http.ResponseWriter, r *http.Request, body string) {
 // register calendars under whatever path they like, so the first registered
 // calendar's parent wins when there is one.
 func (s *Server) homeFor(string) string {
+	if s.Home != "" {
+		return s.Home
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.cals) > 0 {
@@ -275,7 +332,7 @@ func (s *Server) propfindCalendars(w http.ResponseWriter, home string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var sb strings.Builder
-	sb.WriteString(respElem(home, `<d:resourcetype><d:collection/></d:resourcetype>`))
+	sb.WriteString(respElem(s.href(home), `<d:resourcetype><d:collection/></d:resourcetype>`))
 	for _, c := range s.cals {
 		if !strings.HasPrefix(c.Path, home) || c.Path == home {
 			continue
@@ -307,7 +364,7 @@ func (s *Server) propfindCalendars(w http.ResponseWriter, home string) {
 			props.WriteString(`<d:privilege><d:` + esc(p) + `/></d:privilege>`)
 		}
 		props.WriteString(`</d:current-user-privilege-set>`)
-		sb.WriteString(respElem(c.Path, props.String()))
+		sb.WriteString(respElem(s.href(c.Path), props.String()))
 	}
 	writeMultistatus(w, sb.String(), "")
 }
@@ -358,11 +415,11 @@ func (s *Server) syncCollection(w http.ResponseWriter, r *http.Request, body str
 			if token == "" {
 				continue // an initial sync never reports tombstones
 			}
-			sb.WriteString(`<d:response><d:href>` + esc(href) +
+			sb.WriteString(`<d:response><d:href>` + esc(s.href(href)) +
 				`</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response>`)
 			continue
 		}
-		sb.WriteString(respElem(href, `<d:getetag>"`+esc(obj.etag)+`"</d:getetag>`))
+		sb.WriteString(respElem(s.href(href), `<d:getetag>"`+esc(obj.etag)+`"</d:getetag>`))
 	}
 	next := ""
 	if cal == nil || !cal.NoSyncToken {
@@ -393,11 +450,11 @@ func (s *Server) multiget(w http.ResponseWriter, body string) {
 		rest = rest[strings.Index(rest, "</d:href>")+len("</d:href>"):]
 		obj, ok := s.objects[href]
 		if !ok || obj.deleted {
-			sb.WriteString(`<d:response><d:href>` + esc(href) +
+			sb.WriteString(`<d:response><d:href>` + esc(s.href(href)) +
 				`</d:href><d:status>HTTP/1.1 404 Not Found</d:status></d:response>`)
 			continue
 		}
-		sb.WriteString(respElem(href, `<d:getetag>"`+esc(obj.etag)+`"</d:getetag>`+
+		sb.WriteString(respElem(s.href(href), `<d:getetag>"`+esc(obj.etag)+`"</d:getetag>`+
 			`<c:calendar-data>`+esc(obj.ics)+`</c:calendar-data>`))
 	}
 	writeMultistatus(w, sb.String(), "")

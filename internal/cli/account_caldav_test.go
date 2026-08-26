@@ -312,3 +312,138 @@ func TestAccountRemoveDeletesTheAppPassword(t *testing.T) {
 		t.Error("the app password survived `account remove`")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// iCloud
+
+// An iCloud account syncs calendars only: iCloud offers mail over IMAP, which
+// emlcal does not speak, so the account is written with no [accounts.mail]
+// block at all rather than a mail half that is switched off.
+func TestAccountAddICloudIsCalendarOnly(t *testing.T) {
+	env := newTestEnv(t)
+	env.Cal["apple"] = fake.NewCalendar()
+
+	env.Stdin = "app-specific\n"
+	out := env.MustRun("account", "add", "icloud",
+		"--name", "apple", "--email", "me@icloud.example", "--app-password-stdin")
+
+	row := coreDecodeOne[map[string]any](t, out)
+	if row["mail_api"] != "-" {
+		t.Errorf("mail_api = %v, want %q: iCloud has no mail backend", row["mail_api"], "-")
+	}
+	if row["calendar_api"] != "caldav" {
+		t.Errorf("calendar_api = %v, want caldav", row["calendar_api"])
+	}
+	if got, _ := coreSecretValue(t, env, "apple.caldav.password"); got != "app-specific" {
+		t.Errorf("app password secret = %q", got)
+	}
+
+	cfg, err := config.Load(env.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct, ok := cfg.Account("apple")
+	if !ok {
+		t.Fatal("the account was not written")
+	}
+	if acct.SyncsMail() {
+		t.Error("an iCloud account must have no mail block")
+	}
+	if acct.Calendar == nil || acct.Calendar.Vendor != model.VendorICloud {
+		t.Errorf("calendar block = %+v, want the icloud vendor", acct.Calendar)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("the config it wrote does not validate: %v", err)
+	}
+}
+
+// Without the password the account would sync nothing at all, so `add` refuses
+// rather than leaving a dead entry behind.
+func TestAccountAddICloudRequiresAnAppPassword(t *testing.T) {
+	env := newTestEnv(t)
+	env.Stdin = "\n"
+	_, errs, code := env.Run("account", "add", "icloud",
+		"--name", "apple", "--email", "me@icloud.example")
+	if code == 0 || !strings.Contains(errs, "calendars only") {
+		t.Fatalf("exit %d, stderr %q", code, errs)
+	}
+}
+
+// The Apple ID that authenticates is often not the iCloud address, so --username
+// is what the CalDAV client presents while --email stays the account's identity.
+func TestAccountAddICloudUsername(t *testing.T) {
+	env := newTestEnv(t)
+	env.Cal["apple"] = fake.NewCalendar()
+
+	env.Stdin = "app-specific\n"
+	env.MustRun("account", "add", "icloud", "--name", "apple",
+		"--email", "me@icloud.example", "--username", "apple-id@example.com",
+		"--app-password-stdin")
+
+	cfg, err := config.Load(env.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct, _ := cfg.Account("apple")
+	if acct.Calendar.Username != "apple-id@example.com" {
+		t.Errorf("username = %q", acct.Calendar.Username)
+	}
+	if acct.Email != "me@icloud.example" {
+		t.Errorf("email = %q; the address must not be overwritten by the Apple ID", acct.Email)
+	}
+}
+
+// End to end through the production Factory: an iCloud account reaches a real
+// CalDAV client, against an iCloud-shaped server (numeric account id, no
+// guessable home path) that authenticates the Apple ID rather than the address.
+func TestFactoryBuildsAnICloudCalDAVClient(t *testing.T) {
+	acct := config.NewAccount("apple", "me@icloud.example", model.VendorICloud)
+	acct.Calendar.Username = "apple-id@example.com"
+	env := newTestEnv(t, acct)
+
+	srv := caldavfake.New()
+	t.Cleanup(srv.Close)
+	srv.Root = "/"
+	srv.User, srv.Password = "apple-id@example.com", "app-specific"
+	srv.Principal, srv.Home = "/1234567890/principal/", "/1234567890/calendars/"
+	srv.AddCalendar(caldavfake.Calendar{Path: srv.Home + "home/", Name: "Home"})
+	srv.AddCalendar(caldavfake.Calendar{Path: srv.Home + "work/", Name: "Work"})
+	t.Setenv(EnvCalDAVBaseURL, srv.BaseURL())
+
+	app := realFactoryApp(t, env)
+	sec, err := app.Secrets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := app.ResolveAccount("apple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sec.Set(CalDAVPasswordKey(*resolved), []byte("app-specific")); err != nil {
+		t.Fatal(err)
+	}
+
+	cp, err := app.Factory.Calendar(context.Background(), *resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cp.(*caldav.Calendar); !ok {
+		t.Fatalf("calendar provider = %T, want *caldav.Calendar", cp)
+	}
+	cals, err := cp.Calendars(context.Background())
+	if err != nil {
+		t.Fatalf("Calendars: %v", err)
+	}
+	if len(cals) != 2 {
+		t.Fatalf("calendars = %+v, want both", cals)
+	}
+	if !cals[0].Primary || cals[0].Name != "Home" {
+		t.Errorf(`want "Home" flagged primary, got %+v`, cals)
+	}
+
+	// An iCloud account has no mail half, and the engine must be told that in
+	// the way it already knows how to skip.
+	if _, err := app.Factory.Mail(context.Background(), *resolved); !errors.Is(err, provider.ErrNotSupported) {
+		t.Errorf("Mail error = %v, want provider.ErrNotSupported", err)
+	}
+}
