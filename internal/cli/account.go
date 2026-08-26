@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -402,6 +403,13 @@ func coreGoogleClientCmd(app *App) *cobra.Command {
 			if strings.TrimSpace(id) == "" || strings.TrimSpace(secret) == "" {
 				return output.Errorf(output.ExitUsage, "--id and --secret are both required")
 			}
+			id, secret = strings.TrimSpace(id), strings.TrimSpace(secret)
+			if !coreGoogleClientID.MatchString(id) {
+				return output.Errorf(output.ExitUsage, "--id %q does not look like a Google OAuth client id (expected <digits>-<hash>.apps.googleusercontent.com — paste only the id, without a label)", id)
+			}
+			if !strings.HasPrefix(secret, "GOCSPX-") {
+				return output.Errorf(output.ExitUsage, "--secret does not look like a Google OAuth client secret (expected GOCSPX-…)")
+			}
 			sec, err := app.Secrets()
 			if err != nil {
 				return err
@@ -440,3 +448,6 @@ func coreNow(a *App) time.Time {
 	}
 	return time.Now()
 }
+
+// coreGoogleClientID matches the id format Google issues for OAuth clients.
+var coreGoogleClientID = regexp.MustCompile(`^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$`)
