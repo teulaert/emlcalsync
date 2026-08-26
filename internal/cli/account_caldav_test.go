@@ -99,11 +99,11 @@ func TestAccountAddFastmailRejectsBothPasswordFlags(t *testing.T) {
 	}
 }
 
-func TestAccountFastmailPasswordCommand(t *testing.T) {
+func TestAccountCalDAVPasswordCommand(t *testing.T) {
 	env := newTestEnv(t)
 	env.Stdin = "later-app-pass\n"
 
-	out := env.MustRun("account", "fastmail-password", "--name", "work", "--stdin")
+	out := env.MustRun("account", "caldav-password", "--name", "work", "--stdin")
 	row := coreDecodeOne[map[string]any](t, out)
 	if row["stored"] != true || row["calendar_api"] != "caldav" {
 		t.Errorf("row = %v", row)

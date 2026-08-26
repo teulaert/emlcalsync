@@ -177,7 +177,7 @@ func coreAccountAddCmd(app *App, prov model.Vendor) *cobra.Command {
 			"create one at https://app.fastmail.com/settings/security/devices\n" +
 			"(\"New app password\", access \"Calendars (CalDAV)\") and pass it with\n" +
 			"--app-password or --app-password-stdin. Without it calendars are skipped;\n" +
-			"`emlcal account fastmail-password` adds it later."
+			"`emlcal account caldav-password` adds it later."
 	}
 	if prov == model.VendorGoogle {
 		cmd.Flags().StringVar(&opts.ClientID, "client-id", "", "OAuth client id for just this account")
