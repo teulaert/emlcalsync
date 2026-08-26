@@ -233,6 +233,11 @@ func (e *Engine) syncAccount(ctx context.Context, acct config.Account, o SyncOpt
 		r, err := e.syncCalendar(ctx, acct, o.Full)
 		rep.Calendar = r
 		if err != nil {
+			if errors.Is(err, provider.ErrNotSupported) {
+				e.log.Info("calendar sync skipped", "account", acct.Name, "reason", err)
+				rep.Calendar = &ResourceReport{Kind: "skipped"}
+				return rep, nil
+			}
 			rep.Err = err
 			return rep, err
 		}

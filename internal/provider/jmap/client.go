@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/teulaert/emlcalsync/internal/provider"
 	"io"
 	"log/slog"
 	"math/rand/v2"
@@ -300,7 +301,7 @@ func (c *Client) CalendarCapability(ctx context.Context) (urn, accountID string,
 			}
 		}
 	}
-	return "", "", fmt.Errorf("jmap: no primary account for %s (token missing that scope?)", CapCalendars)
+	return "", "", fmt.Errorf("%w: jmap: no primary account for %s (API token has no calendars scope; Fastmail tokens currently offer Mail, Submission, Contacts and Masked Email only)", provider.ErrNotSupported, CapCalendars)
 }
 
 // isCalendarURN reports whether a capability URN is a calendars capability,

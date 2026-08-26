@@ -24,6 +24,11 @@ import (
 // cannotCalculateChanges, Google Calendar 410). The caller must Reconcile.
 var ErrStateExpired = errors.New("sync state expired")
 
+// ErrNotSupported is returned when the account or its credentials cannot
+// serve a resource at all (e.g. a Fastmail API token without the calendars
+// scope). The sync engine skips that resource instead of failing the account.
+var ErrNotSupported = errors.New("not supported by this account or token")
+
 // Envelope is the minimal per-message information returned during
 // enumeration: enough to decide whether we need to fetch the raw message and
 // to apply flags/mailboxes without a fetch.
