@@ -19,16 +19,18 @@ import (
 	"github.com/teulaert/emlcalsync/internal/provider/oauth"
 )
 
-// Secret keys (files under the secrets dir).
+// Secret keys (files under the secrets dir). They are scoped by **backend**,
+// not by vendor: the credential belongs to the protocol that presents it, and
+// one account's two resources authenticate separately.
 const (
-	// FastmailTokenKey is the secrets key holding the raw API token.
-	FastmailTokenKeyFmt = "%s.fastmail.token"
-	// FastmailAppPasswordKeyFmt holds a Fastmail **app password**, which is
-	// what CalDAV authenticates with. API tokens have no calendar scope, so
-	// calendars only work once this is set (DESIGN.md §6.4).
-	FastmailAppPasswordKeyFmt = "%s.fastmail.app-password"
+	// JMAPTokenKeyFmt holds the raw JMAP API token.
+	JMAPTokenKeyFmt = "%s.jmap.token"
+	// CalDAVPasswordKeyFmt holds the CalDAV basic-auth password: a Fastmail
+	// app password, or an Apple app-specific password. Calendars only work
+	// once this is set.
+	CalDAVPasswordKeyFmt = "%s.caldav.password"
 	// GoogleTokenKeyFmt is the oauth.FileTokenStore key (it appends .json).
-	GoogleTokenKeyFmt = "%s.gmail"
+	GoogleTokenKeyFmt = "%s.google"
 	// GoogleClientKey holds {"client_id":..., "client_secret":...}.
 	GoogleClientKey = "google-client.json"
 	// GoogleClientKeyFmt is the per-account override of GoogleClientKey, for
@@ -64,13 +66,12 @@ func (f *Factory) init() {
 	}
 }
 
-// FastmailTokenKey returns the secrets key for an account's API token.
-func FastmailTokenKey(acct config.Account) string { return fmt.Sprintf(FastmailTokenKeyFmt, acct.Name) }
+// JMAPTokenKey returns the secrets key for an account's JMAP API token.
+func JMAPTokenKey(acct config.Account) string { return fmt.Sprintf(JMAPTokenKeyFmt, acct.Name) }
 
-// FastmailAppPasswordKey returns the secrets key for an account's CalDAV app
-// password.
-func FastmailAppPasswordKey(acct config.Account) string {
-	return fmt.Sprintf(FastmailAppPasswordKeyFmt, acct.Name)
+// CalDAVPasswordKey returns the secrets key for an account's CalDAV password.
+func CalDAVPasswordKey(acct config.Account) string {
+	return fmt.Sprintf(CalDAVPasswordKeyFmt, acct.Name)
 }
 
 // GoogleTokenKey returns the oauth token-store key for an account.
@@ -81,15 +82,15 @@ func GoogleClientKeyFor(acct config.Account) string {
 	return fmt.Sprintf(GoogleClientKeyFmt, acct.Name)
 }
 
-// FastmailAppPassword returns the stored CalDAV app password, or "" when the
-// account has none (in which case calendars fall back to JMAP, which reports
-// provider.ErrNotSupported and is skipped).
-func (a *App) FastmailAppPassword(acct config.Account) string {
+// CalDAVPassword returns the stored CalDAV password, or "" when the account has
+// none — in which case Factory.Calendar reports provider.ErrNotSupported and
+// the sync engine skips calendars rather than failing the whole account.
+func (a *App) CalDAVPassword(acct config.Account) string {
 	sec, err := a.Secrets()
 	if err != nil {
 		return ""
 	}
-	pw, err := sec.Get(FastmailAppPasswordKey(acct))
+	pw, err := sec.Get(CalDAVPasswordKey(acct))
 	if err != nil {
 		return ""
 	}
@@ -162,10 +163,10 @@ func (f *Factory) jmapClient(acct config.Account) (*jmap.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	tok, err := sec.Get(FastmailTokenKey(acct))
+	tok, err := sec.Get(JMAPTokenKey(acct))
 	if err != nil {
 		return nil, output.Errorf(output.ExitUsage,
-			"no Fastmail token for account %q: run `emlcal account add fastmail --name %s`", acct.Name, acct.Name)
+			"no JMAP token for account %q: run `emlcal account add fastmail --name %s`", acct.Name, acct.Name)
 	}
 	c, err := jmap.New(jmap.Options{
 		Token:      strings.TrimSpace(string(tok)),
@@ -224,22 +225,30 @@ func (f *Factory) googleClients(ctx context.Context, acct config.Account) (*gmai
 }
 
 // Mail implements sync.ProviderFactory.
+//
+// An account with no [accounts.mail] block reports provider.ErrNotSupported:
+// the sync engine already treats that as "skip this resource", and it is the
+// honest answer for a calendar-only account such as iCloud.
 func (f *Factory) Mail(ctx context.Context, acct config.Account) (provider.MailProvider, error) {
-	switch acct.Provider {
-	case model.ProviderFastmail:
+	if acct.Mail == nil {
+		return nil, fmt.Errorf("account %q has no [accounts.mail] block: %w",
+			acct.Name, provider.ErrNotSupported)
+	}
+	switch acct.Mail.Backend {
+	case model.BackendJMAP:
 		c, err := f.jmapClient(acct)
 		if err != nil {
 			return nil, err
 		}
 		return c.Mail(), nil
-	case model.ProviderGmail:
+	case model.BackendGmail:
 		m, _, err := f.googleClients(ctx, acct)
 		return m, err
 	}
-	return nil, fmt.Errorf("unknown provider %q", acct.Provider)
+	return nil, fmt.Errorf("account %q: unknown mail backend %q", acct.Name, acct.Mail.Backend)
 }
 
-// caldavClient builds (and caches) the CalDAV provider for a Fastmail account.
+// caldavClient builds (and caches) the CalDAV provider for an account.
 func (f *Factory) caldavClient(acct config.Account, password string) (*caldav.Calendar, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -247,10 +256,17 @@ func (f *Factory) caldavClient(acct config.Account, password string) (*caldav.Ca
 	if c, ok := f.caldav[acct.Name]; ok {
 		return c, nil
 	}
+	cb := acct.Calendar
+	base := cb.BaseURL
+	if env := os.Getenv(EnvCalDAVBaseURL); env != "" {
+		base = env
+	}
 	c, err := caldav.New(caldav.Options{
 		Email:    acct.Email,
+		Username: cb.User(acct.Email),
 		Password: password,
-		BaseURL:  os.Getenv(EnvCalDAVBaseURL),
+		Vendor:   cb.Vendor,
+		BaseURL:  base,
 		Logger:   f.app.Logger(),
 	})
 	if err != nil {
@@ -262,31 +278,39 @@ func (f *Factory) caldavClient(acct config.Account, password string) (*caldav.Ca
 
 // Calendar implements sync.ProviderFactory.
 //
-// Fastmail calendars go over CalDAV when an app password is stored, because
-// Fastmail's JMAP API tokens carry no calendars scope. Without one the JMAP
-// calendar client is returned unchanged: it reports provider.ErrNotSupported
-// and the sync engine skips calendars for that account.
+// A CalDAV backend with no stored password reports provider.ErrNotSupported
+// rather than failing: a half-configured account should skip its calendars
+// with an actionable message, not break the whole sync.
 func (f *Factory) Calendar(ctx context.Context, acct config.Account) (provider.CalendarProvider, error) {
-	switch acct.Provider {
-	case model.ProviderFastmail:
-		if pw := f.app.FastmailAppPassword(acct); pw != "" {
-			return f.caldavClient(acct, pw)
+	if acct.Calendar == nil {
+		return nil, fmt.Errorf("account %q has no [accounts.calendar] block: %w",
+			acct.Name, provider.ErrNotSupported)
+	}
+	switch acct.Calendar.Backend {
+	case model.BackendCalDAV:
+		pw := f.app.CalDAVPassword(acct)
+		if pw == "" {
+			return nil, fmt.Errorf(
+				"account %q has no CalDAV password (add one with `emlcal account caldav-password --name %s`): %w",
+				acct.Name, acct.Name, provider.ErrNotSupported)
 		}
+		return f.caldavClient(acct, pw)
+	case model.BackendGCal:
+		_, c, err := f.googleClients(ctx, acct)
+		return c, err
+	case model.BackendJMAP:
 		c, err := f.jmapClient(acct)
 		if err != nil {
 			return nil, err
 		}
 		return c.Calendar(), nil
-	case model.ProviderGmail:
-		_, c, err := f.googleClients(ctx, acct)
-		return c, err
 	}
-	return nil, fmt.Errorf("unknown provider %q", acct.Provider)
+	return nil, fmt.Errorf("account %q: unknown calendar backend %q", acct.Name, acct.Calendar.Backend)
 }
 
 // Pusher implements sync.ProviderFactory: only JMAP supports push.
 func (f *Factory) Pusher(ctx context.Context, acct config.Account) (provider.Pusher, bool, error) {
-	if acct.Provider != model.ProviderFastmail {
+	if acct.Mail == nil || acct.Mail.Backend != model.BackendJMAP {
 		return nil, false, nil
 	}
 	c, err := f.jmapClient(acct)

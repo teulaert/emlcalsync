@@ -28,8 +28,8 @@ func TestAccountAddFastmail(t *testing.T) {
 	if got := str(t, row, "name"); got != "work" {
 		t.Errorf("name = %q, want work", got)
 	}
-	if got := str(t, row, "provider"); got != "fastmail" {
-		t.Errorf("provider = %q, want fastmail", got)
+	if got := str(t, row, "vendor"); got != "fastmail" {
+		t.Errorf("vendor = %q, want fastmail", got)
 	}
 	// The fake serves the six standard role mailboxes; `account add` verifies
 	// the token by listing them.
@@ -46,7 +46,7 @@ func TestAccountAddFastmail(t *testing.T) {
 	}
 	for _, want := range []*regexp.Regexp{
 		regexp.MustCompile(`(?m)^name\s+= "work"$`),
-		regexp.MustCompile(`(?m)^provider\s+= "fastmail"$`),
+		regexp.MustCompile(`(?m)^\s+backend = "jmap"$`),
 		regexp.MustCompile(`(?m)^email\s+= "me@example.com"$`),
 		regexp.MustCompile(`(?m)^\[\[accounts\]\]$`),
 	} {
@@ -55,7 +55,7 @@ func TestAccountAddFastmail(t *testing.T) {
 		}
 	}
 
-	secret := filepath.Join(e.secretsDir(), "work.fastmail.token")
+	secret := filepath.Join(e.secretsDir(), "work.jmap.token")
 	fi, err := os.Stat(secret)
 	if err != nil {
 		t.Fatalf("secret not written: %v", err)

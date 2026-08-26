@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,10 +11,10 @@ import (
 
 	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 	"github.com/teulaert/emlcalsync/internal/provider/caldav"
 	"github.com/teulaert/emlcalsync/internal/provider/caldav/caldavfake"
 	"github.com/teulaert/emlcalsync/internal/provider/fake"
-	"github.com/teulaert/emlcalsync/internal/provider/jmap"
 )
 
 // coreSecretValue reads one secrets file from the environment's config dir.
@@ -48,10 +49,10 @@ func TestAccountAddFastmailWithAppPassword(t *testing.T) {
 		t.Errorf("calendars = %v, want the one calendar the provider reported", row["calendars"])
 	}
 
-	if got, ok := coreSecretValue(t, env, "extra.fastmail.app-password"); !ok || got != "app-pass-1234" {
+	if got, ok := coreSecretValue(t, env, "extra.caldav.password"); !ok || got != "app-pass-1234" {
 		t.Errorf("app password secret = %q (present=%v)", got, ok)
 	}
-	if got, ok := coreSecretValue(t, env, "extra.fastmail.token"); !ok || got != "secret-token" {
+	if got, ok := coreSecretValue(t, env, "extra.jmap.token"); !ok || got != "secret-token" {
 		t.Errorf("token secret = %q (present=%v)", got, ok)
 	}
 }
@@ -65,7 +66,7 @@ func TestAccountAddFastmailWithAppPasswordFlag(t *testing.T) {
 	env.MustRun("account", "add", "fastmail", "--name", "extra",
 		"--email", "x@y.example", "--token-stdin", "--app-password", "from-flag")
 
-	if got, _ := coreSecretValue(t, env, "extra.fastmail.app-password"); got != "from-flag" {
+	if got, _ := coreSecretValue(t, env, "extra.caldav.password"); got != "from-flag" {
 		t.Errorf("app password secret = %q", got)
 	}
 }
@@ -83,7 +84,7 @@ func TestAccountAddFastmailWithoutAppPasswordHasNoCalendars(t *testing.T) {
 	if row["calendar_api"] != "none" {
 		t.Errorf("calendar_api = %v, want none", row["calendar_api"])
 	}
-	if _, ok := coreSecretValue(t, env, "extra.fastmail.app-password"); ok {
+	if _, ok := coreSecretValue(t, env, "extra.caldav.password"); ok {
 		t.Error("an app password was stored even though none was given")
 	}
 }
@@ -110,7 +111,7 @@ func TestAccountFastmailPasswordCommand(t *testing.T) {
 	if row["calendars"] != float64(1) {
 		t.Errorf("calendars = %v, want the verification count", row["calendars"])
 	}
-	if got, _ := coreSecretValue(t, env, "work.fastmail.app-password"); got != "later-app-pass" {
+	if got, _ := coreSecretValue(t, env, "work.caldav.password"); got != "later-app-pass" {
 		t.Errorf("app password secret = %q", got)
 	}
 
@@ -123,11 +124,16 @@ func TestAccountFastmailPasswordCommand(t *testing.T) {
 	}
 }
 
-func TestAccountFastmailPasswordRejectsGmailAccount(t *testing.T) {
+// A Google account's calendars come over the Calendar API, so a CalDAV password
+// would be written where nothing reads it. The old `fastmail-password` spelling
+// still works as an alias.
+func TestAccountCalDAVPasswordRejectsANonCalDAVAccount(t *testing.T) {
 	env := newTestEnv(t)
-	_, errs, code := env.Run("account", "fastmail-password", "--name", "home", "--app-password", "x")
-	if code == 0 || !strings.Contains(errs, "Fastmail credential") {
-		t.Fatalf("exit %d, stderr %q", code, errs)
+	for _, cmd := range []string{"caldav-password", "fastmail-password"} {
+		_, errs, code := env.Run("account", cmd, "--name", "home", "--app-password", "x")
+		if code == 0 || !strings.Contains(errs, "CalDAV calendar backend") {
+			t.Fatalf("%s: exit %d, stderr %q", cmd, code, errs)
+		}
 	}
 }
 
@@ -160,9 +166,7 @@ func realFactoryApp(t *testing.T, env *testEnv) *App {
 }
 
 func TestFactoryUsesCalDAVWhenAnAppPasswordIsStored(t *testing.T) {
-	env := newTestEnv(t, config.Account{
-		Name: "work", Provider: model.ProviderFastmail, Email: "me@example.com",
-	})
+	env := newTestEnv(t, config.NewAccount("work", "me@example.com", model.VendorFastmail))
 	srv := caldavfake.New()
 	t.Cleanup(srv.Close)
 	srv.User, srv.Password = "me@example.com", "app-pass"
@@ -183,7 +187,7 @@ func TestFactoryUsesCalDAVWhenAnAppPasswordIsStored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sec.Set(FastmailAppPasswordKey(*acct), []byte("app-pass")); err != nil {
+	if err := sec.Set(CalDAVPasswordKey(*acct), []byte("app-pass")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -203,10 +207,11 @@ func TestFactoryUsesCalDAVWhenAnAppPasswordIsStored(t *testing.T) {
 	}
 }
 
-func TestFactoryFallsBackToJMAPWithoutAnAppPassword(t *testing.T) {
-	env := newTestEnv(t, config.Account{
-		Name: "work", Provider: model.ProviderFastmail, Email: "me@example.com",
-	})
+// A CalDAV calendar with no stored password is reported as unsupported, not as
+// an error: the sync engine skips the resource and the rest of the account
+// keeps working, which is what a half-configured account should do.
+func TestFactoryReportsCalDAVWithoutAPasswordAsUnsupported(t *testing.T) {
+	env := newTestEnv(t, config.NewAccount("work", "me@example.com", model.VendorFastmail))
 	app := realFactoryApp(t, env)
 	sec, err := app.Secrets()
 	if err != nil {
@@ -216,19 +221,16 @@ func TestFactoryFallsBackToJMAPWithoutAnAppPassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sec.Set(FastmailTokenKey(*acct), []byte("token")); err != nil {
+	if err := sec.Set(JMAPTokenKey(*acct), []byte("token")); err != nil {
 		t.Fatal(err)
 	}
 
-	cp, err := app.Factory.Calendar(context.Background(), *acct)
-	if err != nil {
-		t.Fatal(err)
+	_, err = app.Factory.Calendar(context.Background(), *acct)
+	if !errors.Is(err, provider.ErrNotSupported) {
+		t.Fatalf("Calendar error = %v, want provider.ErrNotSupported", err)
 	}
-	if _, ok := cp.(*caldav.Calendar); ok {
-		t.Fatal("an account without an app password must not get the CalDAV provider")
-	}
-	if _, ok := cp.(*jmap.Calendar); !ok {
-		t.Fatalf("calendar provider = %T, want the JMAP calendar", cp)
+	if !strings.Contains(err.Error(), "caldav-password") {
+		t.Errorf("error %q should name the command that fixes it", err)
 	}
 }
 
@@ -302,11 +304,11 @@ func TestAccountRemoveDeletesTheAppPassword(t *testing.T) {
 	env := newTestEnv(t)
 	env.Stdin = "app-pass\n"
 	env.MustRun("account", "fastmail-password", "--name", "work", "--stdin")
-	if _, ok := coreSecretValue(t, env, "work.fastmail.app-password"); !ok {
+	if _, ok := coreSecretValue(t, env, "work.caldav.password"); !ok {
 		t.Fatal("setup: the app password was not stored")
 	}
 	env.MustRun("account", "remove", "work", "--yes")
-	if _, ok := coreSecretValue(t, env, "work.fastmail.app-password"); ok {
+	if _, ok := coreSecretValue(t, env, "work.caldav.password"); ok {
 		t.Error("the app password survived `account remove`")
 	}
 }

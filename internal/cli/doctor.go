@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -110,33 +111,82 @@ func coreCheckSecrets(app *App, cfg *config.Config) []coreCheck {
 		return []coreCheck{coreFail("secrets", err.Error())}
 	}
 	for _, a := range cfg.Accounts {
-		name := "secret:" + a.Name
-		switch a.Provider {
-		case model.ProviderFastmail:
-			b, err := sec.Get(FastmailTokenKey(a))
-			switch {
-			case err != nil:
-				out = append(out, coreFail(name, fmt.Sprintf("no API token: run `emlcal account add fastmail --name %s`", a.Name)))
-			case len(b) == 0:
-				out = append(out, coreFail(name, "stored API token is empty"))
-			default:
-				out = append(out, coreOK(name, "API token present"))
-			}
-		case model.ProviderGmail:
-			tok, err := (oauth.FileTokenStore{Dir: cfg.SecretsDir()}).Load(GoogleTokenKey(a))
-			switch {
-			case err != nil:
-				out = append(out, coreFail(name, fmt.Sprintf("no OAuth token: run `emlcal account add gmail --name %s`", a.Name)))
-			case tok.RefreshToken == "":
-				out = append(out, coreWarn(name, "OAuth token has no refresh token; it will stop working when it expires"))
-			default:
-				out = append(out, coreOK(name, "OAuth token present"))
-			}
-		default:
-			out = append(out, coreFail(name, fmt.Sprintf("unknown provider %q", a.Provider)))
+		if a.Mail != nil {
+			out = append(out, coreCheckMailSecret(app, cfg, sec, a))
+		}
+		if a.Calendar != nil {
+			out = append(out, coreCheckCalendarSecret(app, cfg, sec, a)...)
 		}
 	}
 	return out
+}
+
+// coreCheckMailSecret audits the credential the account's mail backend needs.
+func coreCheckMailSecret(app *App, cfg *config.Config, sec config.Secrets, a config.Account) coreCheck {
+	name := "secret:" + a.Name + ".mail"
+	switch a.Mail.Backend {
+	case model.BackendJMAP:
+		b, err := sec.Get(JMAPTokenKey(a))
+		switch {
+		case err != nil:
+			return coreFail(name, fmt.Sprintf("no API token: run `emlcal account add fastmail --name %s`", a.Name))
+		case len(b) == 0:
+			return coreFail(name, "stored API token is empty")
+		}
+		return coreOK(name, "API token present")
+	case model.BackendGmail:
+		return coreCheckGoogleToken(name, cfg, a)
+	}
+	return coreFail(name, fmt.Sprintf("unknown mail backend %q", a.Mail.Backend))
+}
+
+// coreCheckCalendarSecret audits the credential the calendar backend needs.
+// A CalDAV backend with no stored password is why an account can silently sync
+// no calendars at all, so it is reported rather than passed over.
+func coreCheckCalendarSecret(app *App, cfg *config.Config, sec config.Secrets, a config.Account) []coreCheck {
+	name := "secret:" + a.Name + ".calendar"
+	switch a.Calendar.Backend {
+	case model.BackendCalDAV:
+		b, err := sec.Get(CalDAVPasswordKey(a))
+		switch {
+		case err != nil:
+			// A warning, not a failure: the mail half still works, and this is
+			// what a Fastmail account looks like between `account add` and
+			// `account caldav-password`.
+			return []coreCheck{coreWarn(name, fmt.Sprintf(
+				"no CalDAV password, so calendars are skipped: run `emlcal account caldav-password --name %s`", a.Name))}
+		case len(strings.TrimSpace(string(b))) == 0:
+			return []coreCheck{coreWarn(name, "stored CalDAV password is empty; calendars are skipped")}
+		}
+		return []coreCheck{coreOK(name, "CalDAV password present")}
+	case model.BackendGCal:
+		// Same OAuth token as the mail half; do not report it twice.
+		if a.Mail != nil && a.Mail.Backend == model.BackendGmail {
+			return nil
+		}
+		return []coreCheck{coreCheckGoogleToken(name, cfg, a)}
+	case model.BackendJMAP:
+		if a.Mail != nil && a.Mail.Backend == model.BackendJMAP {
+			return nil
+		}
+		b, err := sec.Get(JMAPTokenKey(a))
+		if err != nil || len(b) == 0 {
+			return []coreCheck{coreFail(name, "no JMAP token")}
+		}
+		return []coreCheck{coreOK(name, "API token present")}
+	}
+	return []coreCheck{coreFail(name, fmt.Sprintf("unknown calendar backend %q", a.Calendar.Backend))}
+}
+
+func coreCheckGoogleToken(name string, cfg *config.Config, a config.Account) coreCheck {
+	tok, err := (oauth.FileTokenStore{Dir: cfg.SecretsDir()}).Load(GoogleTokenKey(a))
+	switch {
+	case err != nil:
+		return coreFail(name, fmt.Sprintf("no OAuth token: run `emlcal account add gmail --name %s`", a.Name))
+	case tok.RefreshToken == "":
+		return coreWarn(name, "OAuth token has no refresh token; it will stop working when it expires")
+	}
+	return coreOK(name, "OAuth token present")
 }
 
 func coreCheckDB(app *App) coreCheck {

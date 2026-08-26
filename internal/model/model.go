@@ -13,19 +13,67 @@ import (
 	"time"
 )
 
-// Provider identifies an account backend.
-type Provider string
+// Vendor is who runs the service. It selects the CalDAV preset and is recorded
+// on the account for information; nothing branches on it.
+type Vendor string
 
 const (
-	ProviderGmail    Provider = "gmail"    // Gmail API + Google Calendar API
-	ProviderFastmail Provider = "fastmail" // JMAP mail + JMAP calendars
+	VendorGoogle   Vendor = "google"
+	VendorFastmail Vendor = "fastmail"
+	VendorICloud   Vendor = "icloud"
 )
+
+// Backend is the protocol serving one resource of an account. It is orthogonal
+// to the vendor: Fastmail and iCloud calendars are both CalDAV, and a Fastmail
+// account's mail and calendar have different credentials, different protocols
+// and their own sync state.
+type Backend string
+
+const (
+	BackendJMAP   Backend = "jmap"   // mail; calendars where the token allows
+	BackendGmail  Backend = "gmail"  // mail only
+	BackendGCal   Backend = "gcal"   // calendars only
+	BackendCalDAV Backend = "caldav" // calendars only
+)
+
+// MailBackends and CalendarBackends are the backends each resource accepts.
+var (
+	MailBackends     = []Backend{BackendJMAP, BackendGmail}
+	CalendarBackends = []Backend{BackendCalDAV, BackendGCal, BackendJMAP}
+)
+
+// Valid reports whether b is one of the given backends.
+func (b Backend) Valid(in []Backend) bool {
+	for _, x := range in {
+		if b == x {
+			return true
+		}
+	}
+	return false
+}
+
+// Vendors is every vendor a config may name.
+var Vendors = []Vendor{VendorGoogle, VendorFastmail, VendorICloud}
+
+// Valid reports whether v is a known vendor.
+func (v Vendor) Valid() bool {
+	for _, x := range Vendors {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
 
 // Account is a configured account. ID is the short name from config.toml
 // ("work", "personal") and is the prefix of every public ID.
+//
+// Vendor is the account's primary vendor and is stored for information only —
+// an account may mix vendors across its resources (Gmail mail, iCloud
+// calendars), in which case this is the mail half's.
 type Account struct {
 	ID        string
-	Provider  Provider
+	Vendor    Vendor
 	Email     string
 	CreatedAt time.Time
 }

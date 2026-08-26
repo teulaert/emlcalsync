@@ -39,8 +39,8 @@ func calSeed(t *testing.T) *testEnv {
 	// Calendars must be selected explicitly: an account with no `calendars`
 	// key never syncs its calendars (sync/engine.go).
 	env := newTestEnv(t,
-		config.Account{Name: "work", Provider: model.ProviderFastmail, Email: "me@example.com", Calendars: []string{"*"}},
-		config.Account{Name: "home", Provider: model.ProviderGmail, Email: "me@gmail.example", Calendars: []string{"*"}})
+		config.NewAccount("work", "me@example.com", model.VendorFastmail),
+		config.NewAccount("home", "me@gmail.example", model.VendorGoogle))
 	env.Cal["work"].Put("primary", model.Event{
 		RemoteID: "e1",
 		UID:      "u1",

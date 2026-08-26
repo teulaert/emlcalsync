@@ -33,12 +33,15 @@ func coreSeedSecrets(t *testing.T, env *testEnv) {
 		t.Fatal(err)
 	}
 	for _, a := range cfg.Accounts {
-		switch a.Provider {
-		case "fastmail":
-			if err := sec.Set(FastmailTokenKey(a), []byte("token")); err != nil {
+		if a.Mail == nil {
+			continue
+		}
+		switch a.Mail.Backend {
+		case model.BackendJMAP:
+			if err := sec.Set(JMAPTokenKey(a), []byte("token")); err != nil {
 				t.Fatal(err)
 			}
-		case "gmail":
+		case model.BackendGmail:
 			tok := &oauth2.Token{AccessToken: "at", RefreshToken: "rt", Expiry: env.Now.Add(time.Hour)}
 			if err := (oauth.FileTokenStore{Dir: cfg.SecretsDir()}).Save(GoogleTokenKey(a), tok); err != nil {
 				t.Fatal(err)
@@ -150,7 +153,7 @@ func TestDoctorPasses(t *testing.T) {
 			t.Errorf("check %s failed: %s", c.Name, c.Detail)
 		}
 	}
-	for _, want := range []string{"config", "database", "blobs", "daemon", "secret:work", "online:work"} {
+	for _, want := range []string{"config", "database", "blobs", "daemon", "secret:work.mail", "secret:work.calendar", "online:work"} {
 		if _, ok := seen[want]; !ok {
 			t.Errorf("no %q check in %v", want, seen)
 		}
@@ -367,10 +370,10 @@ func (e *testEnv) appForProgress() (*App, *bytes.Buffer, *bytes.Buffer) {
 // Per-account toggles
 
 func TestSyncSkipsDisabledResources(t *testing.T) {
-	env := newTestEnv(t, config.Account{
-		Name: "work", Provider: model.ProviderFastmail, Email: "me@example.com",
-		Mail: false, Calendar: true, Calendars: []string{"*"},
-	})
+	acct := config.NewAccount("work", "me@example.com", model.VendorFastmail)
+	acct.Mail = nil   // calendar only
+	acct.Push = false // push is a JMAP mail feature
+	env := newTestEnv(t, acct)
 	env.Mail["work"].Add(fake.NewMsg("m1",
 		RawMail(t, "a@example.com", "me@example.com", "one", "body", env.Now)))
 
@@ -389,8 +392,8 @@ func TestSyncSkipsDisabledResources(t *testing.T) {
 	if len(st.Accounts) != 1 {
 		t.Fatalf("status listed %d accounts", len(st.Accounts))
 	}
-	if st.Accounts[0].Mail || !st.Accounts[0].Calendar {
-		t.Errorf("status toggles = mail:%v calendar:%v", st.Accounts[0].Mail, st.Accounts[0].Calendar)
+	if st.Accounts[0].Mail != "-" || st.Accounts[0].Calendar != "caldav" {
+		t.Errorf("status backends = mail:%q calendar:%q", st.Accounts[0].Mail, st.Accounts[0].Calendar)
 	}
 	if st.Accounts[0].Disabled != "mail off" {
 		t.Errorf("status disabled = %q, want %q", st.Accounts[0].Disabled, "mail off")

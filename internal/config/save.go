@@ -64,10 +64,12 @@ func render(c *Config) []byte {
 		a := &c.Accounts[i]
 		b.WriteString("\n[[accounts]]\n")
 		fmt.Fprintf(&b, "name     = %s\n", quote(a.Name))
-		fmt.Fprintf(&b, "provider = %s\n", quote(string(a.Provider)))
 		fmt.Fprintf(&b, "email    = %s\n", quote(a.Email))
 
-		def := defaultsFor(a.Provider)
+		// Every scalar key must be written before the first sub-table: once
+		// [accounts.mail] is open, a following bare `poll = …` would belong to
+		// that table instead of the account.
+		def := defaultsFor(a)
 		if a.Poll != def.Poll {
 			b.WriteString("# Fallback poll interval when there is no push stream.\n")
 			fmt.Fprintf(&b, "poll     = %s\n", quote(a.Poll.String()))
@@ -82,18 +84,6 @@ func render(c *Config) []byte {
 			b.WriteString("# Overrides general.raw_max_size for this account.\n")
 			fmt.Fprintf(&b, "raw_max_size = %s\n", quote(a.RawMaxSize.String()))
 		}
-		// Only a one-sided toggle is written. Both false is not a state
-		// config.toml can express — Validate refuses it — and it is what a
-		// zero-value Account built in Go looks like, so Save must not turn
-		// one of those into a file it would then refuse to load.
-		if !a.Mail && a.Calendar {
-			b.WriteString("# false syncs no mail for this account (calendar only).\n")
-			b.WriteString("mail     = false\n")
-		}
-		if a.Mail && !a.Calendar {
-			b.WriteString("# false syncs no calendars for this account (mail only).\n")
-			b.WriteString("calendar = false\n")
-		}
 		if !equalStrings(a.Calendars, def.Calendars) {
 			b.WriteString("# \"*\" syncs every calendar; otherwise list them by name.\n")
 			fmt.Fprintf(&b, "calendars = %s\n", quoteList(a.Calendars))
@@ -101,17 +91,54 @@ func render(c *Config) []byte {
 		if a.Concurrency != def.Concurrency {
 			fmt.Fprintf(&b, "concurrency = %d\n", a.Concurrency)
 		}
+
+		// A block is written iff the account has one; its absence is what
+		// switches the resource off. Validate refuses an account with neither.
+		if m := a.Mail; m != nil {
+			b.WriteString("\n  [accounts.mail]\n")
+			fmt.Fprintf(&b, "  backend = %s\n", quote(string(m.Backend)))
+			if m.Vendor != "" && m.Vendor != defaultVendorFor(m.Backend) {
+				fmt.Fprintf(&b, "  vendor  = %s\n", quote(string(m.Vendor)))
+			}
+		} else {
+			b.WriteString("\n  # No [accounts.mail]: this account syncs calendars only.\n")
+		}
+		if c := a.Calendar; c != nil {
+			b.WriteString("\n  [accounts.calendar]\n")
+			fmt.Fprintf(&b, "  backend = %s\n", quote(string(c.Backend)))
+			// CalDAV is shared by several vendors, so its vendor is always
+			// written: it is what selects the base URL.
+			if c.Vendor != "" && (c.Backend == model.BackendCalDAV || c.Vendor != defaultVendorFor(c.Backend)) {
+				fmt.Fprintf(&b, "  vendor  = %s\n", quote(string(c.Vendor)))
+			}
+			if c.BaseURL != "" {
+				fmt.Fprintf(&b, "  base_url = %s\n", quote(c.BaseURL))
+			}
+			if c.Username != "" {
+				b.WriteString("  # Basic-auth user, when it is not the address above.\n")
+				fmt.Fprintf(&b, "  username = %s\n", quote(c.Username))
+			}
+		} else {
+			b.WriteString("\n  # No [accounts.calendar]: this account syncs mail only.\n")
+		}
 	}
 	return b.Bytes()
 }
 
-// defaultsFor is the account a bare [[accounts]] table with this provider
-// would produce; Save omits any key still at that value.
-func defaultsFor(p model.Provider) Account {
-	s := string(p)
-	fa := fileAccount{Provider: &s}
-	a, _ := materialize(fa)
-	return a
+// defaultsFor is the account a [[accounts]] table with these backends would
+// produce; Save omits any key still at that value.
+func defaultsFor(a *Account) Account {
+	fa := fileAccount{}
+	if a.Mail != nil {
+		s := string(a.Mail.Backend)
+		fa.Mail = &fileMailBackend{Backend: &s}
+	}
+	if a.Calendar != nil {
+		s := string(a.Calendar.Backend)
+		fa.Calendar = &fileCalendarBackend{Backend: &s}
+	}
+	d, _ := materialize(fa)
+	return d
 }
 
 func writeDirIfCustom(b *bytes.Buffer, key, val, def string) {

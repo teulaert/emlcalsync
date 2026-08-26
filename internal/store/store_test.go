@@ -34,7 +34,7 @@ func seedAccount(t *testing.T, s *Store, id string) {
 	t.Helper()
 	ctx := context.Background()
 	if err := s.UpsertAccount(ctx, &model.Account{
-		ID: id, Provider: model.ProviderFastmail, Email: id + "@example.com", CreatedAt: base,
+		ID: id, Vendor: model.VendorFastmail, Email: id + "@example.com", CreatedAt: base,
 	}); err != nil {
 		t.Fatalf("UpsertAccount: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestOpenMemory(t *testing.T) {
 	}
 	defer s.Close()
 	ctx := context.Background()
-	if err := s.UpsertAccount(ctx, &model.Account{ID: "m", Provider: model.ProviderGmail, Email: "m@x"}); err != nil {
+	if err := s.UpsertAccount(ctx, &model.Account{ID: "m", Vendor: model.VendorGoogle, Email: "m@x"}); err != nil {
 		t.Fatalf("UpsertAccount: %v", err)
 	}
 	// The pool is pinned to one connection, so the schema survives.
@@ -157,11 +157,11 @@ func TestAccountsCRUD(t *testing.T) {
 	if _, err := s.GetAccount(ctx, "nope"); !errors.Is(err, model.ErrNotFound) {
 		t.Fatalf("GetAccount(missing) = %v, want ErrNotFound", err)
 	}
-	if err := s.UpsertAccount(ctx, &model.Account{ID: "Bad Name", Provider: model.ProviderGmail}); err == nil {
+	if err := s.UpsertAccount(ctx, &model.Account{ID: "Bad Name", Vendor: model.VendorGoogle}); err == nil {
 		t.Fatal("invalid account id accepted")
 	}
 
-	a := &model.Account{ID: "work", Provider: model.ProviderGmail, Email: "a@b.c"}
+	a := &model.Account{ID: "work", Vendor: model.VendorGoogle, Email: "a@b.c"}
 	if err := s.UpsertAccount(ctx, a); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestAccountsCRUD(t *testing.T) {
 	created := a.CreatedAt
 
 	// Update keeps created_at.
-	a2 := &model.Account{ID: "work", Provider: model.ProviderGmail, Email: "changed@b.c"}
+	a2 := &model.Account{ID: "work", Vendor: model.VendorGoogle, Email: "changed@b.c"}
 	if err := s.UpsertAccount(ctx, a2); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestAccountsCRUD(t *testing.T) {
 		t.Fatalf("created_at changed: %v -> %v", created, got.CreatedAt)
 	}
 
-	if err := s.UpsertAccount(ctx, &model.Account{ID: "personal", Provider: model.ProviderFastmail, Email: "p@x"}); err != nil {
+	if err := s.UpsertAccount(ctx, &model.Account{ID: "personal", Vendor: model.VendorFastmail, Email: "p@x"}); err != nil {
 		t.Fatal(err)
 	}
 	list, err := s.ListAccounts(ctx)

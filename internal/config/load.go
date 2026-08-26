@@ -32,17 +32,30 @@ type fileGeneral struct {
 }
 
 type fileAccount struct {
-	Name             *string   `toml:"name"`
-	Provider         *string   `toml:"provider"`
-	Email            *string   `toml:"email"`
-	Poll             *Duration `toml:"poll"`
-	Push             *bool     `toml:"push"`
-	IncludeSpamTrash *bool     `toml:"include_spam_trash"`
-	RawMaxSize       *Size     `toml:"raw_max_size"`
-	Mail             *bool     `toml:"mail"`
-	Calendar         *bool     `toml:"calendar"`
-	Calendars        []string  `toml:"calendars"`
-	Concurrency      *int      `toml:"concurrency"`
+	Name             *string              `toml:"name"`
+	Email            *string              `toml:"email"`
+	Mail             *fileMailBackend     `toml:"mail"`
+	Calendar         *fileCalendarBackend `toml:"calendar"`
+	Poll             *Duration            `toml:"poll"`
+	Push             *bool                `toml:"push"`
+	IncludeSpamTrash *bool                `toml:"include_spam_trash"`
+	RawMaxSize       *Size                `toml:"raw_max_size"`
+	Calendars        []string             `toml:"calendars"`
+	Concurrency      *int                 `toml:"concurrency"`
+}
+
+// fileMailBackend is the [accounts.mail] table.
+type fileMailBackend struct {
+	Backend *string `toml:"backend"`
+	Vendor  *string `toml:"vendor"`
+}
+
+// fileCalendarBackend is the [accounts.calendar] table.
+type fileCalendarBackend struct {
+	Backend  *string `toml:"backend"`
+	Vendor   *string `toml:"vendor"`
+	BaseURL  *string `toml:"base_url"`
+	Username *string `toml:"username"`
 }
 
 // Load reads config.toml. An empty path means DefaultPath(). A missing file is
@@ -131,25 +144,42 @@ func merge(c *Config, fc *fileConfig) error {
 func materialize(fa fileAccount) (Account, error) {
 	a := Account{
 		IncludeSpamTrash: true,
-		Mail:             true,
-		Calendar:         true,
 		Calendars:        []string{"*"},
 		Concurrency:      DefaultConcurrency,
 	}
 	setString(&a.Name, fa.Name)
 	setString(&a.Email, fa.Email)
-	if fa.Provider != nil {
-		a.Provider = model.Provider(strings.ToLower(strings.TrimSpace(*fa.Provider)))
+
+	if fa.Mail != nil {
+		mb := MailBackend{}
+		setBackend(&mb.Backend, fa.Mail.Backend)
+		setVendor(&mb.Vendor, fa.Mail.Vendor)
+		if mb.Vendor == "" {
+			mb.Vendor = defaultVendorFor(mb.Backend)
+		}
+		a.Mail = &mb
+	}
+	if fa.Calendar != nil {
+		cb := CalendarBackend{}
+		setBackend(&cb.Backend, fa.Calendar.Backend)
+		setVendor(&cb.Vendor, fa.Calendar.Vendor)
+		setString(&cb.BaseURL, fa.Calendar.BaseURL)
+		setString(&cb.Username, fa.Calendar.Username)
+		if cb.Vendor == "" && cb.BaseURL == "" {
+			cb.Vendor = defaultVendorFor(cb.Backend)
+		}
+		a.Calendar = &cb
 	}
 
-	// Provider-shaped defaults.
-	switch a.Provider {
-	case model.ProviderFastmail:
-		a.Poll = Duration(DefaultPollFastmail)
-		a.Push = true
+	// Backend-shaped defaults, keyed off the mail half; a calendar-only
+	// account polls on the calendar cadence instead.
+	switch {
+	case a.Mail != nil && a.Mail.Backend == model.BackendJMAP:
+		a.Poll, a.Push = Duration(DefaultPollJMAP), true
+	case a.Mail != nil:
+		a.Poll, a.Push = Duration(DefaultPollGmail), false
 	default:
-		a.Poll = Duration(DefaultPollGmail)
-		a.Push = false
+		a.Poll, a.Push = Duration(DefaultPollCalDAV), false
 	}
 
 	if fa.Poll != nil {
@@ -165,12 +195,6 @@ func materialize(fa fileAccount) (Account, error) {
 		v := *fa.RawMaxSize
 		a.RawMaxSize = &v
 	}
-	if fa.Mail != nil {
-		a.Mail = *fa.Mail
-	}
-	if fa.Calendar != nil {
-		a.Calendar = *fa.Calendar
-	}
 	if fa.Calendars != nil {
 		a.Calendars = fa.Calendars
 	}
@@ -178,6 +202,31 @@ func materialize(fa fileAccount) (Account, error) {
 		a.Concurrency = *fa.Concurrency
 	}
 	return a, nil
+}
+
+// defaultVendorFor is the vendor a backend implies when the block omits one.
+// CalDAV has none: it is the one backend several vendors share, which is why
+// Validate insists on a vendor or an explicit base_url.
+func defaultVendorFor(b model.Backend) model.Vendor {
+	switch b {
+	case model.BackendJMAP:
+		return model.VendorFastmail
+	case model.BackendGmail, model.BackendGCal:
+		return model.VendorGoogle
+	}
+	return ""
+}
+
+func setBackend(dst *model.Backend, src *string) {
+	if src != nil {
+		*dst = model.Backend(strings.ToLower(strings.TrimSpace(*src)))
+	}
+}
+
+func setVendor(dst *model.Vendor, src *string) {
+	if src != nil {
+		*dst = model.Vendor(strings.ToLower(strings.TrimSpace(*src)))
+	}
 }
 
 func setString(dst *string, src *string) {
@@ -291,13 +340,7 @@ func (c *Config) Validate() error {
 		} else {
 			seen[a.Name] = true
 		}
-		switch a.Provider {
-		case model.ProviderGmail, model.ProviderFastmail:
-		case "":
-			add("%s: provider is required (%s or %s)", label, model.ProviderGmail, model.ProviderFastmail)
-		default:
-			add("%s: unknown provider %q", label, a.Provider)
-		}
+		validateBackends(a, label, add)
 		if strings.TrimSpace(a.Email) == "" {
 			add("%s: email is required", label)
 		} else if !strings.Contains(a.Email, "@") {
@@ -312,9 +355,6 @@ func (c *Config) Validate() error {
 		if a.RawMaxSize != nil && *a.RawMaxSize < 0 {
 			add("%s: raw_max_size must not be negative", label)
 		}
-		if !a.Mail && !a.Calendar {
-			add("%s: mail and calendar are both false; the account would sync nothing", label)
-		}
 	}
 
 	if c.General.DefaultAccount != "" && !seen[c.General.DefaultAccount] {
@@ -325,4 +365,59 @@ func (c *Config) Validate() error {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrInvalid, strings.Join(errs, "; "))
+}
+
+// validateBackends checks one account's two resource blocks.
+func validateBackends(a *Account, label string, add func(string, ...any)) {
+	if a.Mail == nil && a.Calendar == nil {
+		add("%s: no [accounts.mail] and no [accounts.calendar] block; the account would sync nothing", label)
+		return
+	}
+
+	if m := a.Mail; m != nil {
+		switch {
+		case m.Backend == "":
+			add("%s: [%s.mail] backend is required (%s or %s)", label, label,
+				model.BackendJMAP, model.BackendGmail)
+		case !m.Backend.Valid(model.MailBackends):
+			if m.Backend.Valid(model.CalendarBackends) {
+				add("%s: %q is a calendar backend, not a mail backend", label, m.Backend)
+			} else {
+				add("%s: unknown mail backend %q", label, m.Backend)
+			}
+		}
+		if m.Vendor != "" && !m.Vendor.Valid() {
+			add("%s: unknown vendor %q", label, m.Vendor)
+		}
+		if m.Vendor == model.VendorICloud {
+			add("%s: there is no iCloud mail backend; iCloud accounts are calendar only", label)
+		}
+	}
+
+	if c := a.Calendar; c != nil {
+		switch {
+		case c.Backend == "":
+			add("%s: [%s.calendar] backend is required (%s, %s or %s)", label, label,
+				model.BackendCalDAV, model.BackendGCal, model.BackendJMAP)
+		case !c.Backend.Valid(model.CalendarBackends):
+			if c.Backend.Valid(model.MailBackends) {
+				add("%s: %q is a mail backend, not a calendar backend", label, c.Backend)
+			} else {
+				add("%s: unknown calendar backend %q", label, c.Backend)
+			}
+		}
+		if c.Vendor != "" && !c.Vendor.Valid() {
+			add("%s: unknown vendor %q", label, c.Vendor)
+		}
+		// CalDAV is the one backend several vendors share, so without a vendor
+		// preset or an explicit root there is no URL to talk to.
+		if c.Backend == model.BackendCalDAV && c.Vendor == "" && strings.TrimSpace(c.BaseURL) == "" {
+			add("%s: a caldav calendar needs vendor or base_url", label)
+		}
+	}
+
+	// push is a JMAP mail feature; anything else claiming it is a config lie.
+	if a.Push && (a.Mail == nil || a.Mail.Backend != model.BackendJMAP) {
+		add("%s: push requires a jmap mail backend", label)
+	}
 }

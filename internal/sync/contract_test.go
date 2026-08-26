@@ -2,6 +2,7 @@ package sync
 
 import (
 	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/provider/caldav"
 	"github.com/teulaert/emlcalsync/internal/provider/gcal"
 	"github.com/teulaert/emlcalsync/internal/provider/gmail"
 	"github.com/teulaert/emlcalsync/internal/provider/jmap"
@@ -20,6 +21,7 @@ var (
 
 	_ provider.MailProvider     = (*gmail.Mail)(nil)
 	_ provider.MailProvider     = (*jmap.Mail)(nil)
+	_ provider.CalendarProvider = (*caldav.Calendar)(nil)
 	_ provider.CalendarProvider = (*gcal.Calendar)(nil)
 	_ provider.CalendarProvider = (*jmap.Calendar)(nil)
 	_ provider.Pusher           = (*jmap.Client)(nil)

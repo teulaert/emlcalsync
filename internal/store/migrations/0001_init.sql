@@ -5,7 +5,7 @@
 
 CREATE TABLE accounts (
   id            TEXT PRIMARY KEY,
-  provider      TEXT NOT NULL,             -- 'gmail' | 'fastmail'
+  provider      TEXT NOT NULL,             -- vendor: 'google' | 'fastmail' | 'icloud' (informational)
   email         TEXT NOT NULL,
   created_at    INTEGER NOT NULL
 );

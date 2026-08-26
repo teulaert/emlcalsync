@@ -21,6 +21,9 @@ func (c *Calendar) EventChanges(ctx context.Context, calendarRemote, since strin
 	if calendarRemote == "" {
 		return nil, errors.New("caldav: EventChanges needs a calendar path")
 	}
+	if err := c.discover(ctx); err != nil {
+		return nil, err
+	}
 	c.log.Debug("caldav sync-collection", "calendar", calendarRemote, "initial", since == "")
 
 	ms, err := c.dav.report(ctx, calendarRemote, "1", syncCollectionBody(since))

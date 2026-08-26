@@ -114,7 +114,7 @@ func TestDoctor(t *testing.T) {
 			t.Errorf("check %s failed: %v", str(t, c, "check"), c)
 		}
 	}
-	for _, want := range []string{"config", "secret:work", "database", "blobs", "daemon", "online:work"} {
+	for _, want := range []string{"config", "secret:work.mail", "database", "blobs", "daemon", "online:work"} {
 		if _, ok := byName[want]; !ok {
 			t.Errorf("doctor did not run the %q check: %v", want, byName)
 		}

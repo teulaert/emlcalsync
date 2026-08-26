@@ -1,13 +1,12 @@
 // Package caldav implements provider.CalendarProvider on top of CalDAV
-// (RFC 4791), which is how emlcal reaches Fastmail calendars.
+// (RFC 4791). It is vendor-neutral: Fastmail and iCloud both serve calendars
+// this way, and a self-hosted server works by base URL alone. What differs
+// between them — the DAV root, where the user creates a password, whether the
+// conventional home path can be guessed — lives in presets.go.
 //
-// Fastmail's JMAP API tokens carry no calendars scope, so the JMAP client can
-// only report provider.ErrNotSupported for calendars (DESIGN.md §6.4 named
-// CalDAV as the documented fallback). This package is that fallback: it talks
-// to https://caldav.fastmail.com/dav/ with HTTP basic auth using the account's
-// email address and an **app password** created at
-// https://app.fastmail.com/settings/security/devices with access
-// "Calendars (CalDAV)".
+// Authentication is HTTP basic with a per-application password, never an
+// account login password. Fastmail's JMAP API tokens carry no calendars scope
+// (DESIGN.md §6.4), and iCloud requires an app-specific password.
 //
 // Deltas use RFC 6578 collection synchronisation: a sync-collection REPORT
 // with the stored sync-token returns the hrefs that changed and the hrefs that
@@ -20,6 +19,16 @@
 // {"ics":…,"href":…,"etag":…}) so an update can patch the object the server
 // actually holds instead of a lossy re-rendering of it, and so If-Match can
 // make that write conditional.
+//
+// # Hosts and hrefs
+//
+// Remote ids are bare paths, never absolute URLs, because they are persisted
+// in the events table. Some servers — iCloud in particular — answer discovery
+// with a calendar home on a different, per-user host (p<NN>-caldav.icloud.com).
+// The client therefore records that host separately and resolves every later
+// path against it, leaving stored ids untouched. Redirects are refused rather
+// than followed: Go rewrites a redirected PROPFIND or PUT into a GET, which
+// would silently do nothing.
 package caldav
 
 import (
@@ -30,18 +39,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/emersion/go-webdav"
-	wcaldav "github.com/emersion/go-webdav/caldav"
 
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/provider"
 )
-
-// DefaultBaseURL is Fastmail's DAV root. Calendars live under
-// <base>/calendars/user/<email>/.
-const DefaultBaseURL = "https://caldav.fastmail.com/dav/"
 
 // defaultTimeout bounds a single request. The multiget batches are the slow
 // calls and they are bounded by batchSize, not by the size of the calendar.
@@ -49,14 +52,18 @@ const defaultTimeout = 2 * time.Minute
 
 // Options configures a CalDAV Calendar provider.
 type Options struct {
-	// Email is the account's address. It is the basic-auth username, the
-	// fallback path segment for calendar discovery, and how the account's own
-	// ATTENDEE line is spotted.
+	// Email is the account's address: how the account's own ATTENDEE line is
+	// spotted, and the default basic-auth username.
 	Email string
-	// Password is a Fastmail **app password** (not the API token and not the
-	// login password).
+	// Username is the basic-auth user when it is not Email. An Apple ID is
+	// frequently not the iCloud address, while the address is still what
+	// identifies the user on an invitation.
+	Username string
+	// Password is a per-application password, not a login password.
 	Password string
-	// BaseURL is the DAV root; it defaults to DefaultBaseURL. Tests point it
+	// Vendor selects the preset. It may be empty when BaseURL is given.
+	Vendor model.Vendor
+	// BaseURL is the DAV root; empty takes the vendor preset's. Tests point it
 	// at an httptest server.
 	BaseURL string
 	// HTTPClient defaults to a client with defaultTimeout.
@@ -70,14 +77,19 @@ type Options struct {
 
 // Calendar is a CalDAV-backed provider.CalendarProvider.
 type Calendar struct {
-	dav  *davClient
-	disc *wcaldav.Client
-	log  *slog.Logger
-	opts Options
+	dav    *davClient
+	log    *slog.Logger
+	opts   Options
+	preset Preset
 
 	// home is the discovered calendar-home-set path, cached after the first
-	// successful Calendars call.
+	// successful discovery. Discovery may also move dav.host.
 	home string
+	// done guards discovery so the concurrent callers the sync engine and the
+	// outbox produce run it once.
+	once sync.Once
+	// discErr is the outcome of that single run.
+	discErr error
 }
 
 var _ provider.CalendarProvider = (*Calendar)(nil)
@@ -89,11 +101,15 @@ func New(opts Options) (*Calendar, error) {
 	if strings.TrimSpace(opts.Email) == "" {
 		return nil, errors.New("caldav: Options.Email is required")
 	}
+	preset, _ := PresetFor(opts.Vendor)
 	if strings.TrimSpace(opts.Password) == "" {
-		return nil, errors.New("caldav: Options.Password is required (a Fastmail app password with Calendars (CalDAV) access)")
+		return nil, fmt.Errorf("caldav: Options.Password is required (a %s)", preset.credentialPhrase())
 	}
 	if opts.BaseURL == "" {
-		opts.BaseURL = DefaultBaseURL
+		opts.BaseURL = preset.BaseURL
+	}
+	if opts.BaseURL == "" {
+		return nil, fmt.Errorf("caldav: no base URL: vendor %q has no preset, so Options.BaseURL is required", opts.Vendor)
 	}
 	base, err := url.Parse(opts.BaseURL)
 	if err != nil {
@@ -107,7 +123,15 @@ func New(opts Options) (*Calendar, error) {
 	}
 	hc := opts.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: defaultTimeout}
+		hc = &http.Client{
+			Timeout: defaultTimeout,
+			// Refuse redirects. Go turns a redirected PROPFIND, REPORT or PUT
+			// into a GET, so following one would silently drop the request;
+			// discovery adopts a redirect's host explicitly instead.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
 	}
 	log := opts.Logger
 	if log == nil {
@@ -118,81 +142,183 @@ func New(opts Options) (*Calendar, error) {
 		opts.BatchSize = defaultBatchSize
 	}
 
-	// go-webdav drives the two discovery PROPFINDs (current-user-principal
-	// and calendar-home-set); everything after that needs raw .ics text,
-	// sync-collection or If-Match, none of which its client exposes.
-	disc, err := wcaldav.NewClient(
-		webdav.HTTPClientWithBasicAuth(hc, opts.Email, opts.Password),
-		base.String(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("caldav: client for %s: %w", base, err)
-	}
-
 	return &Calendar{
-		dav:  &davClient{hc: hc, base: base, user: opts.Email, pass: opts.Password},
-		disc: disc,
-		log:  log,
-		opts: opts,
+		dav: &davClient{
+			hc:   hc,
+			base: base,
+			host: hostOf(base),
+			user: opts.User(),
+			pass: opts.Password,
+			cred: credential{name: preset.CredentialName, url: preset.CredentialURL},
+		},
+		log:    log,
+		opts:   opts,
+		preset: preset,
 	}, nil
 }
 
-// fallbackHome is the path Fastmail actually serves, used when discovery is
-// unavailable (an old server, a proxy that drops REPORT/PROPFIND on the root).
+// User is the basic-auth username: Username when set, else the address.
+func (o Options) User() string {
+	if s := strings.TrimSpace(o.Username); s != "" {
+		return s
+	}
+	return o.Email
+}
+
+// hostOf reduces a URL to scheme://host, dropping a default port so two
+// spellings of the same origin compare equal.
+func hostOf(u *url.URL) *url.URL {
+	out := &url.URL{Scheme: u.Scheme, Host: u.Host}
+	if (out.Scheme == "https" && out.Port() == "443") || (out.Scheme == "http" && out.Port() == "80") {
+		out.Host = out.Hostname()
+	}
+	return out
+}
+
+// fallbackHome is the conventional calendar home for this vendor, or "" when
+// there is no guessing it (iCloud's is a numeric account id).
 func (c *Calendar) fallbackHome() string {
-	return strings.TrimSuffix(c.dav.base.Path, "/") + "/calendars/user/" + c.opts.Email + "/"
+	if c.preset.HomeFallback == nil {
+		return ""
+	}
+	return c.preset.HomeFallback(c.dav.base, c.opts.User())
 }
 
-// calendarHome discovers the calendar-home-set, falling back to the
-// conventional Fastmail path. An authentication failure is fatal — every later
-// request would fail the same way — but any other discovery hiccup just means
-// the fallback is used.
-func (c *Calendar) calendarHome(ctx context.Context) (string, error) {
-	if c.home != "" {
-		return c.home, nil
-	}
-	principal, err := c.disc.FindCurrentUserPrincipal(ctx)
+// discover resolves the calendar home, and the host serving it, exactly once.
+//
+// It runs its own PROPFINDs rather than using go-webdav, whose
+// FindCurrentUserPrincipal and FindCalendarHomeSet both return only the path
+// of the href they found (caldav/client.go). That is fatal here: iCloud
+// answers with a home on a per-user partition host, and if the host is thrown
+// away every later request goes back to the front door and is redirected —
+// which, for a PROPFIND or a PUT, means silently turned into a GET.
+//
+// Every public method calls this. It cannot be a side effect of Calendars():
+// the outbox reaches CreateEvent and friends on a client that never listed
+// anything.
+func (c *Calendar) discover(ctx context.Context) error {
+	c.once.Do(func() { c.discErr = c.doDiscover(ctx) })
+	return c.discErr
+}
+
+func (c *Calendar) doDiscover(ctx context.Context) error {
+	principal, err := c.findHref(ctx, c.dav.base.Path, propfindPrincipal, func(p msProp) string {
+		return p.CurrentUserPrincipal.Href
+	})
 	if err != nil {
-		if ae := c.probeAuth(ctx, err); ae != nil {
-			return "", ae
-		}
-		c.log.Debug("caldav: current-user-principal lookup failed, using the default path", "err", err)
-		c.home = c.fallbackHome()
-		return c.home, nil
+		return c.discoveryFallback("current-user-principal", err)
 	}
-	home, err := c.disc.FindCalendarHomeSet(ctx, principal)
-	if err != nil || strings.TrimSpace(home) == "" {
-		c.log.Debug("caldav: calendar-home-set lookup failed, using the default path",
-			"principal", principal, "err", err)
-		c.home = c.fallbackHome()
-		return c.home, nil
+
+	home, err := c.findHref(ctx, principal.path, propfindHomeSet, func(p msProp) string {
+		return p.CalendarHomeSet.Href
+	})
+	if err != nil {
+		return c.discoveryFallback("calendar-home-set", err)
 	}
-	if !strings.HasSuffix(home, "/") {
-		home += "/"
+
+	// The home's host wins; failing that the principal's, which is where the
+	// server first pointed us.
+	switch {
+	case home.host != nil:
+		c.dav.host = home.host
+	case principal.host != nil:
+		c.dav.host = principal.host
 	}
-	c.home = home
-	return c.home, nil
+	path := home.path
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+	c.home = path
+	c.log.Debug("caldav discovered calendar home", "home", c.home, "host", c.dav.host)
+	return nil
 }
 
-// probeAuth turns a discovery failure into an *AuthError when the credentials
-// are the problem. go-webdav hides its HTTP status behind an unexported type,
-// so the check is a cheap PROPFIND of our own on the same URL.
-func (c *Calendar) probeAuth(ctx context.Context, cause error) error {
-	var ae *AuthError
-	if errors.As(cause, &ae) {
+// discoveryFallback decides what a failed discovery step means. Bad
+// credentials are always fatal — every later request would fail the same way —
+// and so is any failure at all when the vendor has no conventional home path
+// to fall back on.
+func (c *Calendar) discoveryFallback(step string, cause error) error {
+	if ae := c.probeAuth(cause); ae != nil {
 		return ae
 	}
-	if !strings.Contains(cause.Error(), "401") && !strings.Contains(cause.Error(), "Unauthorized") {
-		return nil
+	fb := c.fallbackHome()
+	if fb == "" {
+		return wrapErr("discover "+step, fmt.Errorf(
+			"%w; %s calendars have no conventional path to fall back on",
+			cause, vendorLabel(c.opts.Vendor)))
 	}
-	_, err := c.dav.propfind(ctx, c.dav.base.Path, "0", propfindPrincipal)
-	if errors.As(err, &ae) {
+	c.log.Debug("caldav: "+step+" lookup failed, using the default path", "err", cause, "home", fb)
+	c.home = fb
+	return nil
+}
+
+func vendorLabel(v model.Vendor) string {
+	if v == "" {
+		return "this server's"
+	}
+	return string(v)
+}
+
+// href is one discovered location: its path, and the host it named if it was
+// an absolute URL.
+type href struct {
+	path string
+	host *url.URL
+}
+
+// findHref issues one PROPFIND and pulls a single href out of the response.
+func (c *Calendar) findHref(ctx context.Context, at, body string, pick func(msProp) string) (href, error) {
+	c.log.Debug("caldav propfind", "path", at, "depth", 0)
+	ms, err := c.dav.propfind(ctx, at, "0", body)
+	if err != nil {
+		return href{}, err
+	}
+	for i := range ms.Responses {
+		prop, ok := ms.Responses[i].ok()
+		if !ok {
+			continue
+		}
+		raw := strings.TrimSpace(pick(prop))
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			return href{}, fmt.Errorf("bad href %q: %w", raw, err)
+		}
+		out := href{path: hrefPath(raw)}
+		if u.IsAbs() {
+			out.host = hostOf(u)
+		}
+		if out.path == "" {
+			continue
+		}
+		return out, nil
+	}
+	return href{}, fmt.Errorf("no href in the response")
+}
+
+// probeAuth returns the AuthError carried by err, if any.
+func (c *Calendar) probeAuth(cause error) *AuthError {
+	var ae *AuthError
+	if errors.As(cause, &ae) {
 		return ae
 	}
 	return nil
 }
 
+// calendarHome returns the discovered calendar-home-set path.
+func (c *Calendar) calendarHome(ctx context.Context) (string, error) {
+	if err := c.discover(ctx); err != nil {
+		return "", err
+	}
+	return c.home, nil
+}
+
 const propfindPrincipal = `<d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>`
+
+const propfindHomeSet = `<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">` +
+	`<d:prop><c:calendar-home-set/></d:prop></d:propfind>`
 
 const propfindCalendars = `<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:ic="http://apple.com/ns/ical/">
   <d:prop>
@@ -250,7 +376,7 @@ func (c *Calendar) Calendars(ctx context.Context) ([]model.Calendar, error) {
 			AccessRole: accessRole(prop.Privileges),
 		})
 	}
-	markPrimary(out)
+	markPrimary(out, c.preset.PrimaryNames)
 	return out, nil
 }
 
@@ -306,16 +432,18 @@ func normaliseColor(s string) string {
 	return s
 }
 
-// markPrimary flags the account's main calendar: the one Fastmail calls
-// "Calendar", else the collection at .../Default/, else the first.
-func markPrimary(cals []model.Calendar) {
+// markPrimary flags the account's main calendar: one the vendor names as its
+// default, else the collection at .../Default/, else the first.
+func markPrimary(cals []model.Calendar, names []string) {
 	if len(cals) == 0 {
 		return
 	}
-	for i := range cals {
-		if strings.EqualFold(cals[i].Name, "Calendar") {
-			cals[i].Primary = true
-			return
+	for _, want := range names {
+		for i := range cals {
+			if strings.EqualFold(cals[i].Name, want) {
+				cals[i].Primary = true
+				return
+			}
 		}
 	}
 	for i := range cals {

@@ -16,15 +16,28 @@ import (
 // preconditions live in the first few hundred bytes; the rest is noise.
 const maxErrorBody = 2048
 
+// credential describes the password this client presents, for error messages.
+type credential struct {
+	name string // "app password", "app-specific password"
+	url  string // where the user creates one
+}
+
 // davClient is the thin WebDAV/CalDAV transport this package needs. It exists
-// instead of go-webdav's client because emlcal needs three things that client
+// instead of go-webdav's client because emlcal needs four things that client
 // does not offer: the raw .ics text (go-webdav decodes and discards it), a
-// sync-collection REPORT (implemented for CardDAV only), and If-Match on PUT.
+// sync-collection REPORT (implemented for CardDAV only), If-Match on PUT, and
+// the *host* an href names — go-webdav's discovery returns only the path,
+// which loses iCloud's per-user partition host.
 type davClient struct {
-	hc   *http.Client
+	hc *http.Client
+	// base is the configured DAV root, where discovery starts.
 	base *url.URL
+	// host is scheme://host that requests actually go to. It equals base's
+	// origin until discovery moves it.
+	host *url.URL
 	user string
 	pass string
+	cred credential
 }
 
 // resolve turns a server path (the form hrefs come back in, already
@@ -42,6 +55,9 @@ func (d *davClient) resolve(ref string) (*url.URL, error) {
 		return nil, fmt.Errorf("caldav: empty path")
 	}
 	out := *d.base
+	if d.host != nil {
+		out.Scheme, out.Host = d.host.Scheme, d.host.Host
+	}
 	out.RawPath = ""
 	out.RawQuery = ""
 	out.Fragment = ""
@@ -93,8 +109,22 @@ func (d *davClient) do(ctx context.Context, method, ref string, body []byte, hdr
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, &AuthError{Email: d.user, Status: resp.StatusCode, Detail: truncate(string(raw))}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden && isAuthBody(raw) {
+		return nil, &AuthError{
+			Email: d.user, Status: resp.StatusCode, Detail: truncate(string(raw)),
+			CredentialName: d.cred.name, CredentialURL: d.cred.url,
+		}
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		// Never followed: Go rewrites a redirected PROPFIND/REPORT/PUT into a
+		// GET, so the request would appear to succeed while doing nothing.
+		// Discovery adopts the new host explicitly; anything else is a bug or
+		// a misconfigured root.
+		return nil, &httpError{
+			Method: method, Path: u.Path, Code: resp.StatusCode,
+			Body: "server redirected to " + resp.Header.Get("Location") +
+				"; the client does not follow redirects (it would downgrade the method to GET)",
+		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, &httpError{Method: method, Path: u.Path, Code: resp.StatusCode, Body: truncate(string(raw))}
@@ -277,4 +307,12 @@ func xmlEscape(s string) string {
 	var buf bytes.Buffer
 	_ = xml.EscapeText(&buf, []byte(s))
 	return buf.String()
+}
+
+// isAuthBody reports whether a 403 body looks like a credential problem rather
+// than a per-request denial. Kept deliberately narrow: a 403 is normally a
+// precondition failure, which callers classify themselves.
+func isAuthBody(b []byte) bool {
+	s := strings.ToLower(string(b))
+	return strings.Contains(s, "invalid credential") || strings.Contains(s, "authentication")
 }

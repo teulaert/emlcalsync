@@ -20,17 +20,29 @@ raw_max_size   = "0"                    # global default, per-account override
 
 [[accounts]]
 name     = "work"
-provider = "gmail"
 email    = "lennert@example.com"
 poll     = "60s"
 include_spam_trash = true
 
+  [accounts.mail]
+  backend = "gmail"
+
+  [accounts.calendar]
+  backend = "gcal"
+
 [[accounts]]
 name     = "personal"
-provider = "fastmail"
 email    = "lennert@fastmail.example"
 push     = true
 calendars = ["*"]                       # or explicit list of names
+
+  [accounts.mail]
+  backend = "jmap"
+
+  [accounts.calendar]
+  backend = "caldav"
+  vendor  = "fastmail"
+
 `
 
 // writeTemp puts contents in a fresh directory and returns the file path.
@@ -72,7 +84,7 @@ func TestLoadDesignExample(t *testing.T) {
 	if !ok {
 		t.Fatal("account work missing")
 	}
-	if work.Provider != model.ProviderGmail || work.Email != "lennert@example.com" {
+	if work.Vendor() != model.VendorGoogle || work.Email != "lennert@example.com" {
 		t.Errorf("work = %+v", work)
 	}
 	if work.Poll.Duration() != 60*time.Second {
@@ -92,14 +104,17 @@ func TestLoadDesignExample(t *testing.T) {
 	if !ok {
 		t.Fatal("account personal missing")
 	}
-	if personal.Provider != model.ProviderFastmail {
-		t.Errorf("personal provider = %q", personal.Provider)
+	if personal.Vendor() != model.VendorFastmail {
+		t.Errorf("personal vendor = %q", personal.Vendor())
+	}
+	if personal.Calendar == nil || personal.Calendar.Backend != model.BackendCalDAV {
+		t.Errorf("personal calendar = %+v, want a caldav backend", personal.Calendar)
 	}
 	if !personal.Push {
 		t.Error("fastmail push should be true")
 	}
-	if personal.Poll.Duration() != DefaultPollFastmail {
-		t.Errorf("personal poll = %v, want the fastmail fallback %v", personal.Poll, DefaultPollFastmail)
+	if personal.Poll.Duration() != DefaultPollJMAP {
+		t.Errorf("personal poll = %v, want the fastmail fallback %v", personal.Poll, DefaultPollJMAP)
 	}
 	if !personal.IncludeSpamTrash {
 		t.Error("include_spam_trash should default to true")
@@ -143,7 +158,6 @@ raw_max_size = "25MB"
 
 [[accounts]]
 name = "work"
-provider = "gmail"
 email = "a@b.example"
 poll = "5m"
 push = false
@@ -151,6 +165,13 @@ include_spam_trash = false
 raw_max_size = "0"
 calendars = ["Work", "Family"]
 concurrency = 8
+
+  [accounts.mail]
+  backend = "gmail"
+
+  [accounts.calendar]
+  backend = "gcal"
+
 `)
 	c, err := Load(p)
 	if err != nil {
@@ -195,9 +216,9 @@ func TestValidate(t *testing.T) {
 		{"bad account id", func(c *Config) {
 			c.Accounts[0].Name = "Work Account"
 		}, "[a-z0-9-]"},
-		{"unknown provider", func(c *Config) {
-			c.Accounts[0].Provider = "outlook"
-		}, "unknown provider"},
+		{"unknown mail backend", func(c *Config) {
+			c.Accounts[0].Mail = &MailBackend{Backend: "outlook"}
+		}, "unknown mail backend"},
 		{"missing email", func(c *Config) {
 			c.Accounts[0].Email = ""
 		}, "email is required"},
@@ -215,7 +236,8 @@ func TestValidate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := Default()
 			c.Accounts = []Account{{
-				Name: "work", Provider: model.ProviderGmail, Email: "a@b.example",
+				Name: "work", Email: "a@b.example",
+				Mail: &MailBackend{Backend: model.BackendGmail, Vendor: model.VendorGoogle},
 			}}
 			tc.cfg(c)
 			err := c.Validate()
@@ -377,13 +399,17 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	orig.General.DataDir = filepath.Join(dir, "data")
 	orig.Accounts = []Account{
 		{
-			Name: "work", Provider: model.ProviderGmail, Email: "lennert@example.com",
-			Poll: Duration(90 * time.Second), Push: false, IncludeSpamTrash: false,
+			Name: "work", Email: "lennert@example.com",
+			Mail:     &MailBackend{Backend: model.BackendGmail, Vendor: model.VendorGoogle},
+			Calendar: &CalendarBackend{Backend: model.BackendGCal, Vendor: model.VendorGoogle},
+			Poll:     Duration(90 * time.Second), Push: false, IncludeSpamTrash: false,
 			RawMaxSize: &max, Calendars: []string{"Work"}, Concurrency: 8,
 		},
 		{
-			Name: "personal", Provider: model.ProviderFastmail, Email: "l@fastmail.example",
-			Poll: Duration(DefaultPollFastmail), Push: true, IncludeSpamTrash: true,
+			Name: "personal", Email: "l@fastmail.example",
+			Mail:     &MailBackend{Backend: model.BackendJMAP, Vendor: model.VendorFastmail},
+			Calendar: &CalendarBackend{Backend: model.BackendCalDAV, Vendor: model.VendorFastmail},
+			Poll:     Duration(DefaultPollJMAP), Push: true, IncludeSpamTrash: true,
 			Calendars: []string{"*"}, Concurrency: DefaultConcurrency,
 		},
 	}
@@ -420,7 +446,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	for i := range orig.Accounts {
 		a, b := orig.Accounts[i], back.Accounts[i]
-		if a.Name != b.Name || a.Provider != b.Provider || a.Email != b.Email ||
+		if a.Name != b.Name || a.Vendor() != b.Vendor() || a.Email != b.Email ||
+			!sameMail(a.Mail, b.Mail) || !sameCalendar(a.Calendar, b.Calendar) ||
 			a.Poll != b.Poll || a.Push != b.Push || a.IncludeSpamTrash != b.IncludeSpamTrash ||
 			a.Concurrency != b.Concurrency || !equalStrings(a.Calendars, b.Calendars) {
 			t.Errorf("account %d changed:\n orig %+v\n back %+v", i, a, b)
@@ -437,8 +464,10 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 func TestSaveEscapesStrings(t *testing.T) {
 	c := Default()
 	c.Accounts = []Account{{
-		Name: "work", Provider: model.ProviderGmail, Email: `a"b@example.com`,
-		Poll: Duration(DefaultPollGmail), IncludeSpamTrash: true,
+		Name: "work", Email: `a"b@example.com`,
+		Mail:     &MailBackend{Backend: model.BackendGmail, Vendor: model.VendorGoogle},
+		Calendar: &CalendarBackend{Backend: model.BackendGCal, Vendor: model.VendorGoogle},
+		Poll:     Duration(DefaultPollGmail), IncludeSpamTrash: true,
 		Calendars: []string{`Odd "name"`}, Concurrency: DefaultConcurrency,
 	}}
 	p := filepath.Join(t.TempDir(), "config.toml")
@@ -474,11 +503,7 @@ func TestFileSecrets(t *testing.T) {
 		t.Errorf("secrets dir mode = %o, want 700", perm)
 	}
 
-	key := (&Account{Name: "work", Provider: model.ProviderGmail}).SecretKey()
-	if key != "work.gmail.json" {
-		t.Errorf("SecretKey = %q", key)
-	}
-
+	key := "work.google.json"
 	if _, err := s.Get(key); !errors.Is(err, model.ErrNotFound) {
 		t.Errorf("missing secret should wrap model.ErrNotFound, got %v", err)
 	}
@@ -575,13 +600,25 @@ default_account = "personal"
 
 [[accounts]]
 name = "work"
-provider = "gmail"
 email = "a@b.example"
+
+  [accounts.mail]
+  backend = "gmail"
+
+  [accounts.calendar]
+  backend = "gcal"
 
 [[accounts]]
 name = "personal"
-provider = "fastmail"
 email = "c@d.example"
+
+  [accounts.mail]
+  backend = "jmap"
+
+  [accounts.calendar]
+  backend = "caldav"
+  vendor  = "fastmail"
+
 `)
 	c, err := Load(p)
 	if err != nil {
@@ -612,7 +649,8 @@ func TestDefaultAccountSurvivesSave(t *testing.T) {
 	c := Default()
 	c.General.DefaultAccount = "work"
 	c.Accounts = []Account{{
-		Name: "work", Provider: model.ProviderGmail, Email: "a@b.example",
+		Name: "work", Email: "a@b.example",
+		Mail: &MailBackend{Backend: model.BackendGmail, Vendor: model.VendorGoogle},
 		Poll: Duration(DefaultPollGmail), IncludeSpamTrash: true,
 		Calendars: []string{"*"}, Concurrency: DefaultConcurrency,
 	}}
@@ -636,15 +674,28 @@ func TestIncludeSpamTrashDefaultsTrue(t *testing.T) {
 	// Neither provider opts out by default: Junk and Trash are part of the
 	// archive unless the account explicitly says otherwise.
 	p := writeTemp(t, "config.toml", `
+
 [[accounts]]
 name = "work"
-provider = "gmail"
 email = "a@b.example"
+
+  [accounts.mail]
+  backend = "gmail"
+
+  [accounts.calendar]
+  backend = "gcal"
 
 [[accounts]]
 name = "personal"
-provider = "fastmail"
 email = "c@d.example"
+
+  [accounts.mail]
+  backend = "jmap"
+
+  [accounts.calendar]
+  backend = "caldav"
+  vendor  = "fastmail"
+
 `)
 	c, err := Load(p)
 	if err != nil {
@@ -661,24 +712,35 @@ email = "c@d.example"
 // Per-account mail/calendar toggles
 
 // An absent key means the half is on: only an explicit false switches it off.
-func TestAccountResourceTogglesDefaultToTrue(t *testing.T) {
+// A resource block's presence is what switches that resource on; there are no
+// mail/calendar booleans to disagree with it.
+func TestAccountResourcesFollowTheirBlocks(t *testing.T) {
 	path := writeTemp(t, "config.toml", `
+
 [[accounts]]
 name = "work"
-provider = "gmail"
 email = "me@work.example"
+
+  [accounts.mail]
+  backend = "gmail"
+
+  [accounts.calendar]
+  backend = "gcal"
 
 [[accounts]]
 name = "cal-only"
-provider = "gmail"
 email = "me@corp.example"
-mail = false
+
+  [accounts.calendar]
+  backend = "gcal"
 
 [[accounts]]
 name = "mail-only"
-provider = "fastmail"
 email = "me@fastmail.example"
-calendar = false
+
+  [accounts.mail]
+  backend = "jmap"
+
 `)
 	c, err := Load(path)
 	if err != nil {
@@ -700,9 +762,9 @@ calendar = false
 		if !ok {
 			t.Fatalf("no account %q", tc.name)
 		}
-		if a.Mail != tc.mail || a.Calendar != tc.calendar {
+		if a.SyncsMail() != tc.mail || a.SyncsCalendar() != tc.calendar {
 			t.Errorf("%s: mail=%v calendar=%v, want mail=%v calendar=%v",
-				tc.name, a.Mail, a.Calendar, tc.mail, tc.calendar)
+				tc.name, a.SyncsMail(), a.SyncsCalendar(), tc.mail, tc.calendar)
 		}
 		if a.Syncs("mail") != tc.mail || a.Syncs("calendar") != tc.calendar {
 			t.Errorf("%s: Syncs disagrees with the fields", tc.name)
@@ -715,14 +777,13 @@ calendar = false
 
 // An account with both halves off would sync nothing, which is a mistake worth
 // naming rather than a configuration to honour.
-func TestValidateRejectsAnAccountWithBothResourcesOff(t *testing.T) {
+func TestValidateRejectsAnAccountWithNoResourceBlocks(t *testing.T) {
 	path := writeTemp(t, "config.toml", `
+
 [[accounts]]
 name = "work"
-provider = "gmail"
 email = "me@work.example"
-mail = false
-calendar = false
+
 `)
 	c, err := Load(path)
 	if err != nil {
@@ -735,24 +796,23 @@ calendar = false
 	if !errors.Is(err, ErrInvalid) {
 		t.Errorf("error should wrap ErrInvalid: %v", err)
 	}
-	if !strings.Contains(err.Error(), "mail and calendar are both false") {
+	if !strings.Contains(err.Error(), "would sync nothing") {
 		t.Errorf("error %q does not explain the problem", err)
 	}
 }
 
-// Save writes a one-sided toggle and nothing else; a config built in Go
-// without the fields must not become a file that Load then refuses.
-func TestSaveRoundTripsResourceToggles(t *testing.T) {
+// A block is written iff the account has one, and an account built in Go with
+// no blocks at all must not become a file Load then refuses.
+func TestSaveRoundTripsResourceBlocks(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 
 	c := Default()
 	c.Accounts = []Account{
-		{Name: "cal-only", Provider: model.ProviderGmail, Email: "a@b.example",
-			Mail: false, Calendar: true, Calendars: []string{"*"}, Concurrency: DefaultConcurrency},
-		// Zero value for both, the way a Go caller that predates the toggles
-		// builds an account.
-		{Name: "legacy", Provider: model.ProviderGmail, Email: "c@d.example"},
+		{Name: "cal-only", Email: "a@b.example",
+			Calendar:  &CalendarBackend{Backend: model.BackendGCal, Vendor: model.VendorGoogle},
+			Calendars: []string{"*"}, Concurrency: DefaultConcurrency},
+		NewAccount("both", "c@d.example", model.VendorGoogle),
 	}
 	if err := Save(path, c); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -761,11 +821,11 @@ func TestSaveRoundTripsResourceToggles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), "mail     = false") {
-		t.Errorf("the switched-off half was not written:\n%s", b)
+	if strings.Count(string(b), "\n  [accounts.calendar]") != 2 {
+		t.Errorf("want a calendar block on both accounts:\n%s", b)
 	}
-	if strings.Contains(string(b), "calendar = false") {
-		t.Errorf("Save wrote a config it would refuse to load:\n%s", b)
+	if strings.Count(string(b), "\n  [accounts.mail]") != 1 {
+		t.Errorf("cal-only must not get a mail block:\n%s", b)
 	}
 
 	got, err := Load(path)
@@ -776,11 +836,27 @@ func TestSaveRoundTripsResourceToggles(t *testing.T) {
 		t.Fatalf("Validate after round trip: %v", err)
 	}
 	a, _ := got.Account("cal-only")
-	if a.Mail || !a.Calendar {
-		t.Errorf("cal-only came back as mail=%v calendar=%v", a.Mail, a.Calendar)
+	if a.SyncsMail() || !a.SyncsCalendar() {
+		t.Errorf("cal-only came back as mail=%v calendar=%v", a.SyncsMail(), a.SyncsCalendar())
 	}
-	l, _ := got.Account("legacy")
-	if !l.Mail || !l.Calendar {
-		t.Errorf("legacy came back as mail=%v calendar=%v, want both on", l.Mail, l.Calendar)
+	l, _ := got.Account("both")
+	if !l.SyncsMail() || !l.SyncsCalendar() {
+		t.Errorf("both came back as mail=%v calendar=%v, want both on", l.SyncsMail(), l.SyncsCalendar())
 	}
+}
+
+// sameMail and sameCalendar compare two backend blocks including nil-ness, so
+// a round trip that drops or invents a block is caught.
+func sameMail(a, b *MailBackend) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func sameCalendar(a, b *CalendarBackend) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

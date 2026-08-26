@@ -19,7 +19,7 @@ func init() {
 // coreStatusRow is the per-account line of `emlcal status`.
 type coreStatusRow struct {
 	Name            string      `json:"account"          table:"ACCOUNT"`
-	Provider        string      `json:"provider"         table:"PROVIDER"`
+	Vendor          string      `json:"vendor"           table:"VENDOR"`
 	Email           string      `json:"email"            table:"EMAIL"`
 	Messages        int         `json:"messages"         table:"MESSAGES"`
 	Unread          int         `json:"unread"           table:"UNREAD"`
@@ -32,10 +32,10 @@ type coreStatusRow struct {
 	Backfill        string      `json:"backfill,omitempty" table:"BACKFILL"`
 	BackfillPercent float64     `json:"backfill_percent,omitempty"`
 	OutboxPending   int         `json:"outbox_pending"   table:"OUTBOX"`
-	// Mail/Calendar are the per-account toggles; Disabled is the same fact
-	// spelled for the table ("mail off").
-	Mail     bool   `json:"mail"`
-	Calendar bool   `json:"calendar"`
+	// Mail/Calendar name each resource's backend, or "-" when the account has
+	// no block for it; Disabled is the same fact spelled for the table.
+	Mail     string `json:"mail"`
+	Calendar string `json:"calendar"`
 	Disabled string `json:"disabled,omitempty" table:"DISABLED"`
 }
 
@@ -88,8 +88,10 @@ func coreStatus(app *App) error {
 			return err
 		}
 		row := coreStatusRow{
-			Name: name, Provider: string(acct.Provider), Email: acct.Email,
-			Mail: acct.Mail, Calendar: acct.Calendar, Disabled: coreDisabledLabel(acct),
+			Name: name, Vendor: string(acct.Vendor()), Email: acct.Email,
+			Mail:     coreBackendLabel(acct.Mail != nil, func() string { return string(acct.Mail.Backend) }),
+			Calendar: coreBackendLabel(acct.Calendar != nil, func() string { return string(acct.Calendar.Backend) }),
+			Disabled: coreDisabledLabel(acct),
 		}
 		if st != nil {
 			if s, err := st.AccountStats(ctx, name); err == nil {
@@ -147,14 +149,22 @@ func coreStatus(app *App) error {
 // in code; it is still worth showing rather than silently picking one.
 func coreDisabledLabel(acct *config.Account) string {
 	switch {
-	case !acct.Mail && !acct.Calendar:
+	case !acct.SyncsMail() && !acct.SyncsCalendar():
 		return "mail off, calendar off"
-	case !acct.Mail:
+	case !acct.SyncsMail():
 		return "mail off"
-	case !acct.Calendar:
+	case !acct.SyncsCalendar():
 		return "calendar off"
 	}
 	return ""
+}
+
+// coreBackendLabel names a configured backend, or "-" when the block is absent.
+func coreBackendLabel(present bool, name func() string) string {
+	if !present {
+		return "-"
+	}
+	return name()
 }
 
 func corePercent(done, total int) float64 {

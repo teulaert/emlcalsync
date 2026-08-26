@@ -28,6 +28,9 @@ func (c *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev *m
 	if calendarRemote == "" || ev == nil {
 		return nil, errors.New("caldav: CreateEvent needs a calendar path and an event")
 	}
+	if err := c.discover(ctx); err != nil {
+		return nil, err
+	}
 	uid := strings.TrimSpace(ev.UID)
 	if uid == "" {
 		var err error
@@ -68,6 +71,9 @@ func (c *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev *m
 func (c *Calendar) UpdateEvent(ctx context.Context, ev *model.Event) (*model.Event, error) {
 	if ev == nil || ev.RemoteID == "" {
 		return nil, errors.New("caldav: UpdateEvent needs an event with a remote id")
+	}
+	if err := c.discover(ctx); err != nil {
+		return nil, err
 	}
 	if isExceptionRemoteID(ev.RemoteID) {
 		return nil, fmt.Errorf("caldav: %s is one occurrence of %s, and writing a single "+
@@ -117,6 +123,9 @@ func (c *Calendar) DeleteEvent(ctx context.Context, calendarRemote, remoteID str
 	if remoteID == "" {
 		return errors.New("caldav: DeleteEvent needs a remote id")
 	}
+	if err := c.discover(ctx); err != nil {
+		return err
+	}
 	if isExceptionRemoteID(remoteID) {
 		return fmt.Errorf("caldav: %s is one occurrence of %s, and excluding a single "+
 			"occurrence with an EXDATE is not implemented",
@@ -144,6 +153,9 @@ func (c *Calendar) Respond(ctx context.Context, calendarRemote, remoteID string,
 	if isExceptionRemoteID(remoteID) {
 		return fmt.Errorf("caldav: %s is one occurrence of %s, and responding to a single "+
 			"occurrence is not implemented", remoteID, objectHref(remoteID))
+	}
+	if err := c.discover(ctx); err != nil {
+		return err
 	}
 	ics, etag, err := c.getObject(ctx, remoteID)
 	if err != nil {

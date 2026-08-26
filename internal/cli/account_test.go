@@ -40,9 +40,9 @@ func TestAccountList(t *testing.T) {
 	}
 	got := map[string]string{}
 	for _, r := range rows {
-		got[r["name"].(string)] = r["provider"].(string)
+		got[r["name"].(string)] = r["vendor"].(string)
 	}
-	if got["work"] != "fastmail" || got["home"] != "gmail" {
+	if got["work"] != "fastmail" || got["home"] != "google" {
 		t.Fatalf("account list = %v", got)
 	}
 }
@@ -57,7 +57,7 @@ func TestAccountAddFastmail(t *testing.T) {
 
 	out := env.MustRun("account", "add", "fastmail", "--name", "extra", "--email", "x@y.example", "--token-stdin")
 	row := coreDecodeOne[map[string]any](t, out)
-	if row["name"] != "extra" || row["provider"] != "fastmail" {
+	if row["name"] != "extra" || row["vendor"] != "fastmail" {
 		t.Fatalf("add printed %v", row)
 	}
 
@@ -69,7 +69,7 @@ func TestAccountAddFastmail(t *testing.T) {
 	if !ok {
 		t.Fatalf("config does not contain the new account: %+v", cfg.Accounts)
 	}
-	if !acct.Push || !acct.IncludeSpamTrash || acct.Poll.Duration() != config.DefaultPollFastmail {
+	if !acct.Push || !acct.IncludeSpamTrash || acct.Poll.Duration() != config.DefaultPollJMAP {
 		t.Errorf("defaults not applied: %+v", acct)
 	}
 
@@ -78,7 +78,7 @@ func TestAccountAddFastmail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, err := sec.Get(FastmailTokenKey(*acct))
+	tok, err := sec.Get(JMAPTokenKey(*acct))
 	if err != nil {
 		t.Fatalf("token not stored: %v", err)
 	}

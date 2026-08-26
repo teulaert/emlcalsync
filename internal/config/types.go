@@ -193,26 +193,66 @@ type General struct {
 	SecretBackend string `toml:"secret_backend"`
 }
 
-// Account is one [[accounts]] entry with defaults applied.
-type Account struct {
-	Name     string         `toml:"name"`
-	Provider model.Provider `toml:"provider"`
-	Email    string         `toml:"email"`
+// MailBackend is the [accounts.mail] table. Its presence is the on switch: an
+// account with no mail block (an iCloud calendar, a Workspace calendar) simply
+// has none.
+type MailBackend struct {
+	// Backend is the protocol: "jmap" or "gmail".
+	Backend model.Backend `toml:"backend"`
+	// Vendor is who runs it. Empty means the backend's implied default.
+	Vendor model.Vendor `toml:"vendor"`
+}
 
-	// Poll is the fallback poll interval: 60s for Gmail, 300s for Fastmail
-	// (which normally rides the push stream instead).
+// CalendarBackend is the [accounts.calendar] table.
+type CalendarBackend struct {
+	// Backend is the protocol: "caldav", "gcal" or "jmap".
+	Backend model.Backend `toml:"backend"`
+	// Vendor selects the CalDAV preset (base URL, credential help, primary
+	// calendar names). Empty is only allowed alongside an explicit BaseURL.
+	Vendor model.Vendor `toml:"vendor"`
+	// BaseURL overrides the vendor preset's DAV root: self-hosted CalDAV, and
+	// tests pointing at an httptest server.
+	BaseURL string `toml:"base_url"`
+	// Username is the basic-auth user when it is not Account.Email. An Apple ID
+	// is frequently not the iCloud address, while the address is still what
+	// must match the account's own ATTENDEE line.
+	Username string `toml:"username"`
+}
+
+// User returns the basic-auth username for this calendar backend, defaulting to
+// the account's own address.
+func (c *CalendarBackend) User(email string) string {
+	if s := strings.TrimSpace(c.Username); s != "" {
+		return s
+	}
+	return email
+}
+
+// Account is one [[accounts]] entry with defaults applied.
+//
+// Mail and Calendar are the account's two resources. Each is served by its own
+// backend with its own credential and its own sync state — a Fastmail account
+// is JMAP mail plus CalDAV calendars — and a nil block means the account does
+// not sync that resource at all.
+type Account struct {
+	Name  string `toml:"name"`
+	Email string `toml:"email"`
+
+	// Mail is the [accounts.mail] block; nil syncs no mail.
+	Mail *MailBackend `toml:"mail"`
+	// Calendar is the [accounts.calendar] block; nil syncs no calendars.
+	Calendar *CalendarBackend `toml:"calendar"`
+
+	// Poll is the fallback poll interval, shaped by the mail backend: 60s for
+	// Gmail, 300s for JMAP (which normally rides the push stream instead).
+	// On a calendar-only account it is the calendar poll.
 	Poll Duration `toml:"poll"`
-	// Push enables the provider push stream where it exists (Fastmail).
+	// Push enables the provider push stream where it exists (JMAP).
 	Push bool `toml:"push"`
 	// IncludeSpamTrash indexes Junk and Trash as well.
 	IncludeSpamTrash bool `toml:"include_spam_trash"`
 	// RawMaxSize overrides General.RawMaxSize when non-nil.
 	RawMaxSize *Size `toml:"raw_max_size"`
-	// Mail enables the mail half of the account (default true). A Workspace
-	// account synced for its calendar only sets `mail = false`.
-	Mail bool `toml:"mail"`
-	// Calendar enables the calendar half of the account (default true).
-	Calendar bool `toml:"calendar"`
 	// Calendars lists calendar names to sync; ["*"] means all.
 	Calendars []string `toml:"calendars"`
 	// Concurrency is the number of in-flight provider requests.
@@ -225,9 +265,41 @@ const (
 	DefaultSecretBackend = "file"
 	DefaultConcurrency   = 4
 
-	DefaultPollGmail    = 60 * time.Second
-	DefaultPollFastmail = 300 * time.Second
+	DefaultPollGmail  = 60 * time.Second
+	DefaultPollJMAP   = 300 * time.Second
+	DefaultPollCalDAV = 300 * time.Second
 )
+
+// NewAccount returns the account `emlcal account add <vendor>` would write.
+//
+// It exists because the zero Account syncs nothing: with per-resource backends
+// the blocks are pointers, so a hand-built config.Account{Name: …} has neither
+// half switched on.
+func NewAccount(name, email string, v model.Vendor) Account {
+	a := Account{
+		Name:             name,
+		Email:            email,
+		IncludeSpamTrash: true,
+		Calendars:        []string{"*"},
+		Concurrency:      DefaultConcurrency,
+	}
+	switch v {
+	case model.VendorGoogle:
+		a.Mail = &MailBackend{Backend: model.BackendGmail, Vendor: v}
+		a.Calendar = &CalendarBackend{Backend: model.BackendGCal, Vendor: v}
+		a.Poll = Duration(DefaultPollGmail)
+	case model.VendorFastmail:
+		a.Mail = &MailBackend{Backend: model.BackendJMAP, Vendor: v}
+		a.Calendar = &CalendarBackend{Backend: model.BackendCalDAV, Vendor: v}
+		a.Poll = Duration(DefaultPollJMAP)
+		a.Push = true
+	case model.VendorICloud:
+		// No mail block: emlcal speaks no protocol iCloud mail offers.
+		a.Calendar = &CalendarBackend{Backend: model.BackendCalDAV, Vendor: v}
+		a.Poll = Duration(DefaultPollCalDAV)
+	}
+	return a
+}
 
 // EffectiveRawMaxSize resolves the per-account override against the global
 // default.
@@ -238,16 +310,35 @@ func (a *Account) EffectiveRawMaxSize(g General) Size {
 	return g.RawMaxSize
 }
 
+// SyncsMail reports whether the account has a mail backend.
+func (a *Account) SyncsMail() bool { return a.Mail != nil }
+
+// SyncsCalendar reports whether the account has a calendar backend.
+func (a *Account) SyncsCalendar() bool { return a.Calendar != nil }
+
 // Syncs reports whether the account has this resource enabled. resource is
 // "mail" or "calendar"; anything else is false.
 func (a *Account) Syncs(resource string) bool {
 	switch resource {
 	case "mail":
-		return a.Mail
+		return a.SyncsMail()
 	case "calendar":
-		return a.Calendar
+		return a.SyncsCalendar()
 	}
 	return false
+}
+
+// Vendor is the account's primary vendor: the mail block's, else the calendar
+// block's. It is what the accounts table records, and it is informational — an
+// account may mix vendors across its resources.
+func (a *Account) Vendor() model.Vendor {
+	if a.Mail != nil && a.Mail.Vendor != "" {
+		return a.Mail.Vendor
+	}
+	if a.Calendar != nil {
+		return a.Calendar.Vendor
+	}
+	return ""
 }
 
 // SyncsAllCalendars reports whether Calendars is the "*" wildcard.
@@ -271,10 +362,4 @@ func (a *Account) WantsCalendar(name string) bool {
 		}
 	}
 	return false
-}
-
-// SecretKey is the secrets-store key holding this account's credentials:
-// "<name>.<provider>.json", matching the on-disk layout in DESIGN.md §3.
-func (a *Account) SecretKey() string {
-	return a.Name + "." + string(a.Provider) + ".json"
 }

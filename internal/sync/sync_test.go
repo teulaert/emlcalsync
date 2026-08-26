@@ -57,16 +57,12 @@ func newHarness(t *testing.T) *harness {
 			DefaultFormat: config.DefaultFormat,
 			SecretBackend: config.BackendFile,
 		},
-		Accounts: []config.Account{{
-			Name:        "work",
-			Provider:    model.ProviderGmail,
-			Email:       "user@example.com",
-			Poll:        config.Duration(time.Hour),
-			Mail:        true,
-			Calendar:    true,
-			Calendars:   []string{"*"},
-			Concurrency: 2,
-		}},
+		Accounts: []config.Account{func() config.Account {
+			a := config.NewAccount("work", "user@example.com", model.VendorGoogle)
+			a.Poll = config.Duration(time.Hour)
+			a.Concurrency = 2
+			return a
+		}()},
 	}
 
 	h := &harness{t: t, dir: dir, st: st, blobs: blobs, cfg: cfg}
@@ -526,10 +522,9 @@ func TestSyncAccountIsLockedWhileAnotherEngineHoldsIt(t *testing.T) {
 
 func TestSyncAllReportsPerAccount(t *testing.T) {
 	h := newHarness(t)
-	h.cfg.Accounts = append(h.cfg.Accounts, config.Account{
-		Name: "personal", Provider: model.ProviderFastmail, Email: "me@example.com",
-		Poll: config.Duration(time.Hour), Mail: true, Calendar: true, Calendars: []string{"*"},
-	})
+	personal := config.NewAccount("personal", "me@example.com", model.VendorFastmail)
+	personal.Poll = config.Duration(time.Hour)
+	h.cfg.Accounts = append(h.cfg.Accounts, personal)
 	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one")})
 
 	reports, err := h.eng.SyncAll(context.Background(), SyncOptions{Mail: true})

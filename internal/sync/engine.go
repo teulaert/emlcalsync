@@ -237,7 +237,7 @@ func (e *Engine) syncAccount(ctx context.Context, acct config.Account, o SyncOpt
 
 	if o.Mail {
 		switch {
-		case !acct.Mail:
+		case !acct.SyncsMail():
 			// The account is configured for calendar only.
 			rep.Mail = &ResourceReport{Kind: KindDisabled}
 			e.log.Debug("mail is switched off for this account", "account", acct.Name)
@@ -254,15 +254,20 @@ func (e *Engine) syncAccount(ctx context.Context, acct config.Account, o SyncOpt
 			})
 			rep.Mail = r
 			if err != nil {
-				rep.Err = err
-				return rep, err
+				if errors.Is(err, provider.ErrNotSupported) {
+					e.log.Info("mail sync skipped", "account", acct.Name, "reason", err)
+					rep.Mail = &ResourceReport{Kind: "skipped"}
+				} else {
+					rep.Err = err
+					return rep, err
+				}
 			}
 		}
 	}
 
 	if o.Calendar {
 		switch {
-		case !acct.Calendar:
+		case !acct.SyncsCalendar():
 			rep.Calendar = &ResourceReport{Kind: KindDisabled}
 			e.log.Debug("calendars are switched off for this account", "account", acct.Name)
 		case len(acct.Calendars) == 0:
@@ -404,7 +409,7 @@ func (e *Engine) SyncAll(ctx context.Context, o SyncOptions) ([]*Report, error) 
 // Accounts, providers, locking
 
 func (e *Engine) ensureAccount(ctx context.Context, acct config.Account) error {
-	a := &model.Account{ID: acct.Name, Provider: acct.Provider, Email: acct.Email}
+	a := &model.Account{ID: acct.Name, Vendor: acct.Vendor(), Email: acct.Email}
 	if err := e.st.UpsertAccount(ctx, a); err != nil {
 		return fmt.Errorf("sync: %s: %w", acct.Name, err)
 	}

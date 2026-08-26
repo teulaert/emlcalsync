@@ -31,7 +31,7 @@ func (tx *Tx) UpsertAccount(ctx context.Context, a *model.Account) error {
 	_, err := tx.q.ExecContext(ctx, `
 		INSERT INTO accounts (id, provider, email, created_at) VALUES (?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET provider = excluded.provider, email = excluded.email`,
-		a.ID, string(a.Provider), a.Email, created.Unix())
+		a.ID, string(a.Vendor), a.Email, created.Unix())
 	if err != nil {
 		return fmt.Errorf("store: upsert account %s: %w", a.ID, err)
 	}
@@ -46,18 +46,18 @@ func (s *Store) GetAccount(ctx context.Context, id string) (*model.Account, erro
 
 func (tx *Tx) GetAccount(ctx context.Context, id string) (*model.Account, error) {
 	var a model.Account
-	var provider string
+	var vendor string
 	var created int64
 	err := tx.q.QueryRowContext(ctx,
 		`SELECT id, provider, email, created_at FROM accounts WHERE id = ?`, id).
-		Scan(&a.ID, &provider, &a.Email, &created)
+		Scan(&a.ID, &vendor, &a.Email, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, notFound("account %q", id)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: get account %s: %w", id, err)
 	}
-	a.Provider = model.Provider(provider)
+	a.Vendor = model.Vendor(vendor)
 	a.CreatedAt = timeOf(created)
 	return &a, nil
 }
@@ -77,12 +77,12 @@ func (tx *Tx) ListAccounts(ctx context.Context) ([]model.Account, error) {
 	var out []model.Account
 	for rows.Next() {
 		var a model.Account
-		var provider string
+		var vendor string
 		var created int64
-		if err := rows.Scan(&a.ID, &provider, &a.Email, &created); err != nil {
+		if err := rows.Scan(&a.ID, &vendor, &a.Email, &created); err != nil {
 			return nil, err
 		}
-		a.Provider = model.Provider(provider)
+		a.Vendor = model.Vendor(vendor)
 		a.CreatedAt = timeOf(created)
 		out = append(out, a)
 	}

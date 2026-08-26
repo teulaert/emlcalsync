@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/testutil/jmapfake"
@@ -150,7 +151,13 @@ func (e *env) mustRun(args ...string) string {
 	return stdout
 }
 
-// addAccount runs `account add fastmail` with the fake's token on stdin.
+// addAccount runs `account add fastmail` with the fake's token on stdin, then
+// points the account's calendars at JMAP.
+//
+// `account add fastmail` writes a caldav calendar backend, which is what a real
+// Fastmail account needs. The e2e fake serves calendars over JMAP instead, and
+// with per-resource backends that is now a configuration the account can simply
+// state rather than something inferred from which secrets happen to exist.
 func (e *env) addAccount(name, email string) string {
 	e.t.Helper()
 	stdout, stderr, code := e.runInput(jmapfake.DefaultToken+"\n",
@@ -158,7 +165,25 @@ func (e *env) addAccount(name, email string) string {
 	if code != 0 {
 		e.t.Fatalf("account add: exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
 	}
+	e.useJMAPCalendars()
 	return stdout
+}
+
+// useJMAPCalendars rewrites the calendar backend of every account to jmap.
+func (e *env) useJMAPCalendars() {
+	e.t.Helper()
+	cfg, err := config.Load(e.configPath())
+	if err != nil {
+		e.t.Fatalf("load config: %v", err)
+	}
+	for i := range cfg.Accounts {
+		cfg.Accounts[i].Calendar = &config.CalendarBackend{
+			Backend: model.BackendJMAP, Vendor: model.VendorFastmail,
+		}
+	}
+	if err := config.Save(e.configPath(), cfg); err != nil {
+		e.t.Fatalf("save config: %v", err)
+	}
 }
 
 func (e *env) configPath() string  { return filepath.Join(e.Config, "emlcal", "config.toml") }

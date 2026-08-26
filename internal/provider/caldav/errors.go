@@ -22,14 +22,25 @@ type AuthError struct {
 	Email  string
 	Status int
 	Detail string
+	// CredentialName and CredentialURL come from the vendor preset, so the
+	// message names the thing the user actually has to create.
+	CredentialName string
+	CredentialURL  string
 }
 
 func (e *AuthError) Error() string {
-	msg := fmt.Sprintf("caldav: %s rejected the app password (HTTP %d)", e.Email, e.Status)
+	name := e.CredentialName
+	if name == "" {
+		name = "password"
+	}
+	msg := fmt.Sprintf("caldav: %s rejected the %s (HTTP %d)", e.Email, name, e.Status)
 	if e.Detail != "" {
 		msg += ": " + e.Detail
 	}
-	return msg + "; create one with access \"Calendars (CalDAV)\" at https://app.fastmail.com/settings/security/devices"
+	if e.CredentialURL != "" {
+		msg += "; create one at " + e.CredentialURL
+	}
+	return msg
 }
 
 // IsAuth reports whether err is an authentication failure.

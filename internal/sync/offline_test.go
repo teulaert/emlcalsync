@@ -308,7 +308,7 @@ func TestRideOutStopsOnContextCancel(t *testing.T) {
 
 func TestSyncSkipsDisabledMail(t *testing.T) {
 	h := newHarness(t)
-	h.cfg.Accounts[0].Mail = false
+	h.cfg.Accounts[0].Mail = nil
 	h.seedMail(3)
 
 	rep := h.sync(SyncOptions{})
@@ -332,7 +332,7 @@ func TestSyncSkipsDisabledMail(t *testing.T) {
 
 func TestSyncSkipsDisabledCalendar(t *testing.T) {
 	h := newHarness(t)
-	h.cfg.Accounts[0].Calendar = false
+	h.cfg.Accounts[0].Calendar = nil
 	h.seedMail(2)
 	start := baseTime()
 	h.cal.Put("primary", model.Event{

@@ -55,15 +55,18 @@ type testEnv struct {
 	factory *fakeFactory
 }
 
-// newTestEnv writes a config.toml with the given accounts (name, provider,
-// email) into a temp dir and returns the environment. Accounts default to
-// one fastmail account "work" <me@example.com> and one gmail "home".
+// newTestEnv writes a config.toml with the given accounts into a temp dir and
+// returns the environment. Accounts default to one fastmail account "work"
+// <me@example.com> and one gmail "home".
+//
+// Accounts are built with config.NewAccount because the zero Account has no
+// resource blocks, and so would sync nothing.
 func newTestEnv(t *testing.T, accounts ...config.Account) *testEnv {
 	t.Helper()
 	if len(accounts) == 0 {
 		accounts = []config.Account{
-			{Name: "work", Provider: model.ProviderFastmail, Email: "me@example.com"},
-			{Name: "home", Provider: model.ProviderGmail, Email: "me@gmail.example"},
+			config.NewAccount("work", "me@example.com", model.VendorFastmail),
+			config.NewAccount("home", "me@gmail.example", model.VendorGoogle),
 		}
 	}
 	dir := t.TempDir()

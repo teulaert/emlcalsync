@@ -42,7 +42,7 @@ func newFixture(t *testing.T) (*Calendar, *caldavfake.Server, string) {
 func newProvider(t *testing.T, srv *caldavfake.Server) *Calendar {
 	t.Helper()
 	c, err := New(Options{
-		Email: testEmail, Password: testPass,
+		Email: testEmail, Password: testPass, Vendor: model.VendorFastmail,
 		BaseURL: srv.BaseURL(), Logger: quietLogger(),
 	})
 	if err != nil {
@@ -138,7 +138,8 @@ func TestCalendarsAuthError(t *testing.T) {
 	srv.User, srv.Password = testEmail, "the-right-one"
 	srv.AddCalendar(caldavfake.Calendar{Path: srv.HomePath(testEmail) + "Default/", Name: "Calendar"})
 
-	c, err := New(Options{Email: testEmail, Password: "wrong", BaseURL: srv.BaseURL(), Logger: quietLogger()})
+	c, err := New(Options{Email: testEmail, Password: "wrong", Vendor: model.VendorFastmail,
+		BaseURL: srv.BaseURL(), Logger: quietLogger()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,6 +161,10 @@ func TestNewValidatesOptions(t *testing.T) {
 	}
 	if _, err := New(Options{Email: testEmail}); err == nil {
 		t.Error("New without a password must fail")
+	}
+	// No vendor preset and no base URL means there is nowhere to connect to.
+	if _, err := New(Options{Email: testEmail, Password: "x"}); err == nil {
+		t.Error("New without a vendor or a base URL must fail")
 	}
 }
 

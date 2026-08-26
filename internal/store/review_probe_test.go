@@ -378,7 +378,7 @@ func TestReviewEmptyMailboxListWipesMembership(t *testing.T) {
 	// An account with no mailboxes yet accepts an empty list: there is nothing
 	// to lose, and a brand-new account legitimately has none.
 	if err := s.UpsertAccount(ctx, &model.Account{
-		ID: "fresh", Provider: model.ProviderFastmail, Email: "fresh@example.com", CreatedAt: base,
+		ID: "fresh", Vendor: model.VendorFastmail, Email: "fresh@example.com", CreatedAt: base,
 	}); err != nil {
 		t.Fatal(err)
 	}
