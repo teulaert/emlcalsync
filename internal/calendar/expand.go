@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teambition/rrule-go"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // MaxOccurrences caps a single expansion. A malformed or unbounded rule over a
