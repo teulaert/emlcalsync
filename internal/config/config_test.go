@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -851,7 +852,8 @@ func sameMail(a, b *MailBackend) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return *a == *b
+	// reflect.DeepEqual rather than ==: the block carries folder lists now.
+	return reflect.DeepEqual(*a, *b)
 }
 
 func sameCalendar(a, b *CalendarBackend) bool {
@@ -859,4 +861,179 @@ func sameCalendar(a, b *CalendarBackend) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+// ---------------------------------------------------------------------------
+// IMAP
+
+func TestLoadIMAPAccount(t *testing.T) {
+	c, err := Load(writeTemp(t, "config.toml", `
+[[accounts]]
+name  = "apple"
+email = "me@icloud.example"
+
+  [accounts.mail]
+  backend  = "imap"
+  vendor   = "icloud"
+  username = "me@example.com"
+
+  [accounts.calendar]
+  backend = "caldav"
+  vendor  = "icloud"
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	a, ok := c.Account("apple")
+	if !ok {
+		t.Fatal("account missing")
+	}
+	if !a.SyncsMail() {
+		t.Fatal("an iCloud account should sync mail now")
+	}
+	if a.Mail.Backend != model.BackendIMAP || a.Mail.Vendor != model.VendorICloud {
+		t.Errorf("mail block = %+v", a.Mail)
+	}
+	if a.Mail.User(a.Email) != "me@example.com" {
+		t.Errorf("login = %q, want the Apple ID", a.Mail.User(a.Email))
+	}
+	if a.Mail.SMTPUser(a.Email) != "me@example.com" {
+		t.Errorf("smtp login = %q, want the IMAP one", a.Mail.SMTPUser(a.Email))
+	}
+	if !a.Push {
+		t.Error("IMAP has IDLE, so push should default on")
+	}
+}
+
+func TestLoadSelfHostedIMAPNeedsNoVendor(t *testing.T) {
+	c, err := Load(writeTemp(t, "config.toml", `
+[[accounts]]
+name  = "home"
+email = "me@example.com"
+
+  [accounts.mail]
+  backend       = "imap"
+  host          = "mail.example.com"
+  port          = 143
+  security      = "starttls"
+  smtp_host     = "mail.example.com"
+  smtp_port     = 587
+  archive_folder = "Archief"
+  exclude_folders = ["Junk"]
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	a, _ := c.Account("home")
+	if a.Mail.Host != "mail.example.com" || a.Mail.Port != 143 || a.Mail.Security != "starttls" {
+		t.Errorf("mail block = %+v", a.Mail)
+	}
+	if a.Mail.ArchiveFolder != "Archief" {
+		t.Errorf("archive_folder = %q", a.Mail.ArchiveFolder)
+	}
+	if len(a.Mail.ExcludeFolders) != 1 {
+		t.Errorf("exclude_folders = %v", a.Mail.ExcludeFolders)
+	}
+	// A vendorless imap block must not be given a vendor by default, or the
+	// preset would fight the explicit host.
+	if a.Mail.Vendor != "" {
+		t.Errorf("vendor = %q, want none for a self-hosted server", a.Mail.Vendor)
+	}
+}
+
+func TestValidateIMAPRules(t *testing.T) {
+	for _, tc := range []struct {
+		name, toml, want string
+	}{
+		{
+			name: "imap needs a vendor or a host",
+			toml: "[[accounts]]\nname=\"a\"\nemail=\"a@x.com\"\n[accounts.mail]\nbackend=\"imap\"\n",
+			want: "vendor or host",
+		},
+		{
+			name: "host is imap-only",
+			toml: "[[accounts]]\nname=\"a\"\nemail=\"a@x.com\"\n[accounts.mail]\nbackend=\"gmail\"\nhost=\"x\"\n",
+			want: "only applies to an imap",
+		},
+		{
+			name: "security must be known",
+			toml: "[[accounts]]\nname=\"a\"\nemail=\"a@x.com\"\n[accounts.mail]\nbackend=\"imap\"\nhost=\"x\"\nsecurity=\"ssl\"\n",
+			want: "security must be",
+		},
+		{
+			name: "icloud mail is imap",
+			toml: "[[accounts]]\nname=\"a\"\nemail=\"a@x.com\"\n[accounts.mail]\nbackend=\"jmap\"\nvendor=\"icloud\"\n",
+			want: "iCloud mail is IMAP",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(writeTemp(t, "config.toml", tc.toml))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			err = c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Validate = %v, want an error mentioning %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// push now means "a provider stream", which IMAP has via IDLE.
+func TestPushIsAllowedOnIMAP(t *testing.T) {
+	c, err := Load(writeTemp(t, "config.toml",
+		"[[accounts]]\nname=\"a\"\nemail=\"a@x.com\"\npush=true\n[accounts.mail]\nbackend=\"imap\"\nhost=\"x\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate: %v", err)
+	}
+}
+
+// NewAccount is what `account add icloud` writes, and iCloud now has mail.
+func TestNewICloudAccountSyncsMailAndCalendars(t *testing.T) {
+	a := NewAccount("apple", "me@icloud.example", model.VendorICloud)
+	if !a.SyncsMail() || a.Mail.Backend != model.BackendIMAP {
+		t.Errorf("mail = %+v, want an imap block", a.Mail)
+	}
+	if !a.SyncsCalendar() || a.Calendar.Backend != model.BackendCalDAV {
+		t.Errorf("calendar = %+v, want a caldav block", a.Calendar)
+	}
+}
+
+// A config that goes through Save and Load again must come back the same, or
+// `account add` quietly loses whatever it wrote.
+func TestIMAPSurvivesASaveLoadRoundTrip(t *testing.T) {
+	in := NewAccount("home", "me@example.com", "")
+	in.Mail = &MailBackend{
+		Backend: model.BackendIMAP, Host: "mail.example.com", Port: 143,
+		Security: "starttls", Username: "me", SMTPHost: "smtp.example.com",
+		SMTPPort: 587, SMTPSecurity: "starttls", ArchiveFolder: "Archief",
+		ExcludeFolders: []string{"Junk"}, IncludeAllMail: true,
+	}
+	cfg := &Config{General: General{DefaultFormat: DefaultFormat, SecretBackend: BackendFile},
+		Accounts: []Account{in}}
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := back.Account("home")
+	if !ok {
+		t.Fatal("account lost")
+	}
+	if !sameMail(in.Mail, got.Mail) {
+		t.Errorf("mail block changed:\n in: %+v\nout: %+v", in.Mail, got.Mail)
+	}
 }

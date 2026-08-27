@@ -128,7 +128,7 @@ func mailThreadRows(threads []model.Thread, app *App) []mailThreadRow {
 		t := &threads[i]
 		short := make([]string, 0, len(t.Participants))
 		for _, p := range t.Participants {
-			short = append(short, mailShortAddr(p))
+			short = append(short, output.ShortAddr(p))
 		}
 		rows = append(rows, mailThreadRow{
 			ID:           t.PublicID(),

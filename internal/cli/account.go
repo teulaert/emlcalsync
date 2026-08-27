@@ -95,11 +95,13 @@ func coreAccountCmd(app *App) *cobra.Command {
 	add.AddCommand(coreAccountAddCmd(app, model.VendorGoogle))
 	add.AddCommand(coreAccountAddCmd(app, model.VendorFastmail))
 	add.AddCommand(coreAccountAddCmd(app, model.VendorICloud))
+	add.AddCommand(coreAccountAddIMAPCmd(app))
 	cmd.AddCommand(add)
 	cmd.AddCommand(coreAccountListCmd(app))
 	cmd.AddCommand(coreAccountRemoveCmd(app))
 	cmd.AddCommand(coreGoogleClientCmd(app))
 	cmd.AddCommand(coreCalDAVPasswordCmd(app))
+	cmd.AddCommand(coreIMAPPasswordCmd(app))
 	return cmd
 }
 
@@ -154,9 +156,8 @@ func coreAccountAddCmd(app *App, prov model.Vendor) *cobra.Command {
 			"read the app-specific password from stdin instead of prompting")
 		cmd.Flags().StringVar(&opts.Username, "username", "",
 			"Apple ID, when it is not the --email address")
-		cmd.Long = "Adds an iCloud account. iCloud accounts sync calendars only:\n" +
-			"iCloud offers mail over IMAP, which emlcal does not speak.\n\n" +
-			"Calendars go over CalDAV with an **app-specific password**, not your\n" +
+		cmd.Long = "Adds an iCloud account: mail over IMAP and SMTP, calendars over CalDAV.\n\n" +
+			"Both halves authenticate with the same **app-specific password**, not your\n" +
 			"Apple ID password. Create one at https://account.apple.com/account/manage\n" +
 			"under Sign-In and Security → App-Specific Passwords; two-factor\n" +
 			"authentication must be on for that option to exist.\n\n" +
@@ -187,6 +188,26 @@ func coreAccountAddCmd(app *App, prov model.Vendor) *cobra.Command {
 			"or pass --client-id/--client-secret here to use a client for this account only."
 	}
 	return cmd
+}
+
+// coreWantsAppPassword reports whether the account has a resource that
+// authenticates with a per-application password.
+func coreWantsAppPassword(a config.Account) bool {
+	return len(coreAppPasswordKeys(a)) > 0
+}
+
+// coreAppPasswordKeys are the secret keys one app-specific password fills.
+// iCloud reaches mail over IMAP and calendars over CalDAV with the same
+// credential, so it fills both.
+func coreAppPasswordKeys(a config.Account) []string {
+	var keys []string
+	if a.Mail != nil && a.Mail.Backend == model.BackendIMAP {
+		keys = append(keys, IMAPPasswordKey(a))
+	}
+	if a.Calendar != nil && a.Calendar.Backend == model.BackendCalDAV {
+		keys = append(keys, CalDAVPasswordKey(a))
+	}
+	return keys
 }
 
 // coreAddOptions is everything `account add` collected from flags.
@@ -227,8 +248,14 @@ func coreAddAccount(app *App, opts coreAddOptions) error {
 	}
 
 	acct := config.NewAccount(name, email, prov)
-	if opts.Username != "" && acct.Calendar != nil {
-		acct.Calendar.Username = opts.Username
+	if opts.Username != "" {
+		// The Apple ID authenticates both halves.
+		if acct.Calendar != nil {
+			acct.Calendar.Username = opts.Username
+		}
+		if acct.Mail != nil && acct.Mail.Backend == model.BackendIMAP {
+			acct.Mail.Username = opts.Username
+		}
 	}
 
 	// Read every credential before the account is written, so a typo on the
@@ -243,15 +270,15 @@ func coreAddAccount(app *App, opts coreAddOptions) error {
 			return output.Errorf(output.ExitUsage, "no Fastmail API token given")
 		}
 	}
-	if acct.Calendar != nil && acct.Calendar.Backend == model.BackendCalDAV {
+	if coreWantsAppPassword(acct) {
 		if appPassword, err = coreReadAppPassword(app, stdin, opts.AppPassword, opts.AppPasswordStdin); err != nil {
 			return err
 		}
-		// An iCloud account is nothing without it: there is no other half to
-		// fall back on, so refuse rather than write a dead account.
-		if appPassword == "" && acct.Mail == nil {
+		// On iCloud that one password is the entire account: both halves
+		// authenticate with it, so there is nothing to fall back on.
+		if appPassword == "" && token == "" {
 			return output.Errorf(output.ExitUsage,
-				"no app-specific password given; a %s account syncs calendars only, so it needs one", prov)
+				"no app-specific password given; a %s account cannot sync anything without one", prov)
 		}
 	}
 
@@ -272,8 +299,12 @@ func coreAddAccount(app *App, opts coreAddOptions) error {
 		}
 	}
 	if appPassword != "" {
-		if err := sec.Set(CalDAVPasswordKey(acct), []byte(appPassword)); err != nil {
-			return fmt.Errorf("store app password: %w", err)
+		// One credential, stored under each protocol's own key. Scoping by
+		// backend is what lets either be rotated without disturbing the other.
+		for _, key := range coreAppPasswordKeys(acct) {
+			if err := sec.Set(key, []byte(appPassword)); err != nil {
+				return fmt.Errorf("store app password: %w", err)
+			}
 		}
 	}
 	if coreUsesGoogle(acct) {
@@ -638,6 +669,8 @@ func coreSecretKeys(a config.Account) []string {
 			add(JMAPTokenKey(a))
 		case model.BackendGmail:
 			add(GoogleTokenKey(a)+".json", GoogleClientKeyFor(a))
+		case model.BackendIMAP:
+			add(IMAPPasswordKey(a), SMTPPasswordKey(a))
 		}
 	}
 	if c := a.Calendar; c != nil {

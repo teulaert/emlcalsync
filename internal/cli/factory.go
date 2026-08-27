@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	stdsync "sync"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/provider/caldav"
 	"github.com/teulaert/emlcalsync/internal/provider/gcal"
 	"github.com/teulaert/emlcalsync/internal/provider/gmail"
+	imapprov "github.com/teulaert/emlcalsync/internal/provider/imap"
 	"github.com/teulaert/emlcalsync/internal/provider/jmap"
 	"github.com/teulaert/emlcalsync/internal/provider/oauth"
 )
@@ -29,6 +32,14 @@ const (
 	// app password, or an Apple app-specific password. Calendars only work
 	// once this is set.
 	CalDAVPasswordKeyFmt = "%s.caldav.password"
+	// IMAPPasswordKeyFmt holds the IMAP password, and the SMTP one unless a
+	// separate one is stored. On iCloud and Fastmail this is the same
+	// app-specific password the CalDAV half uses, kept under its own key so
+	// each protocol's credential can be rotated on its own.
+	IMAPPasswordKeyFmt = "%s.imap.password"
+	// SMTPPasswordKeyFmt is the submission password when it differs from the
+	// IMAP one, which some corporate setups insist on.
+	SMTPPasswordKeyFmt = "%s.smtp.password"
 	// GoogleTokenKeyFmt is the oauth.FileTokenStore key (it appends .json).
 	GoogleTokenKeyFmt = "%s.google"
 	// GoogleClientKey holds {"client_id":..., "client_secret":...}.
@@ -43,6 +54,12 @@ const (
 	EnvJMAPSessionURL = "EMLCAL_JMAP_SESSION_URL"
 	// EnvCalDAVBaseURL overrides the CalDAV root (tests, self-hosted CalDAV).
 	EnvCalDAVBaseURL = "EMLCAL_CALDAV_BASE_URL"
+	// EnvIMAPAddr overrides the IMAP host:port, and EnvSMTPAddr the submission
+	// one, so the real Factory can be pointed at a fake server.
+	EnvIMAPAddr = "EMLCAL_IMAP_ADDR"
+	EnvSMTPAddr = "EMLCAL_SMTP_ADDR"
+	// EnvIMAPInsecure allows an unencrypted connection. Tests only.
+	EnvIMAPInsecure = "EMLCAL_IMAP_INSECURE"
 )
 
 // Factory builds real providers from config + secrets and caches them per
@@ -55,6 +72,7 @@ type Factory struct {
 	gmail  map[string]*gmail.Mail
 	gcal   map[string]*gcal.Calendar
 	caldav map[string]*caldav.Calendar
+	imap   map[string]*imapprov.Mail
 }
 
 func (f *Factory) init() {
@@ -63,6 +81,7 @@ func (f *Factory) init() {
 		f.gmail = map[string]*gmail.Mail{}
 		f.gcal = map[string]*gcal.Calendar{}
 		f.caldav = map[string]*caldav.Calendar{}
+		f.imap = map[string]*imapprov.Mail{}
 	}
 }
 
@@ -72,6 +91,16 @@ func JMAPTokenKey(acct config.Account) string { return fmt.Sprintf(JMAPTokenKeyF
 // CalDAVPasswordKey returns the secrets key for an account's CalDAV password.
 func CalDAVPasswordKey(acct config.Account) string {
 	return fmt.Sprintf(CalDAVPasswordKeyFmt, acct.Name)
+}
+
+// IMAPPasswordKey returns the secrets key for an account's IMAP password.
+func IMAPPasswordKey(acct config.Account) string {
+	return fmt.Sprintf(IMAPPasswordKeyFmt, acct.Name)
+}
+
+// SMTPPasswordKey returns the secrets key for a separate submission password.
+func SMTPPasswordKey(acct config.Account) string {
+	return fmt.Sprintf(SMTPPasswordKeyFmt, acct.Name)
 }
 
 // GoogleTokenKey returns the oauth token-store key for an account.
@@ -86,15 +115,34 @@ func GoogleClientKeyFor(acct config.Account) string {
 // none — in which case Factory.Calendar reports provider.ErrNotSupported and
 // the sync engine skips calendars rather than failing the whole account.
 func (a *App) CalDAVPassword(acct config.Account) string {
+	return a.secret(CalDAVPasswordKey(acct))
+}
+
+// IMAPPassword returns the stored IMAP password, or "" when the account has
+// none — in which case Factory.Mail reports provider.ErrNotSupported and the
+// sync engine skips mail rather than failing the whole account.
+func (a *App) IMAPPassword(acct config.Account) string {
+	return a.secret(IMAPPasswordKey(acct))
+}
+
+// SMTPPassword returns a separate submission password, or "" to use the IMAP
+// one — which is the normal case, since an app-specific password serves both.
+func (a *App) SMTPPassword(acct config.Account) string {
+	return a.secret(SMTPPasswordKey(acct))
+}
+
+// secret reads one key, treating every failure as absence: a half-configured
+// account should degrade to a skipped resource with an actionable message.
+func (a *App) secret(key string) string {
 	sec, err := a.Secrets()
 	if err != nil {
 		return ""
 	}
-	pw, err := sec.Get(CalDAVPasswordKey(acct))
+	v, err := sec.Get(key)
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(pw))
+	return strings.TrimSpace(string(v))
 }
 
 // GoogleOAuthConfig assembles the OAuth client config for one account. The
@@ -244,8 +292,101 @@ func (f *Factory) Mail(ctx context.Context, acct config.Account) (provider.MailP
 	case model.BackendGmail:
 		m, _, err := f.googleClients(ctx, acct)
 		return m, err
+	case model.BackendIMAP:
+		pw := f.app.IMAPPassword(acct)
+		if pw == "" {
+			return nil, fmt.Errorf(
+				"account %q has no IMAP password (add one with `emlcal account imap-password --name %s`): %w",
+				acct.Name, acct.Name, provider.ErrNotSupported)
+		}
+		return f.imapClient(acct, pw)
 	}
 	return nil, fmt.Errorf("account %q: unknown mail backend %q", acct.Name, acct.Mail.Backend)
+}
+
+// imapClient builds (and caches) the IMAP provider for an account.
+func (f *Factory) imapClient(acct config.Account, password string) (*imapprov.Mail, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.init()
+	if c, ok := f.imap[acct.Name]; ok {
+		return c, nil
+	}
+	mb := acct.Mail
+	opts := imapprov.Options{
+		Email:            acct.Email,
+		Username:         mb.User(acct.Email),
+		Password:         password,
+		SMTPUsername:     mb.SMTPUser(acct.Email),
+		SMTPPassword:     f.app.SMTPPassword(acct),
+		Vendor:           mb.Vendor,
+		Host:             mb.Host,
+		Port:             mb.Port,
+		Security:         imapprov.Security(mb.Security),
+		SMTPHost:         mb.SMTPHost,
+		SMTPPort:         mb.SMTPPort,
+		SMTPSecurity:     imapprov.Security(mb.SMTPSecurity),
+		IncludeSpamTrash: acct.IncludeSpamTrash,
+		IncludeAllMail:   mb.IncludeAllMail,
+		Folders:          mb.Folders,
+		ExcludeFolders:   mb.ExcludeFolders,
+		ArchiveFolder:    mb.ArchiveFolder,
+		SentFolder:       mb.SentFolder,
+		TrashFolder:      mb.TrashFolder,
+		DraftsFolder:     mb.DraftsFolder,
+		Concurrency:      acct.Concurrency,
+		Logger:           f.app.Logger(),
+	}
+	applyIMAPEnvOverrides(&opts)
+
+	c, err := imapprov.New(opts)
+	if err != nil {
+		return nil, err
+	}
+	f.imap[acct.Name] = c
+	return c, nil
+}
+
+// applyIMAPEnvOverrides points the provider at a fake server, so the CLI and
+// e2e tests exercise the real Factory rather than a stub of it.
+func applyIMAPEnvOverrides(opts *imapprov.Options) {
+	if addr := os.Getenv(EnvIMAPAddr); addr != "" {
+		if host, port, ok := splitHostPort(addr); ok {
+			opts.Host, opts.Port = host, port
+		}
+	}
+	if addr := os.Getenv(EnvSMTPAddr); addr != "" {
+		if host, port, ok := splitHostPort(addr); ok {
+			opts.SMTPHost, opts.SMTPPort = host, port
+		}
+	}
+	if os.Getenv(EnvIMAPInsecure) == "1" {
+		opts.Insecure = true
+		opts.Security = imapprov.SecNone
+		opts.SMTPSecurity = imapprov.SecNone
+	}
+}
+
+func splitHostPort(addr string) (string, int, bool) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", 0, false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return "", 0, false
+	}
+	return host, port, true
+}
+
+// forgetIMAP drops the cached IMAP provider for an account, so the next build
+// picks up a credential that was just written. Providers are cached per account
+// for the life of the process, which is right for a sync and wrong immediately
+// after `account imap-password`.
+func (f *Factory) forgetIMAP(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.imap, name)
 }
 
 // caldavClient builds (and caches) the CalDAV provider for an account.
@@ -308,14 +449,28 @@ func (f *Factory) Calendar(ctx context.Context, acct config.Account) (provider.C
 	return nil, fmt.Errorf("account %q: unknown calendar backend %q", acct.Name, acct.Calendar.Backend)
 }
 
-// Pusher implements sync.ProviderFactory: only JMAP supports push.
+// Pusher implements sync.ProviderFactory: JMAP's event stream, or IMAP IDLE.
 func (f *Factory) Pusher(ctx context.Context, acct config.Account) (provider.Pusher, bool, error) {
-	if acct.Mail == nil || acct.Mail.Backend != model.BackendJMAP {
+	if acct.Mail == nil {
 		return nil, false, nil
 	}
-	c, err := f.jmapClient(acct)
-	if err != nil {
-		return nil, false, err
+	switch acct.Mail.Backend {
+	case model.BackendJMAP:
+		c, err := f.jmapClient(acct)
+		if err != nil {
+			return nil, false, err
+		}
+		return c, true, nil
+	case model.BackendIMAP:
+		pw := f.app.IMAPPassword(acct)
+		if pw == "" {
+			return nil, false, nil
+		}
+		c, err := f.imapClient(acct, pw)
+		if err != nil {
+			return nil, false, err
+		}
+		return c, true, nil
 	}
-	return c, true, nil
+	return nil, false, nil
 }

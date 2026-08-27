@@ -127,7 +127,7 @@ func selectBody(out *Parsed, leaves []leaf) {
 	case plain != nil:
 		out.TextBody = normalizeText(decodeBytes(plain.text))
 	case html != nil:
-		out.TextBody = htmlToText(decodeBytes(html.text))
+		out.TextBody = HTMLToText(decodeBytes(html.text))
 	case container != nil:
 		// A multipart this parser refused to descend into: past maxDepth, or
 		// with a boundary nothing could be read from. Index its bytes rather

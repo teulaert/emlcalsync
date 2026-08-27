@@ -90,10 +90,10 @@ var (
 	reHTMLSpace = regexp.MustCompile(`[ \t]+`)
 )
 
-// htmlToText converts an HTML body to readable plain text: link targets are
+// HTMLToText converts an HTML body to readable plain text: link targets are
 // kept as "text (url)", table rows stay on their own lines, script/style/head
 // content is dropped.
-func htmlToText(h string) string {
+func HTMLToText(h string) string {
 	h = reComment.ReplaceAllString(h, "")
 	// html2text only breaks lines on <br>/<p>/<li>/<h*>; mail is mostly built
 	// from divs and tables, so give it explicit breaks for those.

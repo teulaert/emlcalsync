@@ -316,26 +316,29 @@ func TestAccountRemoveDeletesTheAppPassword(t *testing.T) {
 // ---------------------------------------------------------------------------
 // iCloud
 
-// An iCloud account syncs calendars only: iCloud offers mail over IMAP, which
-// emlcal does not speak, so the account is written with no [accounts.mail]
-// block at all rather than a mail half that is switched off.
-func TestAccountAddICloudIsCalendarOnly(t *testing.T) {
+// An iCloud account syncs both halves: mail over IMAP, calendars over CalDAV.
+// One app-specific password authenticates both, and is stored under each
+// protocol's own key so either can be rotated on its own.
+func TestAccountAddICloudSyncsMailAndCalendars(t *testing.T) {
 	env := newTestEnv(t)
 	env.Cal["apple"] = fake.NewCalendar()
+	env.Mail["apple"] = fake.NewMail()
 
 	env.Stdin = "app-specific\n"
 	out := env.MustRun("account", "add", "icloud",
 		"--name", "apple", "--email", "me@icloud.example", "--app-password-stdin")
 
 	row := coreDecodeOne[map[string]any](t, out)
-	if row["mail_api"] != "-" {
-		t.Errorf("mail_api = %v, want %q: iCloud has no mail backend", row["mail_api"], "-")
+	if row["mail_api"] != "imap" {
+		t.Errorf("mail_api = %v, want imap", row["mail_api"])
 	}
 	if row["calendar_api"] != "caldav" {
 		t.Errorf("calendar_api = %v, want caldav", row["calendar_api"])
 	}
-	if got, _ := coreSecretValue(t, env, "apple.caldav.password"); got != "app-specific" {
-		t.Errorf("app password secret = %q", got)
+	for _, key := range []string{"apple.imap.password", "apple.caldav.password"} {
+		if got, _ := coreSecretValue(t, env, key); got != "app-specific" {
+			t.Errorf("%s = %q, want the one app password", key, got)
+		}
 	}
 
 	cfg, err := config.Load(env.Config)
@@ -346,8 +349,8 @@ func TestAccountAddICloudIsCalendarOnly(t *testing.T) {
 	if !ok {
 		t.Fatal("the account was not written")
 	}
-	if acct.SyncsMail() {
-		t.Error("an iCloud account must have no mail block")
+	if !acct.SyncsMail() || acct.Mail.Backend != model.BackendIMAP {
+		t.Errorf("mail block = %+v, want imap", acct.Mail)
 	}
 	if acct.Calendar == nil || acct.Calendar.Vendor != model.VendorICloud {
 		t.Errorf("calendar block = %+v, want the icloud vendor", acct.Calendar)
@@ -364,7 +367,7 @@ func TestAccountAddICloudRequiresAnAppPassword(t *testing.T) {
 	env.Stdin = "\n"
 	_, errs, code := env.Run("account", "add", "icloud",
 		"--name", "apple", "--email", "me@icloud.example")
-	if code == 0 || !strings.Contains(errs, "calendars only") {
+	if code == 0 || !strings.Contains(errs, "cannot sync anything without one") {
 		t.Fatalf("exit %d, stderr %q", code, errs)
 	}
 }
@@ -374,6 +377,7 @@ func TestAccountAddICloudRequiresAnAppPassword(t *testing.T) {
 func TestAccountAddICloudUsername(t *testing.T) {
 	env := newTestEnv(t)
 	env.Cal["apple"] = fake.NewCalendar()
+	env.Mail["apple"] = fake.NewMail()
 
 	env.Stdin = "app-specific\n"
 	env.MustRun("account", "add", "icloud", "--name", "apple",
@@ -453,6 +457,9 @@ func TestFactoryBuildsAnICloudCalDAVClient(t *testing.T) {
 // failure, which is the configuration working as intended.
 func TestDoctorProbesCalendarsOnAMailLessAccount(t *testing.T) {
 	acct := config.NewAccount("apple", "me@icloud.example", model.VendorICloud)
+	// A calendar-only account, however it came to be one. Push goes with it:
+	// nothing is left to deliver a stream.
+	acct.Mail, acct.Push = nil, false
 	env := newTestEnv(t, acct)
 	env.Cal["apple"] = fake.NewCalendar()
 

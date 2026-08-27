@@ -34,11 +34,12 @@ const (
 	BackendGmail  Backend = "gmail"  // mail only
 	BackendGCal   Backend = "gcal"   // calendars only
 	BackendCalDAV Backend = "caldav" // calendars only
+	BackendIMAP   Backend = "imap"   // mail only (with SMTP for submission)
 )
 
 // MailBackends and CalendarBackends are the backends each resource accepts.
 var (
-	MailBackends     = []Backend{BackendJMAP, BackendGmail}
+	MailBackends     = []Backend{BackendJMAP, BackendGmail, BackendIMAP}
 	CalendarBackends = []Backend{BackendCalDAV, BackendGCal, BackendJMAP}
 )
 

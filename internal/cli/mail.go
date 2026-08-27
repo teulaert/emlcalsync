@@ -146,33 +146,6 @@ type mailSendRow struct {
 	DraftTrashed *bool `json:"draft_trashed,omitempty" table:"DRAFT-TRASHED"`
 }
 
-// mailShortAddr renders an address the way a narrow FROM column wants it.
-func mailShortAddr(a model.Address) string {
-	if a.Name != "" {
-		return a.Name
-	}
-	return a.Email
-}
-
-// mailFlagsString is the compact flag column: U unread, * flagged,
-// A attachments, R answered.
-func mailFlagsString(f model.Flags, hasAttachments bool) string {
-	var b strings.Builder
-	if f.Unread {
-		b.WriteByte('U')
-	}
-	if f.Flagged {
-		b.WriteByte('*')
-	}
-	if hasAttachments {
-		b.WriteByte('A')
-	}
-	if f.Answered {
-		b.WriteByte('R')
-	}
-	return b.String()
-}
-
 // mailNameIndex maps account → mailbox remote id → display name, so list rows
 // can show names instead of provider ids.
 type mailNameIndex map[string]map[string]string
@@ -209,7 +182,7 @@ func (idx mailNameIndex) names(account string, remotes []string) []string {
 
 // mailRowOf builds a list row from an indexed message.
 func mailRowOf(m *model.Message, idx mailNameIndex, now time.Time) mailMessageRow {
-	flags := mailFlagsString(m.Flags, m.HasAttachments)
+	flags := output.MailFlags(m.Flags, m.HasAttachments)
 	if m.DeletedAt != nil {
 		flags += "D"
 	}
@@ -220,7 +193,7 @@ func mailRowOf(m *model.Message, idx mailNameIndex, now time.Time) mailMessageRo
 		DateUTC:        m.Received.Unix(),
 		DateRel:        output.RelTime(m.Received, now),
 		From:           m.From,
-		FromShort:      mailShortAddr(m.From),
+		FromShort:      output.ShortAddr(m.From),
 		Subject:        m.Subject,
 		Snippet:        m.Snippet,
 		FlagStr:        flags,

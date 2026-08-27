@@ -59,15 +59,15 @@ func TestHTMLToText(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := htmlToText(tc.in)
+			got := HTMLToText(tc.in)
 			for _, w := range tc.want {
 				if !strings.Contains(got, w) {
-					t.Errorf("htmlToText(%q) = %q, missing %q", tc.in, got, w)
+					t.Errorf("HTMLToText(%q) = %q, missing %q", tc.in, got, w)
 				}
 			}
 			for _, w := range tc.notWant {
 				if strings.Contains(got, w) {
-					t.Errorf("htmlToText(%q) = %q, should not contain %q", tc.in, got, w)
+					t.Errorf("HTMLToText(%q) = %q, should not contain %q", tc.in, got, w)
 				}
 			}
 		})

@@ -197,10 +197,62 @@ type General struct {
 // account with no mail block (an iCloud calendar, a Workspace calendar) simply
 // has none.
 type MailBackend struct {
-	// Backend is the protocol: "jmap" or "gmail".
+	// Backend is the protocol: "jmap", "gmail" or "imap".
 	Backend model.Backend `toml:"backend"`
-	// Vendor is who runs it. Empty means the backend's implied default.
+	// Vendor is who runs it. Empty means the backend's implied default; for
+	// IMAP it selects the preset, and may be empty alongside an explicit Host.
 	Vendor model.Vendor `toml:"vendor"`
+
+	// --- imap -----------------------------------------------------------
+
+	// Host overrides the vendor preset's IMAP host: self-hosted servers, and
+	// tests pointing at a fake.
+	Host string `toml:"host"`
+	// Port defaults to 993 for implicit TLS, 143 for STARTTLS.
+	Port int `toml:"port"`
+	// Security is "tls" (default), "starttls" or "none".
+	Security string `toml:"security"`
+	// Username is the login when it is not Account.Email. An Apple ID is
+	// frequently not the iCloud address.
+	Username string `toml:"username"`
+
+	// SMTP submission, because IMAP cannot send. Empty fields take the preset.
+	SMTPHost     string `toml:"smtp_host"`
+	SMTPPort     int    `toml:"smtp_port"`
+	SMTPSecurity string `toml:"smtp_security"`
+	SMTPUsername string `toml:"smtp_username"`
+
+	// Folders, when set, is the only folders synced. ExcludeFolders is applied
+	// after it.
+	Folders        []string `toml:"folders"`
+	ExcludeFolders []string `toml:"exclude_folders"`
+	// IncludeAllMail syncs a \All mailbox. Off by default: it holds a copy of
+	// every message, so on IMAP -- where a copy is a separate message -- it
+	// files the whole account twice.
+	IncludeAllMail bool `toml:"include_all_mail"`
+
+	// Role overrides for a server whose folders cannot be recognised, either
+	// because it has no SPECIAL-USE or because the names are unusual.
+	ArchiveFolder string `toml:"archive_folder"`
+	SentFolder    string `toml:"sent_folder"`
+	TrashFolder   string `toml:"trash_folder"`
+	DraftsFolder  string `toml:"drafts_folder"`
+}
+
+// User returns the IMAP login, defaulting to the account's own address.
+func (m *MailBackend) User(email string) string {
+	if s := strings.TrimSpace(m.Username); s != "" {
+		return s
+	}
+	return email
+}
+
+// SMTPUser returns the submission login, defaulting to the IMAP one.
+func (m *MailBackend) SMTPUser(email string) string {
+	if s := strings.TrimSpace(m.SMTPUsername); s != "" {
+		return s
+	}
+	return m.User(email)
 }
 
 // CalendarBackend is the [accounts.calendar] table.
@@ -268,6 +320,10 @@ const (
 	DefaultPollGmail  = 60 * time.Second
 	DefaultPollJMAP   = 300 * time.Second
 	DefaultPollCalDAV = 300 * time.Second
+	// DefaultPollIMAP is the fallback when IDLE is not carrying the account.
+	// With push on, the poll is only a safety net, so it can be slower.
+	DefaultPollIMAP     = 120 * time.Second
+	DefaultPollIMAPPush = 300 * time.Second
 )
 
 // NewAccount returns the account `emlcal account add <vendor>` would write.
@@ -294,9 +350,12 @@ func NewAccount(name, email string, v model.Vendor) Account {
 		a.Poll = Duration(DefaultPollJMAP)
 		a.Push = true
 	case model.VendorICloud:
-		// No mail block: emlcal speaks no protocol iCloud mail offers.
+		// Mail over IMAP, calendars over CalDAV — one app-specific password
+		// serves both.
+		a.Mail = &MailBackend{Backend: model.BackendIMAP, Vendor: v}
 		a.Calendar = &CalendarBackend{Backend: model.BackendCalDAV, Vendor: v}
-		a.Poll = Duration(DefaultPollCalDAV)
+		a.Poll = Duration(DefaultPollIMAPPush)
+		a.Push = true
 	}
 	return a
 }

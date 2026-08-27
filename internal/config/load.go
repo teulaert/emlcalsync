@@ -48,6 +48,25 @@ type fileAccount struct {
 type fileMailBackend struct {
 	Backend *string `toml:"backend"`
 	Vendor  *string `toml:"vendor"`
+
+	Host     *string `toml:"host"`
+	Port     *int    `toml:"port"`
+	Security *string `toml:"security"`
+	Username *string `toml:"username"`
+
+	SMTPHost     *string `toml:"smtp_host"`
+	SMTPPort     *int    `toml:"smtp_port"`
+	SMTPSecurity *string `toml:"smtp_security"`
+	SMTPUsername *string `toml:"smtp_username"`
+
+	Folders        []string `toml:"folders"`
+	ExcludeFolders []string `toml:"exclude_folders"`
+	IncludeAllMail *bool    `toml:"include_all_mail"`
+
+	ArchiveFolder *string `toml:"archive_folder"`
+	SentFolder    *string `toml:"sent_folder"`
+	TrashFolder   *string `toml:"trash_folder"`
+	DraftsFolder  *string `toml:"drafts_folder"`
 }
 
 // fileCalendarBackend is the [accounts.calendar] table.
@@ -154,7 +173,30 @@ func materialize(fa fileAccount) (Account, error) {
 		mb := MailBackend{}
 		setBackend(&mb.Backend, fa.Mail.Backend)
 		setVendor(&mb.Vendor, fa.Mail.Vendor)
-		if mb.Vendor == "" {
+		setString(&mb.Host, fa.Mail.Host)
+		setString(&mb.Security, fa.Mail.Security)
+		setString(&mb.Username, fa.Mail.Username)
+		setString(&mb.SMTPHost, fa.Mail.SMTPHost)
+		setString(&mb.SMTPSecurity, fa.Mail.SMTPSecurity)
+		setString(&mb.SMTPUsername, fa.Mail.SMTPUsername)
+		setString(&mb.ArchiveFolder, fa.Mail.ArchiveFolder)
+		setString(&mb.SentFolder, fa.Mail.SentFolder)
+		setString(&mb.TrashFolder, fa.Mail.TrashFolder)
+		setString(&mb.DraftsFolder, fa.Mail.DraftsFolder)
+		if fa.Mail.Port != nil {
+			mb.Port = *fa.Mail.Port
+		}
+		if fa.Mail.SMTPPort != nil {
+			mb.SMTPPort = *fa.Mail.SMTPPort
+		}
+		if fa.Mail.IncludeAllMail != nil {
+			mb.IncludeAllMail = *fa.Mail.IncludeAllMail
+		}
+		mb.Folders = fa.Mail.Folders
+		mb.ExcludeFolders = fa.Mail.ExcludeFolders
+		// IMAP is the one mail backend several vendors share, so an absent
+		// vendor is not an error — Validate asks for a host instead.
+		if mb.Vendor == "" && mb.Host == "" {
 			mb.Vendor = defaultVendorFor(mb.Backend)
 		}
 		a.Mail = &mb
@@ -176,6 +218,10 @@ func materialize(fa fileAccount) (Account, error) {
 	switch {
 	case a.Mail != nil && a.Mail.Backend == model.BackendJMAP:
 		a.Poll, a.Push = Duration(DefaultPollJMAP), true
+	case a.Mail != nil && a.Mail.Backend == model.BackendIMAP:
+		// IDLE watches one folder, so the poll still matters for the rest —
+		// but a delta where nothing moved is one round trip per folder.
+		a.Poll, a.Push = Duration(DefaultPollIMAPPush), true
 	case a.Mail != nil:
 		a.Poll, a.Push = Duration(DefaultPollGmail), false
 	default:
@@ -377,8 +423,8 @@ func validateBackends(a *Account, label string, add func(string, ...any)) {
 	if m := a.Mail; m != nil {
 		switch {
 		case m.Backend == "":
-			add("%s: [%s.mail] backend is required (%s or %s)", label, label,
-				model.BackendJMAP, model.BackendGmail)
+			add("%s: [%s.mail] backend is required (%s, %s or %s)", label, label,
+				model.BackendJMAP, model.BackendGmail, model.BackendIMAP)
 		case !m.Backend.Valid(model.MailBackends):
 			if m.Backend.Valid(model.CalendarBackends) {
 				add("%s: %q is a calendar backend, not a mail backend", label, m.Backend)
@@ -389,8 +435,25 @@ func validateBackends(a *Account, label string, add func(string, ...any)) {
 		if m.Vendor != "" && !m.Vendor.Valid() {
 			add("%s: unknown vendor %q", label, m.Vendor)
 		}
-		if m.Vendor == model.VendorICloud {
-			add("%s: there is no iCloud mail backend; iCloud accounts are calendar only", label)
+		// IMAP is the one mail backend several vendors share, so without a
+		// preset or an explicit host there is no server to talk to.
+		if m.Backend == model.BackendIMAP && m.Vendor == "" && strings.TrimSpace(m.Host) == "" {
+			add("%s: an imap mail backend needs vendor or host", label)
+		}
+		if m.Backend != model.BackendIMAP && strings.TrimSpace(m.Host) != "" {
+			add("%s: host only applies to an imap mail backend", label)
+		}
+		for _, sec := range []struct{ key, val string }{
+			{"security", m.Security}, {"smtp_security", m.SMTPSecurity},
+		} {
+			switch strings.TrimSpace(sec.val) {
+			case "", "tls", "starttls", "none":
+			default:
+				add("%s: %s must be tls, starttls or none, not %q", label, sec.key, sec.val)
+			}
+		}
+		if m.Vendor == model.VendorICloud && m.Backend != model.BackendIMAP {
+			add("%s: iCloud mail is IMAP; backend %q cannot reach it", label, m.Backend)
 		}
 	}
 
@@ -416,8 +479,10 @@ func validateBackends(a *Account, label string, add func(string, ...any)) {
 		}
 	}
 
-	// push is a JMAP mail feature; anything else claiming it is a config lie.
-	if a.Push && (a.Mail == nil || a.Mail.Backend != model.BackendJMAP) {
-		add("%s: push requires a jmap mail backend", label)
+	// push means a provider stream: JMAP's EventSource, or IMAP IDLE. Anything
+	// else claiming it is a config lie.
+	if a.Push && (a.Mail == nil ||
+		(a.Mail.Backend != model.BackendJMAP && a.Mail.Backend != model.BackendIMAP)) {
+		add("%s: push requires a jmap or imap mail backend", label)
 	}
 }

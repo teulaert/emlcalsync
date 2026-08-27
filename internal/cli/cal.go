@@ -273,11 +273,11 @@ func calWriteAgendaTable(w io.Writer, rows []calAgendaRow, occs []store.Occurren
 	cells := make([]cell, len(rows))
 	for i := range rows {
 		cells[i] = cell{
-			when:  calTimeCell(occs[i].Start, occs[i].End, occs[i].AllDay, loc),
+			when:  output.TimeCell(occs[i].Start, occs[i].End, occs[i].AllDay, loc),
 			title: output.Truncate(rows[i].Title, 50),
 			cal:   rows[i].Calendar,
 			where: output.Truncate(rows[i].Location, 30),
-			rsvp:  calRSVPCell(occs[i].MyResponse),
+			rsvp:  output.RSVP(occs[i].MyResponse),
 		}
 	}
 	var whenW, titleW, calW, whereW int
@@ -303,36 +303,6 @@ func calWriteAgendaTable(w io.Writer, rows []calAgendaRow, occs []store.Occurren
 		fmt.Fprintln(w, strings.TrimRight(line, " "))
 	}
 	return nil
-}
-
-// calTimeCell is FormatRange without the leading day, which the group header
-// already carries.
-func calTimeCell(start, end time.Time, allDay bool, loc *time.Location) string {
-	if allDay {
-		return "all day"
-	}
-	s, e := start.In(loc), end.In(loc)
-	if !e.After(s) {
-		return s.Format("15:04")
-	}
-	if s.Year() == e.Year() && s.YearDay() == e.YearDay() {
-		return s.Format("15:04") + "–" + e.Format("15:04")
-	}
-	return s.Format("15:04") + " – " + e.Format("Mon 2 Jan 15:04")
-}
-
-func calRSVPCell(p model.Participation) string {
-	switch p {
-	case model.PartAccepted:
-		return "yes"
-	case model.PartDeclined:
-		return "no"
-	case model.PartTentative:
-		return "maybe"
-	case model.PartNeedsAction:
-		return "?"
-	}
-	return ""
 }
 
 func calPad(s string, n int) string {
@@ -418,7 +388,7 @@ func calEventDetail(ev *model.Event, loc *time.Location) calEventOut {
 			Optional: a.Optional, Self: a.Self,
 		})
 		s := a.Email
-		if r := calRSVPCell(a.Response); r != "" {
+		if r := output.RSVP(a.Response); r != "" {
 			s += " (" + r + ")"
 		}
 		names = append(names, s)
@@ -536,7 +506,7 @@ spans a night.`,
 					End:      output.T(s.End),
 					EndUTC:   s.End.Unix(),
 					When:     calendar.FormatRange(s.Start, s.End, false, loc),
-					Duration: calFormatDuration(s.Duration()),
+					Duration: output.Duration(s.Duration()),
 				})
 			}
 			return app.Printer().Print(rows)
@@ -549,30 +519,6 @@ spans a night.`,
 	f.StringVar(&hours, "hours", "", "restrict to a working day, e.g. 09:00-18:00")
 	f.StringVarP(&calName, "calendar", "c", "", "restrict to one calendar (name or remote id)")
 	return cmd
-}
-
-// calFormatDuration renders a slot length compactly: 30m, 1h, 1h30m, 2d3h.
-func calFormatDuration(d time.Duration) string {
-	if d <= 0 {
-		return "0m"
-	}
-	d = d.Round(time.Minute)
-	var b strings.Builder
-	if days := int(d / (24 * time.Hour)); days > 0 {
-		fmt.Fprintf(&b, "%dd", days)
-		d -= time.Duration(days) * 24 * time.Hour
-	}
-	if h := int(d / time.Hour); h > 0 {
-		fmt.Fprintf(&b, "%dh", h)
-		d -= time.Duration(h) * time.Hour
-	}
-	if m := int(d / time.Minute); m > 0 {
-		fmt.Fprintf(&b, "%dm", m)
-	}
-	if b.Len() == 0 {
-		return "0m"
-	}
-	return b.String()
 }
 
 // calIsNotFound reports whether err is (or wraps) the shared not-found

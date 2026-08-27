@@ -97,8 +97,37 @@ func render(c *Config) []byte {
 		if m := a.Mail; m != nil {
 			b.WriteString("\n  [accounts.mail]\n")
 			fmt.Fprintf(&b, "  backend = %s\n", quote(string(m.Backend)))
-			if m.Vendor != "" && m.Vendor != defaultVendorFor(m.Backend) {
+			// IMAP always writes its vendor: it is what selects the host, so
+			// dropping it as "the default" would leave nothing to connect to.
+			if m.Vendor != "" && (m.Backend == model.BackendIMAP || m.Vendor != defaultVendorFor(m.Backend)) {
 				fmt.Fprintf(&b, "  vendor  = %s\n", quote(string(m.Vendor)))
+			}
+			writeMailStrings(&b, [][2]string{
+				{"host", m.Host},
+				{"security", m.Security},
+				{"username", m.Username},
+				{"smtp_host", m.SMTPHost},
+				{"smtp_security", m.SMTPSecurity},
+				{"smtp_username", m.SMTPUsername},
+				{"archive_folder", m.ArchiveFolder},
+				{"sent_folder", m.SentFolder},
+				{"trash_folder", m.TrashFolder},
+				{"drafts_folder", m.DraftsFolder},
+			})
+			if m.Port != 0 {
+				fmt.Fprintf(&b, "  port    = %d\n", m.Port)
+			}
+			if m.SMTPPort != 0 {
+				fmt.Fprintf(&b, "  smtp_port = %d\n", m.SMTPPort)
+			}
+			if m.IncludeAllMail {
+				b.WriteString("  include_all_mail = true\n")
+			}
+			if len(m.Folders) > 0 {
+				fmt.Fprintf(&b, "  folders = %s\n", quoteList(m.Folders))
+			}
+			if len(m.ExcludeFolders) > 0 {
+				fmt.Fprintf(&b, "  exclude_folders = %s\n", quoteList(m.ExcludeFolders))
 			}
 		} else {
 			b.WriteString("\n  # No [accounts.mail]: this account syncs calendars only.\n")
@@ -172,6 +201,15 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// writeMailStrings emits the non-empty string keys of an [accounts.mail] block.
+func writeMailStrings(b *bytes.Buffer, pairs [][2]string) {
+	for _, kv := range pairs {
+		if strings.TrimSpace(kv[1]) != "" {
+			fmt.Fprintf(b, "  %-7s = %s\n", kv[0], quote(kv[1]))
+		}
+	}
 }
 
 func quote(s string) string { return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"` }

@@ -136,6 +136,23 @@ func coreCheckMailSecret(app *App, cfg *config.Config, sec config.Secrets, a con
 		return coreOK(name, "API token present")
 	case model.BackendGmail:
 		return coreCheckGoogleToken(name, cfg, a)
+	case model.BackendIMAP:
+		b, err := sec.Get(IMAPPasswordKey(a))
+		switch {
+		case err != nil:
+			// A warning, not a failure: an account whose calendars work is
+			// half-configured, not broken, and this is what an iCloud account
+			// looks like between `account add` and `account imap-password`.
+			if a.SyncsCalendar() {
+				return coreWarn(name, fmt.Sprintf(
+					"no IMAP password, so mail is skipped: run `emlcal account imap-password --name %s`", a.Name))
+			}
+			return coreFail(name, fmt.Sprintf(
+				"no IMAP password: run `emlcal account imap-password --name %s`", a.Name))
+		case len(b) == 0:
+			return coreFail(name, "stored IMAP password is empty")
+		}
+		return coreOK(name, "IMAP password present")
 	}
 	return coreFail(name, fmt.Sprintf("unknown mail backend %q", a.Mail.Backend))
 }
