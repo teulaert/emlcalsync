@@ -28,8 +28,12 @@ Omarchy integrations, are views on it.
 
 ### Non-goals (for now)
 
-- Generic IMAP support. Mail has two purpose-built clients (Gmail API, JMAP).
-  The `MailProvider` interface leaves the door open.
+- An open-ended *tested* server list. The IMAP and CalDAV *clients* are
+  vendor-neutral — they have to be, since vendors differ only in preset — but
+  the supported vendors stay a curated set (§6.4, §6.5), because what a server
+  does at the edges (capabilities, discovery, redirects, connection limits) can
+  only be verified against one that is actually being used. Anything else works
+  by explicit configuration and is supported on that basis.
 - An open-ended CalDAV server list. The CalDAV *client* is vendor-neutral —
   it has to be, since Fastmail and iCloud differ only in preset — but the
   supported vendors stay a curated set (§6.4), because what a server does at
@@ -469,6 +473,86 @@ has never listed anything (§7).
 
 ---
 
+### 6.5 IMAP mail — iCloud, self-hosted (`internal/provider/imap`)
+
+The vendor-neutral mail client, matching §6.4's shape: a `Preset` per known
+vendor (host, ports, credential vocabulary, connection cap, role names), and an
+explicit `host` for everything else. SMTP submission rides along in the same
+block, because sending is the half IMAP cannot do — it is not a separate
+resource, it is the write end of this one.
+
+**Message identity is per-copy.** A message on IMAP is
+`(folder, uidvalidity, uid)`, so the same mail filed twice is genuinely two
+objects and a move mints a new uid. `RemoteID` is
+`base64url(folder).uidvalidity.uid` — base64url because `model.ParseID` splits
+public ids on `:` and folder names are whatever the user called them.
+
+RFC 8474 `EMAILID` would give a stable id, and was the first choice. It is not
+reachable: `go-imap/v2`'s `FetchOptions` has no field for it, and the FETCH
+parser's default branch is an error that tears the connection down, so asking
+is not a graceful degradation. Only some servers advertise `OBJECTID` anyway,
+so the per-copy path would still be the one most accounts took. Instead, writes
+report what they moved (`provider.Remapper`, from the server's `COPYUID`) and
+the engine renames the index row — keeping its blob, thread, flags and search
+entry — rather than deleting it and downloading the same bytes again.
+
+**The sync state carries the UID set.** IMAP has no change log, and `go-imap/v2`
+has no QRESYNC (`VANISHED` is absent from the untagged-response switch, whose
+default is likewise fatal), so nothing on the wire says what vanished. The
+state — already an opaque `TEXT` column — holds per folder its UIDVALIDITY,
+UIDNEXT, counts, the live uid set and the flag sets, all as IMAP range strings.
+A healthy folder is one range, so a whole account is a few hundred bytes; a
+pathological one is gzipped past 32 KiB.
+
+That is what makes the awkward cases exact rather than catastrophic. A
+UIDVALIDITY reset, a deleted folder and a renamed folder are all reported as
+precise `Added`/`Removed`/`Renamed`, so **`ErrStateExpired` is reserved for a
+state this build cannot parse** (plus a `changesMaxAdded` guard, where the
+engine's paged backfill is the better tool). Storing the flags is what keeps a
+quiet account quiet: without them every poll would re-read recent flags and
+report them all as updates.
+
+**Cost.** An account where nothing happened is one `LIST`(+`STATUS`) and no
+`SELECT`. A folder is skipped entirely unless UIDNEXT, MESSAGES, UNSEEN or
+(with CONDSTORE) HIGHESTMODSEQ moved.
+
+**Degradation.** Every capability is optional and its absence costs something
+specific:
+
+| Missing | Cost |
+|---|---|
+| CONDSTORE | flag changes other than read/unread wait for the periodic sweep (~1 h) |
+| UIDPLUS / MOVE | no `COPYUID`, so a move is discovered as a delete plus an add — and with neither, the source copy is flagged `\Deleted` but *not* expunged, because a bare `EXPUNGE` would destroy every `\Deleted` message in the folder including another client's |
+| SPECIAL-USE | roles fall back to the preset's names, then to the names servers converge on, then to explicit `archive_folder`/`sent_folder`/… config |
+| LIST-STATUS | one `STATUS` per folder instead of one `LIST` |
+| IDLE | polling only |
+
+**Care that is not obvious.** `BODY.PEEK[]`, never `RFC822` — the latter sets
+`\Seen` and would mark the whole archive read on first contact. `\Seen` inverts
+against `model.Flags.Unread`. `\Flagged` is not mapped to a role: it is a
+virtual starred view, and filing into it would write somewhere that cannot hold
+messages. `\All` (and the name "All Mail") is excluded by default, because
+under per-copy identity it files a second copy of the entire account.
+
+**Sending** is SMTP submission, then an `APPEND` to Sent unless the preset says
+the server files its own copy. Submission comes first: a copy in Sent for a
+message that was never sent is a lie nothing repairs, while a sent message
+missing from Sent is repaired by the next sync. A failed `APPEND` therefore
+never fails the send. Errors are classified by phase — up to the last `RCPT`
+nothing was handed over and the outbox may retry; from the first byte of `DATA`
+the outcome is unknowable and it must not, or the message goes twice.
+
+**Threading** is stitched by the store (§5, `message_refs`), not the provider: a
+reply is often indexed before the message it answers, and only the index sees
+the whole account.
+
+**Known unknowns.** iCloud's preset is written from documentation. Its exact
+capabilities, whether it advertises `OBJECTID`, whether its submission files its
+own Sent copy, and its real connection limit are unverified — which is why
+`emlcal doctor` prints what the server actually advertises.
+
+---
+
 ## 7. Sync engine
 
 Per account, run in this order; each step is idempotent and resumable.
@@ -747,24 +831,45 @@ calendars = ["*"]                       # or explicit list of names
 name     = "apple"
 email    = "lennert@icloud.example"
 
-  # No [accounts.mail]: iCloud offers mail over IMAP, which emlcal
-  # does not speak, so this account syncs calendars only.
+  [accounts.mail]
+  backend  = "imap"
+  vendor   = "icloud"
+  username = "lennert@example.com"      # Apple ID, when it is not the address
+
   [accounts.calendar]
   backend  = "caldav"
   vendor   = "icloud"
-  username = "lennert@example.com"      # Apple ID, when it is not the address
+  username = "lennert@example.com"
+
+[[accounts]]
+name     = "home"
+email    = "lennert@example.com"
+
+  # A server with no preset: configured by host instead of vendor.
+  [accounts.mail]
+  backend       = "imap"
+  host          = "mail.example.com"
+  security      = "starttls"            # tls (default) | starttls | none
+  smtp_host     = "mail.example.com"
+  smtp_port     = 587
+  archive_folder = "Archief"            # when the name is not recognised
 ```
 
-Backends: mail is `jmap` or `gmail`; calendar is `caldav`, `gcal` or `jmap`.
-`vendor` selects the CalDAV preset (§6.4) and may be replaced by an explicit
-`base_url` for a self-hosted server. `push` requires a JMAP mail backend.
+Backends: mail is `jmap`, `gmail` or `imap`; calendar is `caldav`, `gcal` or
+`jmap`. `vendor` selects the preset (§6.4, §6.5) and may be replaced by an
+explicit `base_url` (CalDAV) or `host` (IMAP) for a self-hosted server. `push`
+requires a backend with a stream: JMAP's EventSource, or IMAP IDLE.
 
 Secrets are never in `config.toml`:
 
 - Default: `~/.config/emlcal/secrets/`, mode 0600, directory 0700. Keys are
   scoped by **backend**, since one account's resources authenticate separately:
-  `<name>.jmap.token`, `<name>.caldav.password`, `<name>.google.json`, plus the
-  shared `google-client.json` and its per-account override.
+  `<name>.jmap.token`, `<name>.imap.password`, `<name>.caldav.password`,
+  `<name>.google.json`, plus the shared `google-client.json` and its
+  per-account override. An optional `<name>.smtp.password` overrides the IMAP
+  one for a setup that splits them. On iCloud one app-specific password fills
+  both `.imap.password` and `.caldav.password` — the same credential, stored
+  under each protocol's key so either can be rotated alone.
 - Optional: `secret_backend = "libsecret"` stores/reads via the freedesktop
   Secret Service (`secret-tool` equivalent, using `zalando/go-keyring`).
   Useful on Omarchy if a keyring is unlocked at login; otherwise the file
@@ -804,7 +909,7 @@ internal/
   mime/           parse, text extraction, quote/signature stripping, RFC822 builder
   sync/           engine: backfill, delta, reconcile, outbox, scheduler, watch
   provider/       interfaces + registry
-    gmail/  gcal/  jmap/ (mail + calendar)  oauth/
+    gmail/  gcal/  jmap/ (mail + calendar)  caldav/  imap/ (mail + smtp)  oauth/
   calendar/       recurrence expansion, free/busy, timezone helpers
   skill/          embedded SKILL.md template
 ```
@@ -818,6 +923,8 @@ internal/
 | OAuth | `golang.org/x/oauth2` | token refresh, loopback flow |
 | JMAP | hand-rolled (or `go-jmap`) | JSON in/out; see 6.2 |
 | MIME | `emersion/go-message` | robust, widely used (aerc, hydroxide) |
+| IMAP | `emersion/go-imap/v2` (beta, pinned) | the only Go client with CONDSTORE plus an in-memory server to test against; same author as go-message. Beta, so the version is pinned and no `imap.*` type escapes `internal/provider/imap`. No QRESYNC and no OBJECTID FETCH — see §6.5 |
+| SMTP | `emersion/go-smtp` + `go-sasl` | `net/smtp` is frozen; needed for submission since IMAP cannot send |
 | HTML→text | `k3a/html2text` | small, no DOM dependency |
 | Compression | `klauspost/compress/zstd` | pure Go, fast |
 | Recurrence | `teambition/rrule-go` | RFC 5545 |
@@ -863,8 +970,10 @@ to change now; several are hard to change after the first backfill.
    deletions mark rows, blobs stay until an explicit `gc --purge-deleted`.
 4. **No Maildir.** notmuch/aerc compatibility via `export --maildir` only.
    Alternative: also write a Maildir during sync (doubles disk, adds little).
-5. **Vendor APIs only** (Gmail API, JMAP), no IMAP/CalDAV. Provider interface
-   keeps the door open.
+5. **Vendor APIs preferred** (Gmail API, JMAP), with IMAP+SMTP and CalDAV as
+   the generic backends for everything else. A vendor API is better where it
+   exists — server-side threading, a real change log — so it stays the default
+   for Google and Fastmail.
 6. **JMAP Calendars for Fastmail**, CalDAV as documented fallback.
 7. **Gmail: polling every 60 s**, no Pub/Sub push.
 8. **Secrets in 0600 files by default**, libsecret optional.
@@ -874,6 +983,16 @@ to change now; several are hard to change after the first backfill.
 10. **`text_body` stored in full**, quote-stripping at display time.
 11. **Go + modernc SQLite + cobra; hand-written typed queries (no sqlc — one build-time tool fewer).**
 12. **Phase order: Fastmail before Gmail.**
+13. **Per-copy IMAP message identity.** On IMAP a message is
+    (folder, uidvalidity, uid); RFC 8474 `EMAILID` would be stable across a
+    move, but go-imap/v2 cannot fetch it and only some servers advertise it, so
+    the fallback would be the path actually exercised. Writes report what they
+    moved (`provider.Remapper`) and the row is renamed rather than re-fetched.
+    *Hard to change after backfill:* it is baked into every `remote_id`.
+14. **Store-side threading for backends that supply none** (`message_refs`).
+    Gmail and JMAP keep their server-side thread ids, because agreeing with
+    their own UIs about what belongs together is worth more than one uniform
+    algorithm. Derived data; `reindex --rethread` rebuilds it.
 
 Answers (2026-08-25):
 

@@ -194,8 +194,8 @@ type General struct {
 }
 
 // MailBackend is the [accounts.mail] table. Its presence is the on switch: an
-// account with no mail block (an iCloud calendar, a Workspace calendar) simply
-// has none.
+// account with no mail block (a Workspace calendar, or an iCloud account from
+// before emlcal spoke IMAP) simply has none.
 type MailBackend struct {
 	// Backend is the protocol: "jmap", "gmail" or "imap".
 	Backend model.Backend `toml:"backend"`

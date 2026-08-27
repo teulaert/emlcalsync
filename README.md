@@ -64,13 +64,14 @@ emlcal account caldav-password --name fm                         # prompts for t
 
 ### iCloud
 
-iCloud accounts sync **calendars only** — iCloud offers mail over IMAP, which
-emlcal does not speak.
+iCloud accounts sync **mail and calendars** — mail over IMAP and SMTP,
+calendars over CalDAV.
 
-Calendars use CalDAV with an **app-specific password**, not your Apple ID
-password. Create one at <https://account.apple.com/account/manage> under
+Both halves authenticate with the same **app-specific password**, not your
+Apple ID password. Create one at <https://account.apple.com/account/manage> under
 Sign-In and Security → App-Specific Passwords; two-factor authentication has
-to be on for that option to appear.
+to be on for that option to appear. `account add icloud` stores it once and
+uses it for both.
 
 ```bash
 emlcal account add icloud --name ic --email you@icloud.com       # prompts for the password
@@ -82,6 +83,29 @@ that identifies you on invitations.
 
 ```bash
 emlcal account add icloud --name ic --email you@icloud.com --username you@example.com
+```
+
+### Any other IMAP server
+
+Self-hosted Dovecot, Migadu, mailbox.org and the like are configured by host
+rather than by vendor. If the domain publishes RFC 6186 SRV records, `--host`
+can be left out and the servers are looked up from the address.
+
+```bash
+emlcal account add imap --name home --email you@example.com \
+  --host mail.example.com --smtp-host mail.example.com
+```
+
+These are supported by configuration rather than by preset: emlcal has not been
+run against them, so `emlcal doctor` prints what the server actually advertises,
+and the capability table in DESIGN.md §6.5 says what each missing extension
+costs. Where roles cannot be worked out from the folder names, set them
+explicitly:
+
+```toml
+  [accounts.mail]
+  archive_folder = "Archief"
+  sent_folder    = "Verzonden items"
 ```
 
 ### Gmail / Google Calendar
@@ -191,7 +215,7 @@ EMLCAL_REVIEW=1 go test -run TestReview ./internal/...   # review probes
 ```
 
 Layout: `internal/store` (SQLite), `internal/blob`, `internal/mime`,
-`internal/sync` (backfill/delta/outbox/watch), `internal/provider/{jmap,gmail,gcal,oauth}`,
+`internal/sync` (backfill/delta/outbox/watch), `internal/provider/{jmap,gmail,gcal,caldav,imap,oauth}`,
 `internal/cli`. Review notes from the first build are in `docs/reviews/`.
 
 ## Status
