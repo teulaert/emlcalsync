@@ -253,7 +253,12 @@ type mailComposed struct {
 	to       []model.Address
 	subject  string
 	threadID string
-	original *model.Message // set for replies, so Answered can be flagged
+	// from and recipients are the SMTP envelope. Bcc is deliberately absent
+	// from raw -- the header must not reach the recipients -- so a backend that
+	// submits over SMTP has nothing to put in RCPT TO unless we say it here.
+	from       string
+	recipients []string
+	original   *model.Message // set for replies, so Answered can be flagged
 	// draftRemote is the remote id of the stored draft `send --draft` is
 	// submitting; the draft is trashed once the copy is on its way.
 	draftRemote string
@@ -344,7 +349,28 @@ func mailCompose(cmd *cobra.Command, app *App, f *mailComposeFlags, replyID stri
 	out.raw = raw
 	out.to = draft.To
 	out.subject = draft.Subject
+	out.from = draft.From.Email
+	out.recipients = envelopeRecipients(draft)
 	return out, nil
+}
+
+// envelopeRecipients is every address the message must actually be delivered
+// to: To, Cc and Bcc together, deduplicated. Bcc is included here precisely
+// because it is not in the message bytes.
+func envelopeRecipients(d *mime.Draft) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, group := range [][]model.Address{d.To, d.Cc, d.Bcc} {
+		for _, a := range group {
+			e := strings.TrimSpace(a.Email)
+			if e == "" || seen[strings.ToLower(e)] {
+				continue
+			}
+			seen[strings.ToLower(e)] = true
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // mailReplyContext fills subject, recipients, threading headers and the quoted
@@ -434,6 +460,8 @@ func mailSubmit(cmd *cobra.Command, app *App, c *mailComposed, kind sync.OpKind)
 	op := sync.Op{Kind: kind, Raw: c.raw}
 	if kind == sync.OpSend {
 		op.ThreadID = c.threadID
+		op.From = c.from
+		op.Recipients = c.recipients
 	}
 	res, err := eng.Apply(cmd.Context(), c.account.Name, op)
 	if err != nil {

@@ -135,8 +135,22 @@ func (tx *Tx) UpsertMessage(ctx context.Context, msg *model.Message, parsed *mim
 	if m.IndexedAt.IsZero() {
 		m.IndexedAt = time.Now()
 	}
+	// Backends that thread server-side (Gmail, JMAP) supply a thread id and
+	// skip all of this. IMAP supplies none, so the conversation is stitched
+	// from the Message-ID graph instead — see Tx.resolveThreadID.
+	refs := messageRefs(&m)
+	var mergedAway []string
 	if m.ThreadID == "" {
-		m.ThreadID = m.RemoteID // a message is at least its own thread
+		thread, losers, err := tx.resolveThreadID(ctx, m.AccountID, refs)
+		if err != nil {
+			return 0, err
+		}
+		m.ThreadID, mergedAway = thread, losers
+	}
+	if m.ThreadID == "" {
+		// No provider id and no usable headers — an oversize stub, or a
+		// message too malformed to parse. It is at least its own thread.
+		m.ThreadID = m.RemoteID
 	}
 	if m.Received.IsZero() {
 		m.Received = m.Date
@@ -227,6 +241,13 @@ func (tx *Tx) UpsertMessage(ctx context.Context, msg *model.Message, parsed *mim
 	}
 
 	if err := tx.replaceMemberships(ctx, id, m.AccountID, m.MailboxRemotes); err != nil {
+		return 0, err
+	}
+	if err := tx.recordRefs(ctx, m.AccountID, id, refs); err != nil {
+		return 0, err
+	}
+	// Merge after the row exists, so the winner's summary counts it.
+	if err := tx.mergeThreads(ctx, m.AccountID, m.ThreadID, mergedAway); err != nil {
 		return 0, err
 	}
 	if parsed != nil {
@@ -450,6 +471,77 @@ func (tx *Tx) UpdateMessageState(ctx context.Context, accountID, remote string, 
 		return err
 	}
 	return tx.refreshThread(ctx, accountID, threadID)
+}
+
+// RenameRemoteID moves a row to a new remote id, for a provider whose writes
+// mint one (an IMAP COPY/MOVE, a folder rename — see provider.Rename).
+//
+// The row keeps its local id, so its blob, mailbox membership, attachments,
+// thread and FTS entry all follow it untouched: remote_id is not one of the
+// columns messages_au fires on, so the external-content index is never churned.
+//
+// A rename onto an id that already exists means a delta had already discovered
+// the copy under its new id. The existing row is authoritative and the stale
+// one is dropped, because two rows for one message is the thing the unique
+// index exists to prevent.
+//
+// Renaming an unknown id is not an error: the message may never have been
+// indexed. Returns whether a row actually moved.
+func (s *Store) RenameRemoteID(ctx context.Context, accountID, oldRemote, newRemote string) (bool, error) {
+	var moved bool
+	err := s.Tx(ctx, func(tx *Tx) error {
+		var err error
+		moved, err = tx.RenameRemoteID(ctx, accountID, oldRemote, newRemote)
+		return err
+	})
+	return moved, err
+}
+
+func (tx *Tx) RenameRemoteID(ctx context.Context, accountID, oldRemote, newRemote string) (bool, error) {
+	if accountID == "" || oldRemote == "" || newRemote == "" {
+		return false, fmt.Errorf("store: rename needs account_id and both remote ids")
+	}
+	if oldRemote == newRemote {
+		return false, nil
+	}
+
+	var id int64
+	var threadID string
+	err := tx.q.QueryRowContext(ctx,
+		`SELECT id, thread_id FROM messages WHERE account_id = ? AND remote_id = ?`,
+		accountID, oldRemote).Scan(&id, &threadID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: rename %s:%s: %w", accountID, oldRemote, err)
+	}
+
+	var existing int64
+	err = tx.q.QueryRowContext(ctx,
+		`SELECT id FROM messages WHERE account_id = ? AND remote_id = ?`,
+		accountID, newRemote).Scan(&existing)
+	switch {
+	case err == nil && existing != id:
+		// The destination is already indexed; drop the row we were moving.
+		if _, err := tx.q.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, id); err != nil {
+			return false, fmt.Errorf("store: rename %s:%s: drop stale row: %w", accountID, oldRemote, err)
+		}
+		if err := tx.refreshThread(ctx, accountID, threadID); err != nil {
+			return false, err
+		}
+		return false, nil
+	case err == nil:
+		return false, nil // already there
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, fmt.Errorf("store: rename %s:%s: %w", accountID, newRemote, err)
+	}
+
+	if _, err := tx.q.ExecContext(ctx,
+		`UPDATE messages SET remote_id = ? WHERE id = ?`, newRemote, id); err != nil {
+		return false, fmt.Errorf("store: rename %s:%s -> %s: %w", accountID, oldRemote, newRemote, err)
+	}
+	return true, nil
 }
 
 // MarkDeleted marks messages as gone on the server: deleted_at is set and

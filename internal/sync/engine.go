@@ -180,10 +180,14 @@ func (o SyncOptions) resolved() SyncOptions {
 
 // ResourceReport summarises one resource of one pass.
 type ResourceReport struct {
-	Kind        string        `json:"kind"` // backfill|resume|delta|reconcile
-	Added       int           `json:"added"`
-	Updated     int           `json:"updated"`
-	Removed     int           `json:"removed"`
+	Kind    string `json:"kind"` // backfill|resume|delta|reconcile
+	Added   int    `json:"added"`
+	Updated int    `json:"updated"`
+	Removed int    `json:"removed"`
+	// Renamed counts messages whose remote id moved without the message
+	// changing — an IMAP move or folder rename. Zero for every backend whose
+	// ids are stable.
+	Renamed     int           `json:"renamed,omitempty"`
 	Duration    time.Duration `json:"duration"`
 	StateBefore string        `json:"state_before,omitempty"`
 	StateAfter  string        `json:"state_after,omitempty"`
@@ -196,6 +200,7 @@ func (r *ResourceReport) add(o *ResourceReport) {
 	r.Added += o.Added
 	r.Updated += o.Updated
 	r.Removed += o.Removed
+	r.Renamed += o.Renamed
 }
 
 // Report is the result of syncing one account.

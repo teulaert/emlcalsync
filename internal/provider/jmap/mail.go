@@ -48,7 +48,10 @@ type Mail struct {
 // Mail returns the mail provider bound to the token's primary mail account.
 func (c *Client) Mail() *Mail { return &Mail{c: c} }
 
-var _ provider.MailProvider = (*Mail)(nil)
+var (
+	_ provider.MailProvider = (*Mail)(nil)
+	_ provider.Submitter    = (*Mail)(nil)
+)
 
 // AccountID resolves (and caches) the primary account id for urn:...:mail.
 func (m *Mail) AccountID(ctx context.Context) (string, error) {
@@ -1171,7 +1174,38 @@ func (m *Mail) identityID(ctx context.Context) (string, error) {
 // Two round trips rather than one, because Email/import creation ids are not
 // guaranteed to be usable as "#creationId" references from a later call in the
 // same request.
+// Submit implements provider.Submitter: it sends with an explicit RFC 5321
+// envelope rather than letting the server derive one from the headers.
+//
+// This is what makes Bcc work. RFC 8621 generates a null envelope's rcptTo from
+// "the To, Cc, and Bcc header fields", and the message we build deliberately
+// carries no Bcc header — it must not reach the recipients — so a derived
+// envelope silently omits every blind recipient. Stating rcptTo settles it.
+func (m *Mail) Submit(ctx context.Context, raw []byte, env provider.SubmitEnvelope) (string, error) {
+	return m.send(ctx, raw, envelopeArgs(env))
+}
+
 func (m *Mail) Send(ctx context.Context, raw []byte, threadID string) (string, error) {
+	return m.send(ctx, raw, nil)
+}
+
+// envelopeArgs renders a submission envelope, or nil to let the server derive
+// one from the message headers.
+func envelopeArgs(env provider.SubmitEnvelope) map[string]any {
+	if env.From == "" || len(env.To) == 0 {
+		return nil
+	}
+	rcpt := make([]map[string]any, 0, len(env.To))
+	for _, to := range env.To {
+		rcpt = append(rcpt, map[string]any{"email": to})
+	}
+	return map[string]any{
+		"mailFrom": map[string]any{"email": env.From},
+		"rcptTo":   rcpt,
+	}
+}
+
+func (m *Mail) send(ctx context.Context, raw []byte, envelope map[string]any) (string, error) {
 	drafts, err := m.mailboxByRole(ctx, model.RoleDrafts)
 	if err != nil {
 		return "", err
@@ -1199,11 +1233,15 @@ func (m *Mail) Send(ctx context.Context, raw []byte, threadID string) (string, e
 	// Never retried: a 5xx from a submission says nothing about whether the
 	// message was already handed to the MTA, and a retry would send it twice.
 	const cid = "sub"
+	sub := map[string]any{"identityId": identity, "emailId": em.ID}
+	if envelope != nil {
+		sub["envelope"] = envelope
+	}
 	var sr setResponse
 	err = m.c.callNoRetry(ctx, []string{CapMail, CapSubmission}, "EmailSubmission/set", map[string]any{
 		"accountId": acct,
 		"create": map[string]any{
-			cid: map[string]any{"identityId": identity, "emailId": em.ID},
+			cid: sub,
 		},
 		"onSuccessUpdateEmail": map[string]any{
 			"#" + cid: map[string]any{

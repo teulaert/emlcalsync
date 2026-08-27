@@ -237,12 +237,20 @@ func coreOutboxDropCmd(app *App) *cobra.Command {
 // reindex / gc
 
 func coreReindexCmd(app *App) *cobra.Command {
-	return &cobra.Command{
+	var rethread bool
+	cmd := &cobra.Command{
 		Use:   "reindex",
 		Short: "Rebuild the SQLite index from the blob archive",
 		Long: `Re-parses every archived raw message and rewrites its index row, search text
 and attachment list. The blobs are the canonical archive, so this is always
-safe: nothing is fetched and nothing is deleted.`,
+safe: nothing is fetched and nothing is deleted.
+
+--rethread additionally discards the account's thread ids and works them out
+again from the Message-ID graph. That is only useful for a backend that has no
+server-side threading of its own (IMAP); on a Gmail or Fastmail account it
+replaces the server's threading with a weaker guess, and a plain reindex will
+not bring it back. Thread ids change, so anything holding an <account>:t:<id>
+has to look it up again.`,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			eng, err := app.Engine()
@@ -265,7 +273,7 @@ safe: nothing is fetched and nothing is deleted.`,
 			ctx := app.Context()
 			var rows []row
 			for _, name := range names {
-				rep, err := eng.Reindex(ctx, name)
+				rep, err := eng.ReindexWith(ctx, name, sync.ReindexOptions{Rethread: rethread})
 				if err != nil {
 					return err
 				}
@@ -278,6 +286,9 @@ safe: nothing is fetched and nothing is deleted.`,
 			return app.Printer().Print(rows)
 		},
 	}
+	cmd.Flags().BoolVar(&rethread, "rethread", false,
+		"also recompute threads from the Message-ID graph (IMAP accounts only)")
+	return cmd
 }
 
 func coreGCCmd(app *App) *cobra.Command {

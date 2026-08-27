@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,142 @@ import (
 
 // maxThreadParticipants caps the denormalised participant list.
 const maxThreadParticipants = 25
+
+// maxMessageRefs caps how many References entries one message contributes.
+// A long-running list thread accumulates hundreds; the root and the nearest
+// ancestors are what actually join a conversation, and an unbounded chain
+// would let one pathological message fan out across unrelated threads.
+const maxMessageRefs = 24
+
+// messageRefs is every Message-ID a message names — its own, its parent's and
+// its ancestry — normalised and deduplicated, oldest ancestor first.
+//
+// References is the ancestry chain in order, so References[0] is the root of
+// the conversation. That ordering is what makes threadFor deterministic: two
+// messages in one conversation mint the same id whichever arrives first.
+func messageRefs(m *model.Message) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(v string) {
+		v = strings.TrimSpace(strings.Trim(strings.TrimSpace(v), "<>"))
+		if v == "" || seen[v] || len(out) >= maxMessageRefs {
+			return
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	for _, r := range m.References {
+		add(r)
+	}
+	add(m.InReplyTo)
+	add(m.MessageIDHeader)
+	return out
+}
+
+// mintThreadID derives a thread id from a conversation's root Message-ID.
+//
+// Hashing the root rather than an arbitrary ref is what makes the result
+// independent of arrival order: a reply indexed before its parent mints the id
+// the parent would have minted, so the two land in one thread without needing a
+// merge. base32 keeps it free of ":", which model.ParseID splits on.
+func mintThreadID(root string) string {
+	sum := sha256.Sum256([]byte(root))
+	enc := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:])
+	return "r" + strings.ToLower(enc[:20])
+}
+
+// resolveThreadID assigns a message to a thread by walking the Message-ID graph
+// in message_refs — the client-side threading every IMAP client does, because
+// IMAP has no thread id to hand over.
+//
+// It is called only when the provider supplied none, so Gmail and JMAP keep
+// their server-side threads and never touch this table: emlcal agreeing with
+// the Gmail and Fastmail UIs about what belongs together is worth more than one
+// uniform algorithm.
+//
+// The returned losers are threads this message proved were the same
+// conversation; the caller merges them once its own row exists.
+func (tx *Tx) resolveThreadID(ctx context.Context, accountID string, refs []string) (thread string, losers []string, err error) {
+	if len(refs) == 0 {
+		return "", nil, nil // no headers to go on; the caller falls back
+	}
+
+	args := append([]any{accountID}, anySlice(refs)...)
+	rows, err := tx.q.QueryContext(ctx, `
+		SELECT DISTINCT m.thread_id
+		  FROM message_refs r JOIN messages m ON m.id = r.message_id
+		 WHERE r.account_id = ? AND r.ref IN (`+placeholders(len(refs))+`)
+		 ORDER BY m.thread_id`, args...)
+	if err != nil {
+		return "", nil, fmt.Errorf("store: resolve thread: %w", err)
+	}
+	var hits []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			rows.Close()
+			return "", nil, err
+		}
+		if t != "" {
+			hits = append(hits, t)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", nil, err
+	}
+
+	switch len(hits) {
+	case 0:
+		return mintThreadID(refs[0]), nil, nil
+	case 1:
+		return hits[0], nil, nil
+	}
+	// Several threads share this message's ancestry, so they were always one
+	// conversation and we only now have the message that proves it. ORDER BY
+	// above makes the winner the smallest, so the outcome does not depend on
+	// which message happened to arrive last.
+	return hits[0], hits[1:], nil
+}
+
+// recordRefs stores the Message-ID graph for one message. Called after the row
+// exists, since message_refs points at it.
+func (tx *Tx) recordRefs(ctx context.Context, accountID string, id int64, refs []string) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	if _, err := tx.q.ExecContext(ctx,
+		`DELETE FROM message_refs WHERE message_id = ?`, id); err != nil {
+		return fmt.Errorf("store: clear message refs: %w", err)
+	}
+	for _, r := range refs {
+		if _, err := tx.q.ExecContext(ctx,
+			`INSERT OR IGNORE INTO message_refs (account_id, message_id, ref) VALUES (?,?,?)`,
+			accountID, id, r); err != nil {
+			return fmt.Errorf("store: record message ref: %w", err)
+		}
+	}
+	return nil
+}
+
+// mergeThreads folds losers into winner and refreshes every summary involved.
+// A loser ends up with no messages, so refreshThread drops its row.
+func (tx *Tx) mergeThreads(ctx context.Context, accountID, winner string, losers []string) error {
+	for _, loser := range losers {
+		if loser == "" || loser == winner {
+			continue
+		}
+		if _, err := tx.q.ExecContext(ctx,
+			`UPDATE messages SET thread_id = ? WHERE account_id = ? AND thread_id = ?`,
+			winner, accountID, loser); err != nil {
+			return fmt.Errorf("store: merge thread %s into %s: %w", loser, winner, err)
+		}
+		if err := tx.refreshThread(ctx, accountID, loser); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // refreshThread recomputes the threads summary row for one (account, thread)
 // from its non-deleted messages, deleting the row when nothing is left.
@@ -109,6 +247,28 @@ func addParticipant(list *[]model.Address, seen map[string]bool, a model.Address
 	}
 	seen[key] = true
 	*list = append(*list, a)
+}
+
+// ClearThreading discards an account's derived threading — the Message-ID
+// graph, the thread ids on its messages and its thread summaries — so a reindex
+// works them out again from the archived bytes.
+//
+// Only for a backend that threads client-side. Running it against Gmail or JMAP
+// throws away the server's own threading, which is better than anything we can
+// reconstruct, and a plain reindex will not bring it back.
+func (s *Store) ClearThreading(ctx context.Context, accountID string) error {
+	return s.Tx(ctx, func(tx *Tx) error {
+		for _, q := range []string{
+			`DELETE FROM message_refs WHERE account_id = ?`,
+			`DELETE FROM threads WHERE account_id = ?`,
+			`UPDATE messages SET thread_id = '' WHERE account_id = ?`,
+		} {
+			if _, err := tx.q.ExecContext(ctx, q, accountID); err != nil {
+				return fmt.Errorf("store: clear threading for %s: %w", accountID, err)
+			}
+		}
+		return nil
+	})
 }
 
 // RefreshThread recomputes one thread summary. Normally maintained

@@ -700,6 +700,17 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 		return rep, fmt.Errorf("sync: %s: changes: %w", r.account(), err)
 	}
 
+	// Renames first, and in particular before syncMailboxes. A folder rename
+	// arrives as renamed messages plus MailboxesChanged, and ReplaceMailboxes
+	// drops the mailbox row whose remote id vanished — cascading away every
+	// membership that pointed at it. Moving the rows across while the old
+	// mailbox still exists is what keeps that from eating the memberships.
+	n, err := r.applyRenames(ctx, ch.Renamed)
+	if err != nil {
+		return rep, err
+	}
+	rep.Renamed = n
+
 	if ch.MailboxesChanged || r.e.nthDelta(r.account())%mailboxRefreshEvery == 0 {
 		if err := r.syncMailboxes(ctx); err != nil {
 			return rep, err
@@ -880,6 +891,37 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 
 // nthDelta counts deltas per account so mailboxes get re-synced periodically
 // even when the provider never flags a change.
+// applyRenames moves index rows whose remote id changed while the message
+// stayed the same. Only providers whose writes mint new ids report any (IMAP:
+// a copy or move gives the copy a fresh uid), so this is a no-op everywhere
+// else. Returns how many rows actually moved.
+func (r *mailRun) applyRenames(ctx context.Context, renames []provider.Rename) (int, error) {
+	if len(renames) == 0 {
+		return 0, nil
+	}
+	n := 0
+	err := r.e.st.Tx(ctx, func(tx *store.Tx) error {
+		for _, rn := range renames {
+			if rn.Old == "" || rn.New == "" || rn.Old == rn.New {
+				continue
+			}
+			moved, err := tx.RenameRemoteID(ctx, r.account(), rn.Old, rn.New)
+			if err != nil {
+				return err
+			}
+			if moved {
+				n++
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("sync: %s: rename: %w", r.account(), err)
+	}
+	r.e.log.Debug("applied renames", "account", r.account(), "reported", len(renames), "moved", n)
+	return n, nil
+}
+
 func (e *Engine) nthDelta(account string) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()

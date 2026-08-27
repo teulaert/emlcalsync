@@ -65,6 +65,10 @@ type fakeServer struct {
 
 	mu sync.Mutex
 
+	// lastEnvelope is the explicit RFC 5321 envelope of the most recent
+	// submission, or nil when the client left the server to derive one.
+	lastEnvelope map[string]any
+
 	sessionState string
 	sessionHits  int
 
@@ -953,6 +957,7 @@ func (f *fakeServer) submissionSet(name string, args map[string]any) (string, ma
 			notCreated[cid] = map[string]any{"type": "invalidProperties", "properties": []string{"emailId"}}
 			continue
 		}
+		f.lastEnvelope, _ = spec["envelope"].(map[string]any)
 		created[cid] = map[string]any{
 			"id": "submission-" + cid, "emailId": emailID, "undoStatus": "final",
 		}

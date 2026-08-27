@@ -49,6 +49,14 @@ type Op struct {
 	Raw      []byte `json:"raw,omitempty"`
 	ThreadID string `json:"thread_id,omitempty"`
 
+	// From and Recipients are the SMTP envelope for a send. They are carried
+	// separately because Raw deliberately does not spell out Bcc — the header
+	// must not reach the recipients — so a submission has nothing else to put
+	// in RCPT TO. They are part of the persisted payload, so a send queued
+	// while offline still knows who it was for after a restart.
+	From       string   `json:"from,omitempty"`
+	Recipients []string `json:"recipients,omitempty"`
+
 	Event          *model.Event        `json:"event,omitempty"`
 	CalendarRemote string              `json:"calendar_remote,omitempty"`
 	Response       model.Participation `json:"response,omitempty"`
@@ -63,6 +71,11 @@ type ApplyResult struct {
 	// RemoteID is the provider id of a created object (draft, sent message,
 	// event), when the write produced one.
 	RemoteID string `json:"remote_id,omitempty"`
+	// Renames records ids the write moved. On IMAP a move mints a new uid for
+	// the copy, so the id the caller passed in no longer names anything — the
+	// CLI prints these so the user is told the message's new id rather than
+	// being left holding a dead one.
+	Renames []provider.Rename `json:"renames,omitempty"`
 }
 
 // OutboxReport summarises a RetryOutbox pass.
@@ -122,11 +135,20 @@ func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult
 	}
 
 	res := &ApplyResult{OutboxID: id}
-	remote, err := e.execute(ctx, *acct, op)
+	remote, renames, err := e.execute(ctx, *acct, op)
 	switch {
 	case err == nil:
 		res.RemoteID = remote
-		if err := e.st.MarkOutboxDone(ctx, id); err != nil {
+		res.Renames = renames
+		// Rename and retire together: a crash between them would leave the row
+		// pointing at an id the server no longer has, with nothing left to say
+		// so. In one transaction a crash simply replays the whole thing.
+		if err := e.st.Tx(ctx, func(tx *store.Tx) error {
+			if err := e.applyRenames(ctx, tx, account, renames); err != nil {
+				return err
+			}
+			return tx.MarkOutboxDone(ctx, id)
+		}); err != nil {
 			return res, err
 		}
 		e.log.Info("outbox item done", "account", account, "kind", op.Kind,
@@ -151,6 +173,21 @@ func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult
 		e.failPermanently(ctx, id, err)
 		return res, err
 	}
+}
+
+// applyRenames moves index rows whose remote id a write just changed. Only
+// providers that mint new ids on copy/move report any, so this is a no-op for
+// every other backend. An id we never indexed is skipped, not an error.
+func (e *Engine) applyRenames(ctx context.Context, tx *store.Tx, account string, renames []provider.Rename) error {
+	for _, rn := range renames {
+		if rn.Old == "" || rn.New == "" || rn.Old == rn.New {
+			continue
+		}
+		if _, err := tx.RenameRemoteID(ctx, account, rn.Old, rn.New); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // retryable reports whether a failed write may safely be executed again, which
@@ -593,43 +630,77 @@ func preRequest(err error) error {
 
 // execute pushes the op to the provider. It returns the remote id of anything
 // the provider created.
-func (e *Engine) execute(ctx context.Context, acct config.Account, op Op) (string, error) {
+func (e *Engine) execute(ctx context.Context, acct config.Account, op Op) (string, []provider.Rename, error) {
 	switch op.Kind {
 	case OpFlags, OpMailboxes, OpArchive, OpTrash, OpDraft, OpSend:
 		mp, err := e.mailProvider(ctx, acct)
 		if err != nil {
-			return "", preRequest(err)
+			return "", nil, preRequest(err)
 		}
 		return e.executeMail(ctx, acct, mp, op)
 	default:
 		cp, err := e.calendarProvider(ctx, acct)
 		if err != nil {
-			return "", preRequest(err)
+			return "", nil, preRequest(err)
 		}
-		return e.executeEvent(ctx, acct, cp, op)
+		remote, err := e.executeEvent(ctx, acct, cp, op)
+		return remote, nil, err
 	}
 }
 
-func (e *Engine) executeMail(ctx context.Context, acct config.Account, mp provider.MailProvider, op Op) (string, error) {
+func (e *Engine) executeMail(ctx context.Context, acct config.Account, mp provider.MailProvider, op Op) (string, []provider.Rename, error) {
+	// A provider whose writes move ids (IMAP) reports the mapping so the row can
+	// be renamed rather than deleted and fetched again under its new id.
+	rm, _ := mp.(provider.Remapper)
+
 	switch op.Kind {
 	case OpFlags:
-		return "", mp.SetFlags(ctx, op.IDs, op.Flags.Set, op.Flags.Clear)
+		return "", nil, mp.SetFlags(ctx, op.IDs, op.Flags.Set, op.Flags.Clear)
 	case OpMailboxes:
-		return "", mp.SetMailboxes(ctx, op.IDs, op.AddMailboxes, op.RemoveMailboxes)
+		if rm != nil {
+			renames, err := rm.SetMailboxesRemap(ctx, op.IDs, op.AddMailboxes, op.RemoveMailboxes)
+			return "", renames, err
+		}
+		return "", nil, mp.SetMailboxes(ctx, op.IDs, op.AddMailboxes, op.RemoveMailboxes)
 	case OpArchive:
 		add, remove, _, err := e.resolveMailboxPatch(ctx, acct, op)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
-		return "", mp.SetMailboxes(ctx, op.IDs, add, remove)
+		if rm != nil {
+			renames, err := rm.SetMailboxesRemap(ctx, op.IDs, add, remove)
+			return "", renames, err
+		}
+		return "", nil, mp.SetMailboxes(ctx, op.IDs, add, remove)
 	case OpTrash:
-		return "", mp.Trash(ctx, op.IDs)
+		if rm != nil {
+			renames, err := rm.TrashRemap(ctx, op.IDs)
+			return "", renames, err
+		}
+		return "", nil, mp.Trash(ctx, op.IDs)
 	case OpDraft:
-		return mp.CreateDraft(ctx, op.Raw)
+		remote, err := mp.CreateDraft(ctx, op.Raw)
+		return remote, nil, err
 	case OpSend:
-		return mp.Send(ctx, op.Raw, op.ThreadID)
+		remote, err := e.submit(ctx, mp, op)
+		return remote, nil, err
 	}
-	return "", fmt.Errorf("sync: unsupported mail op %q", op.Kind)
+	return "", nil, fmt.Errorf("sync: unsupported mail op %q", op.Kind)
+}
+
+// submit hands a composed message to the provider.
+//
+// A backend that submits over SMTP needs the recipients stated separately: Bcc
+// must not appear in the bytes the recipients receive, so the built message
+// omits the header and there is nothing for RCPT TO to read. Backends that take
+// the whole message at once find the recipients in it themselves.
+func (e *Engine) submit(ctx context.Context, mp provider.MailProvider, op Op) (string, error) {
+	if sub, ok := mp.(provider.Submitter); ok && len(op.Recipients) > 0 {
+		return sub.Submit(ctx, op.Raw, provider.SubmitEnvelope{
+			From: op.From, To: op.Recipients, ThreadID: op.ThreadID,
+		})
+	}
+	return mp.Send(ctx, op.Raw, op.ThreadID)
 }
 
 // resolveMailboxPatch is mailboxPatch outside a transaction.
@@ -798,11 +869,16 @@ func (e *Engine) RetryOutbox(ctx context.Context, account string) (*OutboxReport
 		}
 
 		rep.Attempted++
-		remote, err := e.execute(ctx, *acct, op)
+		remote, renames, err := e.execute(ctx, *acct, op)
 		e.noteAttempt(it.ID, it.Attempts+1)
 		switch {
 		case err == nil:
-			if err := e.st.MarkOutboxDone(ctx, it.ID); err != nil {
+			if err := e.st.Tx(ctx, func(tx *store.Tx) error {
+				if err := e.applyRenames(ctx, tx, it.AccountID, renames); err != nil {
+					return err
+				}
+				return tx.MarkOutboxDone(ctx, it.ID)
+			}); err != nil {
 				return rep, err
 			}
 			e.log.Info("outbox item done", "account", it.AccountID, "kind", it.Kind,

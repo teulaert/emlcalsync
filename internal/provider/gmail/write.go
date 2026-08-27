@@ -1,15 +1,19 @@
 package gmail
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	netmail "net/mail"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
 	gmailapi "google.golang.org/api/gmail/v1"
 
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // SetFlags adds/removes the label equivalents of the flags: UNREAD for
@@ -113,6 +117,87 @@ func (m *Mail) CreateDraft(ctx context.Context, raw []byte) (string, error) {
 		return created.Message.Id, nil
 	}
 	return created.Id, nil
+}
+
+// Submit implements provider.Submitter.
+//
+// The Gmail API takes only the message, deriving the recipients from its
+// headers — there is no envelope to state, the way JMAP and SMTP have one. So
+// the blind recipients have to be reunited with the message: without a Bcc
+// header, messages.send has no way to learn they exist and silently delivers to
+// the visible recipients only. Gmail strips the header before delivery, so it
+// never reaches anybody.
+func (m *Mail) Submit(ctx context.Context, raw []byte, env provider.SubmitEnvelope) (string, error) {
+	return m.Send(ctx, withBcc(raw, env), env.ThreadID)
+}
+
+// withBcc prepends a Bcc header naming every envelope recipient the message
+// does not already address. Header order carries no meaning in RFC 5322 outside
+// the trace fields, so the front of the block is a safe place to put it.
+func withBcc(raw []byte, env provider.SubmitEnvelope) []byte {
+	if len(env.To) == 0 || len(raw) == 0 {
+		return raw
+	}
+	visible := visibleRecipients(raw)
+	var blind []string
+	for _, to := range env.To {
+		if !visible[strings.ToLower(strings.TrimSpace(to))] {
+			blind = append(blind, to)
+		}
+	}
+	if len(blind) == 0 {
+		return raw
+	}
+	header := "Bcc: " + strings.Join(blind, ", ") + "\r\n"
+	return append([]byte(header), raw...)
+}
+
+// visibleRecipients is every address already named in the message's own To and
+// Cc headers, lowercased. It reads the header block only, and stops at the
+// blank line that ends it.
+func visibleRecipients(raw []byte) map[string]bool {
+	out := map[string]bool{}
+	head, _, _ := bytes.Cut(raw, []byte("\r\n\r\n"))
+	if len(head) == len(raw) {
+		head, _, _ = bytes.Cut(raw, []byte("\n\n"))
+	}
+	var cur string
+	for _, line := range strings.Split(strings.ReplaceAll(string(head), "\r\n", "\n"), "\n") {
+		switch {
+		case line == "":
+			continue
+		case line[0] == ' ' || line[0] == '\t': // folded continuation
+			if cur != "" {
+				cur += " " + strings.TrimSpace(line)
+			}
+			continue
+		}
+		addVisible(out, cur)
+		cur = ""
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "to", "cc":
+			cur = strings.TrimSpace(value)
+		}
+	}
+	addVisible(out, cur)
+	return out
+}
+
+func addVisible(out map[string]bool, value string) {
+	if value == "" {
+		return
+	}
+	list, err := netmail.ParseAddressList(value)
+	if err != nil {
+		return
+	}
+	for _, a := range list {
+		out[strings.ToLower(strings.TrimSpace(a.Address))] = true
+	}
 }
 
 // Send submits raw. threadID, when set, attaches the message to an existing

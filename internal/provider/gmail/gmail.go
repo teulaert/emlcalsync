@@ -93,7 +93,10 @@ type Mail struct {
 	knownLabels map[string]struct{} // ids seen by the last Mailboxes call
 }
 
-var _ provider.MailProvider = (*Mail)(nil)
+var (
+	_ provider.MailProvider = (*Mail)(nil)
+	_ provider.Submitter    = (*Mail)(nil)
+)
 
 const (
 	// The user this client acts as. The Gmail API's magic alias for "the

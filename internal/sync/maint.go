@@ -30,7 +30,21 @@ const reindexPage = 100
 // text, attachments, thread summaries and the FTS index. Provider-side facts
 // (flags, mailbox membership, received time, deletion) are preserved.
 // account "" covers every configured account.
+// ReindexOptions tunes a reindex pass.
+type ReindexOptions struct {
+	// Rethread discards the stored thread ids and works them out again from
+	// the Message-ID graph. Only meaningful for a backend that has no
+	// server-side threading to fall back on (IMAP): for Gmail and JMAP the
+	// stored id IS the server's, and recomputing it would replace their
+	// threading with a strictly worse guess.
+	Rethread bool
+}
+
 func (e *Engine) Reindex(ctx context.Context, account string) (*ReindexReport, error) {
+	return e.ReindexWith(ctx, account, ReindexOptions{})
+}
+
+func (e *Engine) ReindexWith(ctx context.Context, account string, o ReindexOptions) (*ReindexReport, error) {
 	started := time.Now()
 	rep := &ReindexReport{}
 
@@ -45,6 +59,11 @@ func (e *Engine) Reindex(ctx context.Context, account string) (*ReindexReport, e
 	rep.Accounts = accounts
 
 	for _, name := range accounts {
+		if o.Rethread {
+			if err := e.st.ClearThreading(ctx, name); err != nil {
+				return rep, err
+			}
+		}
 		offset := 0
 		for {
 			msgs, err := e.st.ListMessages(ctx, store.MessageFilter{
@@ -83,10 +102,14 @@ func (e *Engine) Reindex(ctx context.Context, account string) (*ReindexReport, e
 					e.log.Warn("mime parse failed", "account", name, "message", m.RemoteID, "err", perr)
 					parsed = nil
 				}
+				thread := m.ThreadID
+				if o.Rethread {
+					thread = "" // let UpsertMessage work it out from the headers
+				}
 				n := &model.Message{
 					AccountID:      name,
 					RemoteID:       m.RemoteID,
-					ThreadID:       m.ThreadID,
+					ThreadID:       thread,
 					BlobSHA256:     m.BlobSHA256,
 					RawComplete:    true,
 					Received:       m.Received,

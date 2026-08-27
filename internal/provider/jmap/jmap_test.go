@@ -1128,6 +1128,65 @@ func TestSend(t *testing.T) {
 	}
 }
 
+// Bcc recipients are the reason Submit exists. The message deliberately carries
+// no Bcc header -- it must not reach the recipients -- and RFC 8621 generates a
+// null envelope's rcptTo from "the To, Cc, and Bcc header fields", so leaving the
+// server to derive one silently drops every blind recipient. Submit must state
+// rcptTo explicitly.
+func TestSubmitStatesTheEnvelopeSoBccIsNotDropped(t *testing.T) {
+	f := newFakeServer(t)
+	m := f.client(t).Mail()
+	// No Bcc header, exactly as mime.Build produces it.
+	raw := []byte("From: me@example.com\r\nTo: you@example.com\r\nSubject: hi\r\n\r\nhello\r\n")
+
+	env := provider.SubmitEnvelope{
+		From: "me@example.com",
+		To:   []string{"you@example.com", "blind@example.com"},
+	}
+	if _, err := m.Submit(testCtx(t), raw, env); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	subs := f.captured("EmailSubmission/set")
+	if len(subs) != 1 {
+		t.Fatalf("got %d EmailSubmission/set calls", len(subs))
+	}
+	create := subs[0]["create"].(map[string]any)["sub"].(map[string]any)
+	envArg, ok := create["envelope"].(map[string]any)
+	if !ok {
+		t.Fatal("no envelope on the submission; the server would derive one and drop the Bcc")
+	}
+	if from, _ := envArg["mailFrom"].(map[string]any); from["email"] != "me@example.com" {
+		t.Errorf("mailFrom = %v", envArg["mailFrom"])
+	}
+	rcpt, _ := envArg["rcptTo"].([]any)
+	var got []string
+	for _, r := range rcpt {
+		if e, ok := r.(map[string]any); ok {
+			got = append(got, fmt.Sprint(e["email"]))
+		}
+	}
+	if len(got) != 2 || got[0] != "you@example.com" || got[1] != "blind@example.com" {
+		t.Errorf("rcptTo = %v, want both the visible and the blind recipient", got)
+	}
+}
+
+// Send without an envelope stays as it was: the server derives one. Backends
+// are free to keep using it when the caller has no envelope to give.
+func TestSendOmitsTheEnvelope(t *testing.T) {
+	f := newFakeServer(t)
+	m := f.client(t).Mail()
+	raw := []byte("From: me@example.com\r\nTo: you@example.com\r\nSubject: hi\r\n\r\nhello\r\n")
+
+	if _, err := m.Send(testCtx(t), raw, ""); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	create := f.captured("EmailSubmission/set")[0]["create"].(map[string]any)["sub"].(map[string]any)
+	if _, present := create["envelope"]; present {
+		t.Error("Send sent an envelope; it has none to send")
+	}
+}
+
 // TestSendDoesNotRetrySubmission: a submission that fails with a 5xx may still
 // have handed the message to the MTA, so it must be surfaced, never retried.
 func TestSendDoesNotRetrySubmission(t *testing.T) {

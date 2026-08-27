@@ -764,3 +764,68 @@ func TestBatchEndpointDefaults(t *testing.T) {
 		t.Errorf("BatchEndpoint override ignored: %q", m.batchURL)
 	}
 }
+
+// Bcc is the whole reason Submit exists. messages.send reads the recipients out
+// of the message headers -- there is no envelope to state -- so a message built
+// without a Bcc header (which is how it must go out) reaches only the visible
+// recipients. Submit reunites the two; Gmail strips the header on delivery.
+func TestSubmitAddsBccForRecipientsTheMessageDoesNotName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		to   []string
+		want string // the Bcc header expected, "" for none
+	}{
+		{
+			name: "blind recipient gains a header",
+			raw:  "From: me@example.com\r\nTo: you@example.com\r\nSubject: hi\r\n\r\nbody\r\n",
+			to:   []string{"you@example.com", "blind@example.com"},
+			want: "Bcc: blind@example.com\r\n",
+		},
+		{
+			name: "nothing blind, nothing added",
+			raw:  "From: me@example.com\r\nTo: you@example.com\r\nSubject: hi\r\n\r\nbody\r\n",
+			to:   []string{"you@example.com"},
+			want: "",
+		},
+		{
+			name: "cc counts as visible",
+			raw:  "From: me@example.com\r\nTo: a@example.com\r\nCc: b@example.com\r\nSubject: hi\r\n\r\nbody\r\n",
+			to:   []string{"a@example.com", "b@example.com"},
+			want: "",
+		},
+		{
+			name: "display names and case do not hide a match",
+			raw:  "From: me@example.com\r\nTo: You <YOU@Example.com>\r\nSubject: hi\r\n\r\nbody\r\n",
+			to:   []string{"you@example.com"},
+			want: "",
+		},
+		{
+			name: "folded header is still read",
+			raw:  "From: me@example.com\r\nTo: a@example.com,\r\n b@example.com\r\nSubject: hi\r\n\r\nbody\r\n",
+			to:   []string{"a@example.com", "b@example.com", "c@example.com"},
+			want: "Bcc: c@example.com\r\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := withBcc([]byte(tc.raw), provider.SubmitEnvelope{From: "me@example.com", To: tc.to})
+			want := tc.want + tc.raw
+			if string(got) != want {
+				t.Errorf("withBcc =\n%q\nwant\n%q", got, want)
+			}
+		})
+	}
+}
+
+// A body that happens to contain header-shaped lines must not be mistaken for
+// recipients -- that would drop a real blind recipient.
+func TestVisibleRecipientsStopsAtTheHeaderBlock(t *testing.T) {
+	raw := "From: me@example.com\r\nTo: a@example.com\r\n\r\nTo: notaheader@example.com\r\n"
+	got := visibleRecipients([]byte(raw))
+	if got["notaheader@example.com"] {
+		t.Error("read a To: line out of the body")
+	}
+	if !got["a@example.com"] {
+		t.Error("missed the real To: header")
+	}
+}

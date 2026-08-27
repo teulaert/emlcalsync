@@ -47,8 +47,22 @@ type RawMessage struct {
 	Raw []byte // complete RFC 822 bytes, exactly as the provider returned them
 }
 
+// Rename records a remote id that changed while the message itself stayed the
+// same: an IMAP COPY/MOVE hands the copy a new UID, and a folder rename does it
+// to every message at once. The engine rewrites the index row in place instead
+// of deleting it and fetching the same bytes again under a new id.
+//
+// Backends whose ids never move (Gmail, JMAP) never produce one.
+type Rename struct{ Old, New string }
+
 // Changes is the result of a delta call.
 type Changes struct {
+	// Renamed are ids that moved. The engine applies these BEFORE it interprets
+	// Added/Updated/Removed, so the rest of the delta may refer to the new ids.
+	// A folder rename must report its messages here and set MailboxesChanged:
+	// applying the renames first is what keeps ReplaceMailboxes from cascading
+	// the old mailbox's memberships away.
+	Renamed []Rename
 	// Added are messages that are new since the state. The sync engine will
 	// FetchRaw them. Only RemoteID is required; other fields are optional hints.
 	Added []Envelope
@@ -126,6 +140,47 @@ type CalendarProvider interface {
 	DeleteEvent(ctx context.Context, calendarRemote, remoteID string) error
 	// Respond sets the user's own participation status.
 	Respond(ctx context.Context, calendarRemote, remoteID string, resp model.Participation) error
+}
+
+// Remapper is implemented by providers whose writes move a message's remote id.
+//
+// On IMAP a message is (folder, uidvalidity, uid), so COPY and MOVE mint a new
+// uid for the copy — the id the caller passed in no longer names anything. The
+// server reports the mapping (RFC 4315 COPYUID), so rather than let the row be
+// deleted and re-fetched under a new id, the provider hands the mapping back and
+// the engine renames the row in place, keeping its blob, thread and flags.
+//
+// The engine prefers these over the plain SetMailboxes/Trash when a provider
+// implements them. Returning no renames is legal: a server without COPYUID
+// leaves the delta to discover the move as a removal plus an addition.
+type Remapper interface {
+	SetMailboxesRemap(ctx context.Context, ids []string, add, remove []string) ([]Rename, error)
+	TrashRemap(ctx context.Context, ids []string) ([]Rename, error)
+}
+
+// SubmitEnvelope carries the recipients a raw message deliberately does not.
+//
+// Bcc must not appear in the bytes that reach the recipients, so the built
+// message omits the header entirely — which leaves an SMTP submission with
+// nothing to put in RCPT TO. Providers that submit over SMTP need the envelope
+// stated separately; API backends that take the whole message at once (Gmail,
+// JMAP) read the recipients out of it themselves.
+type SubmitEnvelope struct {
+	// From is the envelope sender (SMTP MAIL FROM).
+	From string
+	// To is every recipient: To, Cc and Bcc together.
+	To []string
+	// ThreadID is what Send's own threadID argument carries: the thread to
+	// attach the message to, where the backend has such a notion (Gmail). It
+	// rides along here because Submit replaces Send entirely, so it has to
+	// carry everything Send was given. SMTP has nowhere to put it.
+	ThreadID string
+}
+
+// Submitter is implemented by backends that need an explicit envelope to send.
+// The engine prefers it over MailProvider.Send when both are available.
+type Submitter interface {
+	Submit(ctx context.Context, raw []byte, env SubmitEnvelope) (remoteID string, err error)
 }
 
 // ChangeHint is delivered by a Pusher when the server signals a change.
