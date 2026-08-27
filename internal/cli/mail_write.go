@@ -49,13 +49,21 @@ func mailApply(cmd *cobra.Command, app *App, ids []string, opFor func(group IDGr
 		if res.Queued {
 			queued++
 		}
+		moved := map[string]string{}
+		for _, rn := range res.Renames {
+			moved[rn.Old] = rn.New
+		}
 		for _, r := range g.Remotes {
-			rows = append(rows, mailWriteRow{
+			row := mailWriteRow{
 				ID:       PublicMessageID(g.Account, r),
 				OK:       !res.Queued,
 				Queued:   res.Queued,
 				RemoteID: res.RemoteID,
-			})
+			}
+			if to, ok := moved[r]; ok && to != r {
+				row.NewID = PublicMessageID(g.Account, to)
+			}
+			rows = append(rows, row)
 		}
 	}
 	if err := app.Printer().Print(rows); err != nil {

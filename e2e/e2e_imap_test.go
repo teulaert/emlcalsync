@@ -120,7 +120,18 @@ func TestIMAPArchiveRenamesRatherThanRefetching(t *testing.T) {
 	e.mustRun("sync", "--account", "home")
 
 	id := firstID(t, e.mustRun("mail", "list", "--account", "home"))
-	e.mustRun("mail", "archive", id)
+	out := e.mustRun("mail", "archive", id)
+
+	// The move minted a new uid, so the id the user was holding is dead. It has
+	// to be told the new one, or an agent that recorded the old id is stuck.
+	rows := decodeArray(t, out)
+	newID, _ := rows[0]["new_id"].(string)
+	if newID == "" {
+		t.Errorf("archive did not report the message's new id:\n%s", out)
+	}
+	if newID == id {
+		t.Errorf("new id %q is the old one; a move must renumber it", newID)
+	}
 
 	if e.imap.Count("INBOX") != 0 || e.imap.Count("Archive") != 1 {
 		t.Fatalf("server has inbox=%d archive=%d, want the message moved",
@@ -129,9 +140,13 @@ func TestIMAPArchiveRenamesRatherThanRefetching(t *testing.T) {
 
 	// A sync afterwards must settle without duplicating anything.
 	e.mustRun("sync", "--account", "home")
-	out := e.mustRun("mail", "list", "--account", "home", "--limit", "50")
-	if n := countRows(t, out); n != 1 {
-		t.Errorf("listed %d messages after archiving one, want 1:\n%s", n, out)
+	listed := e.mustRun("mail", "list", "--account", "home", "--limit", "50")
+	if n := countRows(t, listed); n != 1 {
+		t.Errorf("listed %d messages after archiving one, want 1:\n%s", n, listed)
+	}
+	// And the id it reported is the one that now resolves.
+	if got := firstID(t, listed); got != newID {
+		t.Errorf("index holds %q, but archive reported %q", got, newID)
 	}
 }
 

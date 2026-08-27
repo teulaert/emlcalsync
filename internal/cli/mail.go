@@ -131,6 +131,11 @@ type mailWriteRow struct {
 	OK       bool   `json:"ok"                  table:"OK"`
 	Queued   bool   `json:"queued"              table:"QUEUED"`
 	RemoteID string `json:"remote_id,omitempty" table:"REMOTE"`
+	// NewID is set when the write moved the message and gave it a new id, which
+	// on IMAP is what archiving or trashing does. Without it the caller is left
+	// holding an id that no longer names anything — and an agent that recorded
+	// the old one would look it up and be told it does not exist.
+	NewID string `json:"new_id,omitempty" table:"NEW-ID"`
 }
 
 // mailSendRow is what draft/send/reply print.

@@ -54,8 +54,9 @@ type Server struct {
 	srv  *imapserver.Server
 	user *imapmemserver.User
 
-	mu   sync.Mutex
-	uidv map[string]uint32
+	mu     sync.Mutex
+	uidv   map[string]uint32
+	script strings.Builder
 }
 
 // Option tunes a fake before it starts.
@@ -65,6 +66,7 @@ type config struct {
 	caps    []imapv2.Cap
 	hidden  map[imapv2.Cap]bool
 	verbose bool
+	record  bool
 }
 
 // WithCaps replaces the advertised capability set outright.
@@ -85,6 +87,11 @@ func HideCaps(caps ...imapv2.Cap) Option {
 // Verbose echoes the protocol conversation to the test log.
 func Verbose() Option { return func(c *config) { c.verbose = true } }
 
+// Record keeps the protocol conversation so a test can assert on what the
+// client did or did not send. Some of what matters most about a mail client is
+// a command it must never issue.
+func Record() Option { return func(c *config) { c.record = true } }
+
 // New starts a fake on loopback and registers cleanup.
 func New(t testing.TB, opts ...Option) *Server {
 	t.Helper()
@@ -104,9 +111,15 @@ func New(t testing.TB, opts ...Option) *Server {
 	user := imapmemserver.NewUser(Username, Password)
 	mem.AddUser(user)
 
+	s := &Server{uidv: map[string]uint32{}}
 	var debug io.Writer
-	if cfg.verbose {
+	switch {
+	case cfg.verbose && cfg.record:
+		debug = io.MultiWriter(testWriter{t}, (*scriptWriter)(s))
+	case cfg.verbose:
 		debug = testWriter{t}
+	case cfg.record:
+		debug = (*scriptWriter)(s)
 	}
 	srv := imapserver.New(&imapserver.Options{
 		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
@@ -125,7 +138,7 @@ func New(t testing.TB, opts ...Option) *Server {
 	}
 	go func() { _ = srv.Serve(ln) }()
 
-	s := &Server{t: t, ln: ln, srv: srv, user: user, uidv: map[string]uint32{}}
+	s.t, s.ln, s.srv, s.user = t, ln, srv, user
 	t.Cleanup(func() { _ = srv.Close() })
 
 	s.CreateMailbox("INBOX")
@@ -251,6 +264,29 @@ func (l literal) Size() int64 { return l.n }
 type nopLogger struct{}
 
 func (nopLogger) Printf(string, ...any) {}
+
+// Transcript is everything that crossed the wire, when Record was set.
+func (s *Server) Transcript() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.script.String()
+}
+
+// Sent reports whether the client ever sent a command matching a substring.
+// Case-insensitive, because IMAP verbs are not case-sensitive on the wire.
+func (s *Server) Sent(substr string) bool {
+	return strings.Contains(strings.ToUpper(s.Transcript()), strings.ToUpper(substr))
+}
+
+type scriptWriter Server
+
+func (w *scriptWriter) Write(p []byte) (int, error) {
+	s := (*Server)(w)
+	s.mu.Lock()
+	s.script.Write(p)
+	s.mu.Unlock()
+	return len(p), nil
+}
 
 type testWriter struct{ t testing.TB }
 
