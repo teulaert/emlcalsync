@@ -6,7 +6,7 @@ description: "Read, search and act on the local mail & calendar archive via the 
 # emlcal
 
 `emlcal` is a complete local archive of the user's mail and calendar accounts
-(Gmail, Fastmail and iCloud), with a CLI built for you. Reads hit a local SQLite index
+(Gmail, Fastmail, iCloud and any IMAP server), with a CLI built for you. Reads hit a local SQLite index
 and never touch the network; writes go to the provider and are queued when
 offline.
 

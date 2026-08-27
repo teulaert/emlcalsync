@@ -685,6 +685,13 @@ zsh/bash/fish).
   (`work:18f3a2b9c1d4e5f6`), `<account>:t:<thread_id>` for threads,
   `<account>:c:<calendar>:<event_id>` for events. Every list output includes
   the id; every command that takes an id accepts what a list printed.
+
+  One exception, and it is a protocol fact rather than a choice: on IMAP a
+  message *is* its `(folder, uid)`, so moving one renumbers it (§6.5). The
+  write reports the new id as `new_id` rather than leaving the caller holding
+  a dead one, and the index row is renamed rather than re-fetched — but an id
+  recorded before a move has to be looked up again. Gmail and JMAP ids never
+  move.
 - `--limit` defaults to 50; `--since 2d|12h|2026-08-01` and `--until` on every
   list; `--account` is repeatable and defaults to all.
 

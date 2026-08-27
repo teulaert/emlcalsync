@@ -1,8 +1,8 @@
 # emlcal
 
 A complete, offline-first local archive of your mail and calendars — Gmail,
-Fastmail and iCloud, as many accounts as you have — behind one CLI that is
-built for both humans and AI agents.
+Fastmail, iCloud and any IMAP server, as many accounts as you have — behind one
+CLI that is built for both humans and AI agents.
 
 ```
 $ emlcal mail list --unread --since 2d
@@ -18,8 +18,9 @@ $ emlcal mail reply fm:MTQ3OTAxOQ --body "Akkoord, ik stuur het vanmiddag." --dr
 Every message of every account is stored on disk as raw RFC 822 (zstd,
 content-addressed), indexed in SQLite with full-text search, and kept in sync
 with cheap incremental deltas (JMAP push for Fastmail, history polling for
-Gmail). All read commands work without a network. The SQLite index is derived
-data: `emlcal reindex` rebuilds it from the archive.
+Gmail, IDLE and uid-set diffing for IMAP). All read commands work without a
+network. The SQLite index is derived data: `emlcal reindex` rebuilds it from
+the archive.
 
 The full design is in [DESIGN.md](DESIGN.md).
 
@@ -156,7 +157,8 @@ Read commands never need the network and are safe to allowlist for an agent;
 write commands go to the provider (and are queued in an outbox when offline).
 
 ```
-account   add gmail|fastmail|icloud · list · remove · google-client · caldav-password
+account   add gmail|fastmail|icloud|imap · list · remove
+          google-client · caldav-password · imap-password
 sync      [--account] [--full] [--watch] [--mail-only|--calendar-only]
 status · doctor · outbox · reindex · gc · export (--mbox | --maildir) · service · skill
 tui       interactive mail + calendar, merged across accounts
@@ -172,7 +174,9 @@ cal       calendars · agenda · show · free                                   
 - Output is a table on a TTY and **JSON when piped**; `-o json|table|plain`.
 - Ids are stable and opaque: `fm:MTQ3` (message), `fm:t:…` (thread),
   `gm:c:<calendar>:<event>` (event). Every list prints them; every command
-  accepts them.
+  accepts them. On IMAP a message is identified by its folder and uid, so
+  moving one (archive, trash) renumbers it — the write reports the new id as
+  `new_id`, and the old one stops resolving.
 - `--since 2d`, `--until`, `--account` (repeatable) on every list;
   `--dry-run` on every write.
 - Exit codes: 0 ok · 1 error · 2 usage · 3 not found · 4 offline ·
