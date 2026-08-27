@@ -294,6 +294,16 @@ func coreProbeAccount(ctx context.Context, app *App, a config.Account) (string, 
 		if err != nil {
 			return "", err
 		}
+		// What the server admits to supporting explains most of how it will
+		// behave, and is the first thing worth knowing when a server emlcal has
+		// never been run against misbehaves.
+		if cp, ok := mp.(interface {
+			Capabilities(context.Context) ([]string, error)
+		}); ok {
+			if caps, err := cp.Capabilities(ctx); err == nil && len(caps) > 0 {
+				return fmt.Sprintf("%d mailboxes (%s)", len(mbs), strings.Join(caps, ", ")), nil
+			}
+		}
 		return fmt.Sprintf("%d mailboxes", len(mbs)), nil
 	}
 	cp, err := app.Factory.Calendar(ctx, a)

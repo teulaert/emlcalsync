@@ -1,6 +1,7 @@
 package imap
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -204,6 +205,41 @@ func (m *Mail) maxConns() int {
 		n = 1
 	}
 	return n
+}
+
+// Capabilities lists the extensions the server advertises, from the set that
+// changes emlcal's behaviour.
+//
+// This is deliberately part of the public surface: when someone reports that
+// their server behaves oddly, the first useful question is what it claims to
+// support, and "CONDSTORE is missing" explains a whole class of symptoms at
+// once. It costs one connection and no state.
+func (m *Mail) Capabilities(ctx context.Context) ([]string, error) {
+	interesting := []struct {
+		cap  imapv2.Cap
+		name string
+	}{
+		{imapv2.CapIMAP4rev2, "IMAP4rev2"},
+		{imapv2.CapCondStore, "CONDSTORE"},
+		{imapv2.CapMove, "MOVE"},
+		{imapv2.CapUIDPlus, "UIDPLUS"},
+		{imapv2.CapSpecialUse, "SPECIAL-USE"},
+		{imapv2.CapListStatus, "LIST-STATUS"},
+		{imapv2.CapESearch, "ESEARCH"},
+		{imapv2.CapIdle, "IDLE"},
+		{imapv2.CapObjectID, "OBJECTID"},
+		{imapv2.CapNamespace, "NAMESPACE"},
+	}
+	var out []string
+	err := m.pool.withAny(ctx, func(c *conn) error {
+		for _, want := range interesting {
+			if hasCap(c.caps, want.cap) {
+				out = append(out, want.name)
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // Close releases every pooled connection.
