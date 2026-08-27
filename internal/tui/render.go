@@ -56,6 +56,9 @@ func truncCells(s string, n int) string {
 	return strings.TrimRight(b.String(), " ") + "…"
 }
 
+// runeCells is the terminal width of one rune.
+func runeCells(r rune) int { return runewidth.RuneWidth(r) }
+
 // padCells right-pads s to exactly n terminal cells (truncating if needed), so
 // a row of them lines up whatever alphabet the mail is written in.
 func padCells(s string, n int) string {

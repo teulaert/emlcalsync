@@ -295,13 +295,14 @@ func (m *mailList) scroll(rows int) {
 	}
 }
 
-// listRows is how many list lines fit: total minus header, footer and status.
+// listRows is how many rows a screen may draw. The root has already taken the
+// title and status line out of the height it passes down, so a screen fills
+// every line it is given -- anything less and the frame comes up short.
 func listRows(h int) int {
-	r := h - 3
-	if r < 1 {
+	if h < 1 {
 		return 1
 	}
-	return r
+	return h
 }
 
 func (m *mailList) View(w, h int) string {

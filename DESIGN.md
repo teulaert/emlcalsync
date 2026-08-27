@@ -929,7 +929,7 @@ internal/
 | Compression | `klauspost/compress/zstd` | pure Go, fast |
 | Recurrence | `teambition/rrule-go` | RFC 5545 |
 | CLI | `spf13/cobra` | completions, help, ubiquitous |
-| TUI (later) | `charmbracelet/bubbletea` | same language, same store package |
+| TUI | `charm.land/bubbletea/v2` (+ `bubbles/v2`, `lipgloss/v2`) | same language, same store package. The v2 module path is `charm.land/*`; it is the current stable line and pulls a smaller indirect set than v1 |
 
 Tests: provider clients tested against recorded fixtures (`httptest` +
 golden JSON); MIME tested with a corpus of nasty real-world messages; sync
@@ -948,7 +948,8 @@ partial pages, and crashes mid-batch.
 | 4 | `sync --watch`, JMAP push, systemd install, `status`, `doctor` | always-on freshness |
 | 5 | calendars: GCal + JMAP Calendars, recurrence expansion, `cal *` | second resource type on the same engine |
 | 6 | `skill`, `reindex`, `gc`, `export`, completions, docs | agent polish + archive guarantees |
-| later | bubbletea TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
+| 7 | `tui`: unified mail list, thread, reader, agenda, event; archive/trash/mark/star with undo | the archive is usable by a person, not only an agent |
+| later | composing from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
 
 Phase 1 is deliberately Fastmail-first: an API token, no consent screens, and
 push support make it the fastest path to a real archive you can query.
@@ -1100,6 +1101,32 @@ first full build and the two adversarial reviews (`docs/reviews/`).
 - **Per-account `mail = false` / `calendar = false`** toggles in config.
 - **Per-account Google OAuth client** in `secrets/<name>.google-client.json`
   (`account add gmail --client-id/--client-secret`).
+
+- **TUI (`internal/tui`, `emlcal tui`)** is a second surface over the same
+  store and the same engine, not a second client. Decisions worth knowing:
+  - It does **not** run its own `Engine.Watch`: the daemon holds the
+    per-account flock, so an in-process engine would only collect `ErrLocked`.
+    Freshness comes from polling `PRAGMA data_version` every 2 s on one pinned
+    `*sql.Conn` — the counter SQLite bumps when another *connection* commits.
+    Pinning matters: the pragma is per-connection, so asking through the pool
+    compares unrelated counters and reports a change every other poll. `R`
+    additionally sends `SIGUSR1` to the pid file, the same nudge `sync` uses.
+  - **Undo is a second ordinary `Apply` of the inverse op.** The engine has no
+    undo primitive — `rollback` runs only inside `Apply`, when a provider
+    *rejects* a write. Archive inverts to `OpMailboxes{Add: inbox, Remove:
+    archive}`; trash needs the message's mailbox set captured *before* the
+    write, because `mailboxPatch` sets `clearOthers` and drops the rest.
+  - It consumes `ApplyResult.Renames`. Gmail and JMAP always return it empty,
+    which is precisely why forgetting it would go unnoticed until IMAP.
+  - `output.Truncate` counts runes; the TUI needs cells, so it has its own
+    `truncCells`/`padCells` over `mattn/go-runewidth` (which arrives with
+    bubbletea). The CLI tables keep the rune-counting behaviour for now.
+  - `mailFlagsString`, `mailShortAddr`, `calTimeCell`, `calRSVPCell` and
+    `calFormatDuration` moved from `package cli` to `internal/output` as
+    `MailFlags`, `ShortAddr`, `TimeCell`, `RSVP` and `Duration`, so the two
+    surfaces cannot disagree about what a flag letter means. `mime.htmlToText`
+    became `mime.HTMLToText` for the same reason.
+  - Composing (reply/forward) is deliberately absent; `r` is reserved.
 
 ### Still to verify against live accounts
 

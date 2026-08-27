@@ -159,6 +159,7 @@ write commands go to the provider (and are queued in an outbox when offline).
 account   add gmail|fastmail|icloud · list · remove · google-client · caldav-password
 sync      [--account] [--full] [--watch] [--mail-only|--calendar-only]
 status · doctor · outbox · reindex · gc · export (--mbox | --maildir) · service · skill
+tui       interactive mail + calendar, merged across accounts
 
 mail      mailboxes · list · search · read · thread · attachment list|get      (read)
           mark · move · archive · trash · draft · send · reply                 (write)
@@ -223,4 +224,6 @@ Layout: `internal/store` (SQLite), `internal/blob`, `internal/mime`,
 v0.1 — mail, Google Calendar and Fastmail calendars (CalDAV) work end-to-end
 against real accounts. iCloud calendars are implemented and covered by tests
 against a fake server, but have not yet been run against a real account.
-Not yet: a TUI, embeddings for semantic search, contacts.
+`emlcal tui` browses and triages mail and calendar interactively, merged
+across every account. Not yet: composing from the TUI, embeddings for semantic
+search, contacts.

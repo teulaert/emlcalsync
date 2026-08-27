@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,8 +11,6 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
-
-	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // screen is one full-window view. The root owns a stack of them, so Esc is
@@ -141,9 +138,28 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return r.onKey(msg)
 	}
 
-	s, cmd := r.top().Update(msg, r.keys, r.w, r.bodyHeight())
-	r.replaceTop(s)
-	return r, cmd
+	return r, r.broadcast(msg)
+}
+
+// broadcast hands a message to every screen in both stacks.
+//
+// A load started by a screen that is not currently on top still has to reach
+// it: both stacks are initialised at startup, so the agenda's first result
+// arrives while the mail list is showing. Routing only to r.top() silently
+// dropped it, and the calendar came up empty. Screens already ignore results
+// whose seq is stale, so delivering widely is safe.
+func (r *root) broadcast(msg tea.Msg) tea.Cmd {
+	var cmds []tea.Cmd
+	for _, st := range [][]screen{r.mail, r.cal} {
+		for i, s := range st {
+			next, cmd := s.Update(msg, r.keys, r.w, r.bodyHeight())
+			st[i] = next
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+	}
+	return tea.Batch(cmds...)
 }
 
 func (r *root) replaceTop(s screen) {
@@ -449,8 +465,4 @@ func (r *root) helpView() string {
 	return b.String()
 }
 
-// unusedModelCheck keeps the compiler honest about the tea.Model contract.
 var _ tea.Model = (*root)(nil)
-
-var _ = fmt.Sprintf
-var _ = model.RoleInbox
