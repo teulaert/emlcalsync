@@ -206,3 +206,90 @@ func TestMailListRowsAreExactlyTheFullWidth(t *testing.T) {
 		}
 	}
 }
+
+// A reload arrives every couple of seconds, because the sync daemon commits
+// that often and every commit re-queries the visible screen. It must not move
+// the selection: the cursor belongs to the person, not to the query.
+func TestMailListReloadKeepsTheCursorOnItsThread(t *testing.T) {
+	d := newTestDeps(t, "work")
+	for i := 0; i < 5; i++ {
+		addMessage(t, d, "work", "w"+string(rune('a'+i)), "t"+string(rune('a'+i)),
+			"Subject "+string(rune('a'+i)), "sender", time.Duration(i)*time.Hour, false)
+	}
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	s := pump(t, m, m.Init(), k, 100, 24)
+	ml := s.(*mailList)
+
+	for i := 0; i < 3; i++ {
+		s, _ = ml.Update(keyPress("j"), k, 100, 24)
+		ml = s.(*mailList)
+	}
+	want := ml.selected().ThreadID
+
+	s = pump(t, ml, ml.reload(), k, 100, 24)
+	ml = s.(*mailList)
+
+	if got := ml.selected(); got == nil || got.ThreadID != want {
+		t.Fatalf("after reload the cursor is on %v at row %d, want thread %s", got, ml.cursor, want)
+	}
+}
+
+// Trashing a row and having the cursor jump to the top makes deleting a run of
+// mail impossible: every d would have to be followed by re-navigating. The
+// cursor holds its position, so it lands on whatever moved up into the gap.
+func TestMailListCursorHoldsItsPlaceWhenTheThreadIsGone(t *testing.T) {
+	d := newTestDeps(t, "work")
+	for i := 0; i < 5; i++ {
+		addMessage(t, d, "work", "w"+string(rune('a'+i)), "t"+string(rune('a'+i)),
+			"Subject "+string(rune('a'+i)), "sender", time.Duration(i)*time.Hour, false)
+	}
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	s := pump(t, m, m.Init(), k, 100, 24)
+	ml := s.(*mailList)
+
+	for i := 0; i < 2; i++ {
+		s, _ = ml.Update(keyPress("j"), k, 100, 24)
+		ml = s.(*mailList)
+	}
+	next := ml.threads[3].ThreadID // the row that will move up into the gap
+
+	// What the root does on d: drop the row, then the daemon's commit reloads
+	// the list without it.
+	ml.dropSelected()
+	moveOutOfInbox(t, d, "work", "wc")
+	s = pump(t, ml, ml.reload(), k, 100, 24)
+	ml = s.(*mailList)
+
+	if len(ml.threads) != 4 {
+		t.Fatalf("got %d threads after the trash, want 4", len(ml.threads))
+	}
+	if got := ml.selected(); got == nil || got.ThreadID != next {
+		t.Fatalf("cursor is on %v at row %d, want thread %s at row 2", got, ml.cursor, next)
+	}
+}
+
+// Changing what the list shows is the one case where the top is right.
+func TestMailListMailboxSwitchStartsAtTheTop(t *testing.T) {
+	d := newTestDeps(t, "work")
+	for i := 0; i < 5; i++ {
+		addMessage(t, d, "work", "w"+string(rune('a'+i)), "t"+string(rune('a'+i)),
+			"Subject "+string(rune('a'+i)), "sender", time.Duration(i)*time.Hour, false)
+	}
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	s := pump(t, m, m.Init(), k, 100, 24)
+	ml := s.(*mailList)
+
+	for i := 0; i < 3; i++ {
+		s, _ = ml.Update(keyPress("j"), k, 100, 24)
+		ml = s.(*mailList)
+	}
+	s, cmd := ml.Update(keyPress("M"), k, 100, 24) // inbox → all
+	ml = pump(t, s, cmd, k, 100, 24).(*mailList)
+
+	if ml.cursor != 0 || ml.top != 0 {
+		t.Fatalf("mailbox switch left the cursor at %d/%d, want 0/0", ml.cursor, ml.top)
+	}
+}

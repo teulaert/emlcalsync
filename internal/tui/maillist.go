@@ -51,6 +51,12 @@ type mailList struct {
 	loadErr error
 	atEnd   bool
 
+	// resetCursor is set by the loads that change what the list is showing --
+	// a different mailbox, account or query -- where starting at the top is
+	// the right answer. A plain refresh leaves it clear and keeps the cursor
+	// on the thread it was on.
+	resetCursor bool
+
 	// removed holds rows taken out optimistically, so a failed action can put
 	// them back where they were.
 	removed []removedRow
@@ -96,10 +102,21 @@ func (m *mailList) filter(offset int) store.MessageFilter {
 
 func (m *mailList) Init() tea.Cmd { return m.reload() }
 
-func (m *mailList) reload() tea.Cmd {
+// reload re-queries the current view. The cursor stays on the thread it was
+// on: the daemon commits every couple of seconds and each commit reloads the
+// visible screen, so a reload that jumped to the top would yank the selection
+// away seconds after every action.
+func (m *mailList) reload() tea.Cmd { return m.load(false) }
+
+// reloadFresh is reload for a view that has just changed -- another mailbox,
+// account or query -- where the old cursor means nothing.
+func (m *mailList) reloadFresh() tea.Cmd { return m.load(true) }
+
+func (m *mailList) load(reset bool) tea.Cmd {
 	m.seq++
 	m.loading = true
 	m.atEnd = false
+	m.resetCursor = reset
 	return m.d.loadThreads(m.seq, m.filter(0), m.query, false)
 }
 
@@ -172,6 +189,37 @@ func (m *mailList) restore() {
 
 func (m *mailList) commit() { m.removed = nil }
 
+// anchor names the row the cursor is on, so it can be found again in the
+// result of a reload.
+func (m *mailList) anchor() (string, int) {
+	t := m.selected()
+	if t == nil {
+		return "", m.cursor
+	}
+	return t.AccountID + "\x00" + t.ThreadID, m.cursor
+}
+
+// reanchor puts the cursor back on the thread it was on. When that thread is
+// gone -- it was just archived or trashed, or the daemon moved it -- the
+// cursor holds its position in the list instead, which lands it on whichever
+// row took the old one's place. That is what every mail client does, and it
+// is what makes deleting a run of messages possible without re-navigating
+// after each one.
+func (m *mailList) reanchor(key string, at int) {
+	if key != "" {
+		for i := range m.threads {
+			if m.threads[i].AccountID+"\x00"+m.threads[i].ThreadID == key {
+				m.cursor = i
+				return
+			}
+		}
+	}
+	m.cursor = min(at, len(m.threads)-1)
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
 func (m *mailList) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 	switch msg := msg.(type) {
 	case threadsLoaded:
@@ -189,8 +237,14 @@ func (m *mailList) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 			}
 			m.threads = append(m.threads, msg.threads...)
 		} else {
+			anchor, at := m.anchor()
 			m.threads = msg.threads
-			m.cursor, m.top = 0, 0
+			if m.resetCursor {
+				m.cursor, m.top = 0, 0
+			} else {
+				m.reanchor(anchor, at)
+				m.scroll(listRows(h))
+			}
 			if len(msg.threads) < pageSize {
 				m.atEnd = true
 			}
@@ -211,7 +265,7 @@ func (m *mailList) searchKey(msg tea.KeyPressMsg) (screen, tea.Cmd) {
 	case "enter":
 		m.searching = false
 		m.query = strings.TrimSpace(m.input)
-		return m, m.reload()
+		return m, m.reloadFresh()
 	case "esc":
 		m.searching = false
 		m.input = ""
@@ -275,10 +329,10 @@ func (m *mailList) navKey(msg tea.KeyPressMsg, k keymap, h int) (screen, tea.Cmd
 	case key.Matches(msg, k.Mailbox):
 		m.mailbox = (m.mailbox + 1) % len(mailboxCycle)
 		m.query = ""
-		return m, m.reload()
+		return m, m.reloadFresh()
 	case key.Matches(msg, k.Account):
 		m.account = (m.account + 1) % (len(m.accounts) + 1)
-		return m, m.reload()
+		return m, m.reloadFresh()
 	}
 	return m, nil
 }
@@ -289,6 +343,11 @@ func (m *mailList) scroll(rows int) {
 	}
 	if m.cursor >= m.top+rows {
 		m.top = m.cursor - rows + 1
+	}
+	// A reload can shrink the list under a window that was scrolled down;
+	// without this the view draws blank rows below the last thread.
+	if m.top > len(m.threads)-rows {
+		m.top = len(m.threads) - rows
 	}
 	if m.top < 0 {
 		m.top = 0

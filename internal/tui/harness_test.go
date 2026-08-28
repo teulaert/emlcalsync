@@ -157,3 +157,18 @@ func addEvent(t *testing.T, d Deps, account, calRemote, calName, remote, title s
 		t.Fatalf("ReplaceOccurrences: %v", err)
 	}
 }
+
+// moveOutOfInbox re-indexes a message into the trash, which is what the list
+// sees once a trash has gone through and the daemon has re-synced.
+func moveOutOfInbox(t *testing.T, d Deps, account, remote string) {
+	t.Helper()
+	ctx := context.Background()
+	m, err := d.Store.GetMessage(ctx, account, remote)
+	if err != nil {
+		t.Fatalf("GetMessage %s: %v", remote, err)
+	}
+	m.MailboxRemotes = []string{"trash"}
+	if _, err := d.Store.UpsertMessage(ctx, m, nil); err != nil {
+		t.Fatalf("UpsertMessage %s: %v", remote, err)
+	}
+}
