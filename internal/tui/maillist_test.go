@@ -327,3 +327,57 @@ func TestMailListDraftsView(t *testing.T) {
 		t.Errorf("the drafts view does not show the draft:\n%s", ml.View(100, 20))
 	}
 }
+
+// Trashed and spam mail is in the archive and always was in the "all" view,
+// mixed into everything else. The cycle now ends on the two views that isolate
+// it, so "what did I throw away" is a keypress rather than a search.
+func TestMailListTrashAndSpamViews(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "In the inbox", "anna", time.Hour, false)
+	addMessageIn(t, d, "trash", "work", "w2", "t2", "Thrown away", "bram", 2*time.Hour, false)
+	addMessageIn(t, d, "spam", "work", "w3", "t3", "Buy pills", "spammer", 3*time.Hour, false)
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	ml := pump(t, m, m.Init(), k, 100, 24).(*mailList)
+
+	// Every view but "all" holds exactly the mail that belongs in it; "all"
+	// holds the lot, trash and spam included, which is what it did before and
+	// why the two views below are worth having.
+	want := map[string]string{
+		"inbox":   "In the inbox",
+		"flagged": "",
+		"drafts":  "",
+		"sent":    "",
+		"archive": "",
+		"trash":   "Thrown away",
+		"spam":    "Buy pills",
+	}
+	seen := map[string]bool{}
+	for range mailboxCycle {
+		label := mailboxCycle[ml.mailbox].label
+		seen[label] = true
+		if label == "all" {
+			if len(ml.threads) != 3 {
+				t.Errorf("all has %d threads, want 3 (inbox, trash and spam)", len(ml.threads))
+			}
+		} else if subject := want[label]; subject == "" {
+			if len(ml.threads) != 0 {
+				t.Errorf("%s has %d threads, want 0: %+v", label, len(ml.threads), ml.threads)
+			}
+		} else if len(ml.threads) != 1 || ml.threads[0].Subject != subject {
+			t.Errorf("%s = %+v, want just %q", label, ml.threads, subject)
+		}
+		s, cmd := ml.Update(keyPress("M"), k, 100, 24)
+		ml = pump(t, s, cmd, k, 100, 24).(*mailList)
+	}
+	for _, label := range []string{"trash", "spam"} {
+		if !seen[label] {
+			t.Errorf("M never reaches the %s view", label)
+		}
+	}
+	// One full turn of the cycle comes back to where it started.
+	if got := mailboxCycle[ml.mailbox].label; got != "inbox" {
+		t.Errorf("the cycle wrapped to %q, want inbox", got)
+	}
+}

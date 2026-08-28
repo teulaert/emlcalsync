@@ -39,6 +39,7 @@ func newTestDeps(t *testing.T, accounts ...string) Deps {
 			{RemoteID: "archive", Name: "Archive", Role: model.RoleArchive, SortOrder: 2},
 			{RemoteID: "trash", Name: "Trash", Role: model.RoleTrash, SortOrder: 3},
 			{RemoteID: "drafts", Name: "Drafts", Role: model.RoleDrafts, SortOrder: 4},
+			{RemoteID: "spam", Name: "Spam", Role: model.RoleJunk, SortOrder: 5},
 		}); err != nil {
 			t.Fatalf("ReplaceMailboxes %s: %v", a, err)
 		}
@@ -55,6 +56,13 @@ func newTestDeps(t *testing.T, accounts ...string) Deps {
 // addMessage indexes one message in the inbox.
 func addMessage(t *testing.T, d Deps, account, remote, thread, subject, from string, ago time.Duration, unread bool) {
 	t.Helper()
+	addMessageIn(t, d, "inbox", account, remote, thread, subject, from, ago, unread)
+}
+
+// addMessageIn is addMessage into a named mailbox, for the views that are not
+// the inbox.
+func addMessageIn(t *testing.T, d Deps, mailbox, account, remote, thread, subject, from string, ago time.Duration, unread bool) {
+	t.Helper()
 	when := testNow.Add(-ago)
 	m := &model.Message{
 		AccountID:      account,
@@ -67,7 +75,7 @@ func addMessage(t *testing.T, d Deps, account, remote, thread, subject, from str
 		Snippet:        subject + " body",
 		TextBody:       subject + " body\n\nOn earlier, someone wrote:\n> quoted",
 		Flags:          model.Flags{Unread: unread},
-		MailboxRemotes: []string{"inbox"},
+		MailboxRemotes: []string{mailbox},
 		IndexedAt:      testNow,
 	}
 	if _, err := d.Store.UpsertMessage(context.Background(), m, nil); err != nil {

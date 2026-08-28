@@ -232,8 +232,9 @@ against a fake server, but have not yet been run against a real account.
 across every account; the two screens are tabs in the header, `1` for mail and
 `2` for the calendar (`tab` toggles). Threads open on the message text, newest
 first, with `t` for the one-row-per-message index; `M` cycles the mailbox
-(inbox, all, flagged, drafts, sent, archive), so unsent drafts are a view of
-their own and are marked `D` wherever they turn up in a thread; `enter` on an
+(inbox, all, flagged, drafts, sent, archive, trash, spam), so unsent drafts are
+a view of their own and are marked `D` wherever they turn up in a thread;
+`enter` on an
 event opens it, where `y` / `n` / `t` answer the invitation. Not yet: composing
 from the TUI, creating or editing events from the TUI, embeddings for semantic
 search, contacts.

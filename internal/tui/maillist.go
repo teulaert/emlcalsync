@@ -30,6 +30,10 @@ var mailboxCycle = []struct {
 	{"drafts", string(model.RoleDrafts)},
 	{"sent", string(model.RoleSent)},
 	{"archive", string(model.RoleArchive)},
+	{"trash", string(model.RoleTrash)},
+	// Labelled the way every provider labels it, filtered by the role the
+	// store normalises it to.
+	{"spam", string(model.RoleJunk)},
 }
 
 type mailList struct {
