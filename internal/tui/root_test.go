@@ -51,13 +51,13 @@ func TestRootSwitchesBetweenMailAndCalendar(t *testing.T) {
 	if r.onCal {
 		t.Fatal("should start on mail")
 	}
-	if !strings.HasPrefix(r.top().Title(), "mail") {
-		t.Errorf("title = %q, want a mail title", r.top().Title())
+	if _, ok := r.top().(*mailList); !ok {
+		t.Errorf("top = %T, want the mail list", r.top())
 	}
 
 	send(t, r, "2")
-	if !r.onCal || !strings.HasPrefix(r.top().Title(), "calendar") {
-		t.Errorf("2 did not switch to calendar (onCal=%v, title=%q)", r.onCal, r.top().Title())
+	if _, ok := r.top().(*agenda); !r.onCal || !ok {
+		t.Errorf("2 did not switch to calendar (onCal=%v, top=%T)", r.onCal, r.top())
 	}
 	send(t, r, "tab")
 	if r.onCal {
@@ -103,6 +103,30 @@ func TestRootPushesAndPopsTheStack(t *testing.T) {
 	}
 	if !r.quitting {
 		t.Error("root did not mark itself quitting")
+	}
+}
+
+// The tabs are the only thing telling someone in their inbox that a calendar
+// exists at all, so they are drawn on every screen, in both stacks.
+func TestRootHeaderAlwaysShowsBothTabs(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "Hello", "anna", time.Hour, false)
+	addEvent(t, d, "work", "cal-w", "Work", "e1", "Standup", testNow.Add(time.Hour), time.Hour)
+	r := newTestRoot(t, d)
+
+	for _, step := range []struct{ key, where string }{
+		{"", "the mail list"},
+		{"enter", "an open thread"},
+		{"2", "the agenda"},
+		{"enter", "an open event"},
+	} {
+		if step.key != "" {
+			send(t, r, step.key)
+		}
+		head := strings.SplitN(r.render(), "\n", 2)[0]
+		if !strings.Contains(head, "1 mail") || !strings.Contains(head, "2 calendar") {
+			t.Errorf("header on %s is missing a tab: %q", step.where, head)
+		}
 	}
 }
 

@@ -46,7 +46,7 @@ func newAgenda(d Deps) *agenda {
 }
 
 func (a *agenda) Title() string {
-	return fmt.Sprintf("calendar · %s – %s",
+	return fmt.Sprintf("%s – %s",
 		a.from.Format("Mon 2 Jan"), a.to.Add(-time.Second).Format("Mon 2 Jan"))
 }
 

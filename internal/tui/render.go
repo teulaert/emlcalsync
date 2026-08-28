@@ -167,3 +167,17 @@ func cutCells(s string, n int) (head, rest string) {
 	}
 	return s, ""
 }
+
+// tabStrip is the header's leading run of tabs. It exists because the two
+// stacks are otherwise undiscoverable: the header used to show only the
+// current screen's title, so someone in the mail list had no way of knowing a
+// calendar was one key away. It returns the styled strip and its cell width,
+// which the caller needs to pad the rest of the line.
+func tabStrip(onCal bool) (string, int) {
+	const mail, cal = " 1 mail ", " 2 calendar "
+	w := runewidth.StringWidth(mail) + runewidth.StringWidth(cal)
+	if onCal {
+		return styleFaint.Render(mail) + styleSelected.Render(cal), w
+	}
+	return styleSelected.Render(mail) + styleFaint.Render(cal), w
+}

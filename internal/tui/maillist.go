@@ -80,7 +80,9 @@ func (m *mailList) Title() string {
 	if m.query != "" {
 		what = "search: " + m.query
 	}
-	return fmt.Sprintf("mail · %s · %s", what, who)
+	// No "mail ·" prefix: the header's tab strip already says which stack
+	// this is.
+	return fmt.Sprintf("%s · %s", what, who)
 }
 
 // filter builds the store query for the current view.

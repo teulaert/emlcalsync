@@ -441,7 +441,8 @@ func (r *root) render() string {
 		return r.helpView()
 	}
 	top := r.top()
-	title := styleHeader.Render(padCells(" "+top.Title(), r.w))
+	tabs, tw := tabStrip(r.onCal)
+	title := tabs + styleHeader.Render(padCells(" "+top.Title(), max(r.w-tw, 0)))
 	body := top.View(r.w, r.bodyHeight())
 	status := r.status
 	if status == "" {
