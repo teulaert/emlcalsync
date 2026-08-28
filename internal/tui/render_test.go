@@ -88,3 +88,49 @@ func stripANSI(s string) string {
 	}
 	return b.String()
 }
+
+func TestWrapCellsBreaksOnWordsAndKeepsParagraphs(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		n    int
+		want []string
+	}{
+		{"fits", "hello world", 20, []string{"hello world"}},
+		{"wraps on a space", "hello world again", 11, []string{"hello world", "again"}},
+		{"blank lines survive", "one\n\ntwo", 10, []string{"one", "", "two"}},
+		{"indent is kept", "  * a list item that wraps", 14, []string{"  * a list", "  item that", "  wraps"}},
+		// A URL has nowhere to break, so it is cut rather than allowed to
+		// overflow the column and shift everything after it.
+		{"long word is cut", "see https://example.com/very/long", 10, []string{"see", "https://ex", "ample.com/", "very/long"}},
+		// Two cells per ideograph: five of them do not fit in eight cells.
+		{"wide runes", "日本語です", 8, []string{"日本語で", "す"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wrapCells(tc.in, tc.n)
+			if len(got) != len(tc.want) {
+				t.Fatalf("wrapCells(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("wrapCells(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// Nothing the wrapper emits may be wider than the column it was given, or the
+// expanded thread view would shift every line to its right. (A single column
+// is the exception: a two-cell rune cannot be cut in half.)
+func TestWrapCellsNeverOverflows(t *testing.T) {
+	in := "A paragraph with a stupidly-long-unbreakable-token in it,\n\n  and 日本語 mixed in for width.\n"
+	for _, n := range []int{2, 4, 12, 40} {
+		for _, l := range wrapCells(in, n) {
+			if cellWidth(l) > n {
+				t.Errorf("wrapCells(_, %d) produced %q at %d cells", n, l, cellWidth(l))
+			}
+		}
+	}
+}

@@ -11,6 +11,9 @@ type keymap struct {
 	PageDown    key.Binding
 	Open        key.Binding
 	Back        key.Binding
+	LineDown    key.Binding
+	LineUp      key.Binding
+	Expand      key.Binding
 	Quit        key.Binding
 	Mail        key.Binding
 	Calendar    key.Binding
@@ -37,6 +40,9 @@ func defaultKeys() keymap {
 		PageDown:   key.NewBinding(key.WithKeys("ctrl+f", "pgdown"), key.WithHelp("ctrl+f", "page down")),
 		Open:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		Back:       key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
+		LineDown:   key.NewBinding(key.WithKeys("J"), key.WithHelp("J/K", "scroll one line")),
+		LineUp:     key.NewBinding(key.WithKeys("K"), key.WithHelp("J/K", "scroll one line")),
+		Expand:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "expand / collapse a thread")),
 		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "back / quit")),
 		Mail:       key.NewBinding(key.WithKeys("1"), key.WithHelp("1", "mail")),
 		Calendar:   key.NewBinding(key.WithKeys("2"), key.WithHelp("2", "calendar")),
@@ -61,6 +67,8 @@ func (k keymap) helpLines() [][2]string {
 		{"g / G", "top / bottom"},
 		{"ctrl+f / ctrl+b", "page down / up"},
 		{"enter", "open"},
+		{"J / K", "scroll one line (an expanded thread)"},
+		{"t", "thread: expanded text / one row per message"},
 		{"esc / q", "back (quit at the top)"},
 		{"tab, 1, 2", "switch mail / calendar"},
 		{"/", "search (FTS5 syntax)"},

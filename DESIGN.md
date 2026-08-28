@@ -1133,6 +1133,27 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     `MailFlags`, `ShortAddr`, `TimeCell`, `RSVP` and `Duration`, so the two
     surfaces cannot disagree about what a flag letter means. `mime.htmlToText`
     became `mime.HTMLToText` for the same reason.
+  - **A thread opens expanded**: every message's text is laid out inline and
+    the conversation scrolls as one document, because list → thread → reader
+    put two keystrokes between the inbox and the mail. `t` toggles the old
+    one-row-per-message index, and the root remembers the choice for the next
+    thread. `j`/`k` move message to message as they do everywhere else — the
+    cursor is held, not read back off the scroll position, or it would sit
+    still in any thread that fits on one screen — while `ctrl+f`/`ctrl+b` page
+    and `J`/`K` scroll a line through a message longer than the window.
+    `GetThread` already returns the bodies, so nothing extra is loaded; an
+    envelope-only stub (§16) is the exception and says so, with `enter`
+    opening the reader that fetches it.
+  - **The newest message is on top**, in both modes — it is the one the thread
+    was opened for, and it saves scrolling a long thread to reach the point.
+    The store hands the messages back oldest first and `emlcal mail thread`
+    keeps that order, agents parsing it; only the view reverses them. The
+    cursor opens on the newest *unread* message, so an older one still gets
+    read where it sits.
+  - **Expanded means read.** Having the cursor on an expanded message marks it
+    read, the same rule as opening one in the reader — its text is on screen.
+    The collapsed view leaves the flag alone: a row is not a message you have
+    read.
   - Composing (reply/forward) is deliberately absent; `r` is reserved.
 
 ### Still to verify against live accounts

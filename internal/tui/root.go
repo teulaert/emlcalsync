@@ -46,6 +46,10 @@ type root struct {
 
 	watcher *dbWatcher
 
+	// threadExpanded is the thread view's mode, kept on the root so the choice
+	// survives going back to the list and opening the next thread.
+	threadExpanded bool
+
 	status    string
 	statusSeq int
 	undo      *undoRecord
@@ -55,7 +59,7 @@ type root struct {
 
 func newRoot(d Deps) *root {
 	accounts := d.Accounts
-	r := &root{d: d, keys: defaultKeys()}
+	r := &root{d: d, keys: defaultKeys(), threadExpanded: true}
 	r.mail = []screen{newMailList(d, accounts)}
 	r.cal = []screen{newAgenda(d)}
 	return r
@@ -238,6 +242,13 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, r.keys.Open):
 		return r, r.open()
 
+	case key.Matches(msg, r.keys.Expand):
+		if tv, ok := r.top().(*threadView); ok {
+			r.threadExpanded = !r.threadExpanded
+			return r, tv.setExpanded(r.threadExpanded)
+		}
+		return r, nil
+
 	case key.Matches(msg, r.keys.Archive):
 		return r, r.triage("archive")
 
@@ -272,7 +283,7 @@ func (r *root) open() tea.Cmd {
 		if t == nil {
 			return nil
 		}
-		return r.push(newThreadView(r.d, t.AccountID, t.ThreadID, t.Subject))
+		return r.push(newThreadView(r.d, t.AccountID, t.ThreadID, t.Subject, r.threadExpanded))
 	case *threadView:
 		m := s.selected()
 		if m == nil {
@@ -333,6 +344,9 @@ func (r *root) toggleFlag(flag string) tea.Cmd {
 		cur = ts[0].flags.Unread
 	case "flagged":
 		cur = ts[0].flags.Flagged
+	}
+	if tv, ok := r.top().(*threadView); ok && flag == "unread" && !cur {
+		tv.keepUnread(ts[0].remote)
 	}
 	ops, undo := flagOps(ts, flag, !cur)
 	label := flag

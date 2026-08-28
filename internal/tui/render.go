@@ -98,3 +98,72 @@ func frame(header string, body []string, footer string, w, h int) string {
 	}
 	return strings.Join(out, "\n")
 }
+
+// wrapCells breaks s into lines of at most n terminal cells, at spaces where
+// it can and mid-word when a single word is wider than the line. Blank lines
+// survive: paragraph breaks are most of what makes a mail body readable, and
+// the expanded thread view stacks bodies with nothing but those breaks between
+// their parts.
+func wrapCells(s string, n int) []string {
+	if n <= 0 {
+		return nil
+	}
+	var out []string
+	for _, para := range strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n") {
+		para = strings.TrimRight(strings.ReplaceAll(para, "\t", "    "), " ")
+		if para == "" {
+			out = append(out, "")
+			continue
+		}
+		// Leading whitespace is kept — it is what tells a list apart from a
+		// paragraph — but never enough of it to leave no room for text.
+		indent := para[:len(para)-len(strings.TrimLeft(para, " "))]
+		if runewidth.StringWidth(indent) >= n {
+			indent = ""
+		}
+		room := n - runewidth.StringWidth(indent)
+		line := indent
+		for _, word := range strings.Fields(para) {
+			for runewidth.StringWidth(word) > room {
+				if line != indent {
+					out = append(out, line)
+					line = indent
+				}
+				var head string
+				head, word = cutCells(word, room)
+				out = append(out, indent+head)
+			}
+			switch {
+			case line == indent:
+				line += word
+			case runewidth.StringWidth(line)+1+runewidth.StringWidth(word) <= n:
+				line += " " + word
+			default:
+				out = append(out, line)
+				line = indent + word
+			}
+		}
+		if strings.TrimSpace(line) != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// cutCells splits s after at most n terminal cells. The head is never empty:
+// a rune wider than the whole column has to overflow it, because returning
+// nothing would leave the caller cutting the same word forever.
+func cutCells(s string, n int) (head, rest string) {
+	w := 0
+	for i, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if w+rw > n && i > 0 {
+			return s[:i], s[i:]
+		}
+		w += rw
+		if w >= n {
+			return s[:i+len(string(r))], s[i+len(string(r)):]
+		}
+	}
+	return s, ""
+}

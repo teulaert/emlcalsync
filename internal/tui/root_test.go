@@ -177,7 +177,7 @@ func TestEveryScreenFillsItsHeightExactly(t *testing.T) {
 
 	screens := map[string]screen{
 		"mailList":   newMailList(d, d.Accounts),
-		"threadView": newThreadView(d, "work", "t1", "Hello"),
+		"threadView": newThreadView(d, "work", "t1", "Hello", true),
 		"reader":     newReader(d, "work", "w1"),
 		"agenda":     newAgenda(d),
 		"eventView":  newEventView(d, "work", "cal-w", "Work", "e1"),

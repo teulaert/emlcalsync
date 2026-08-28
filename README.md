@@ -229,5 +229,6 @@ v0.1 — mail, Google Calendar and Fastmail calendars (CalDAV) work end-to-end
 against real accounts. iCloud calendars are implemented and covered by tests
 against a fake server, but have not yet been run against a real account.
 `emlcal tui` browses and triages mail and calendar interactively, merged
-across every account. Not yet: composing from the TUI, embeddings for semantic
+across every account; threads open on the message text, newest first, with
+`t` for the one-row-per-message index. Not yet: composing from the TUI, embeddings for semantic
 search, contacts.
