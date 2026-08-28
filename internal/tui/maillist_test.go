@@ -293,3 +293,37 @@ func TestMailListMailboxSwitchStartsAtTheTop(t *testing.T) {
 		t.Fatalf("mailbox switch left the cursor at %d/%d, want 0/0", ml.cursor, ml.top)
 	}
 }
+
+// A draft is mail you have not sent yet, and until now the only way to reach
+// one in the TUI was the "all" view, where it sat unlabelled among mail that
+// had actually been sent or received. M now cycles through a drafts view.
+func TestMailListDraftsView(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "In the inbox", "anna", time.Hour, false)
+	addDraft(t, d, "work", "w2", "t2", "Half written", 2*time.Hour)
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	ml := pump(t, m, m.Init(), k, 100, 24).(*mailList)
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "In the inbox" {
+		t.Fatalf("inbox = %+v, want just the inbox thread", ml.threads)
+	}
+
+	// inbox → all → flagged → drafts.
+	for i := 0; i < 3; i++ {
+		s, cmd := ml.Update(keyPress("M"), k, 100, 24)
+		ml = pump(t, s, cmd, k, 100, 24).(*mailList)
+	}
+	if got := mailboxCycle[ml.mailbox].label; got != "drafts" {
+		t.Fatalf("three M presses land on %q, want drafts", got)
+	}
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "Half written" {
+		t.Fatalf("drafts = %+v, want just the draft", ml.threads)
+	}
+	if !strings.Contains(ml.Title(), "drafts") {
+		t.Errorf("title = %q, does not say which mailbox it is showing", ml.Title())
+	}
+	if !strings.Contains(stripANSI(ml.View(100, 20)), "Half written") {
+		t.Errorf("the drafts view does not show the draft:\n%s", ml.View(100, 20))
+	}
+}

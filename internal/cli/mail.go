@@ -31,7 +31,7 @@ the write half (mark, move, archive, trash, draft, send, reply).
 All read commands work offline from the local index. The list-shaped commands
 (list, search) share these filters — see 'emlcal mail list --help':
 
-  --mailbox inbox|sent|archive|trash|<name>   what is actually in a mailbox
+  --mailbox inbox|drafts|sent|archive|<name>  what is actually in a mailbox
   --unread  --flagged  --no-bulk              state filters
   --since 2d  --until 2026-08-01              time window
   --from X  --to X  --account A  --limit N    who / where / how many
@@ -85,6 +85,7 @@ type mailMessageRow struct {
 
 	Unread         bool     `json:"unread"`
 	Flagged        bool     `json:"flagged"`
+	Draft          bool     `json:"draft"`
 	Answered       bool     `json:"answered"`
 	HasAttachments bool     `json:"has_attachments"`
 	Deleted        bool     `json:"deleted,omitempty"`
@@ -189,7 +190,10 @@ func (idx mailNameIndex) names(account string, remotes []string) []string {
 func mailRowOf(m *model.Message, idx mailNameIndex, now time.Time) mailMessageRow {
 	flags := output.MailFlags(m.Flags, m.HasAttachments)
 	if m.DeletedAt != nil {
-		flags += "D"
+		// X, not D: MailFlags spends D on drafts, and a column where one
+		// letter could mean either "not sent yet" or "gone from the server"
+		// is worse than no column.
+		flags += "X"
 	}
 	return mailMessageRow{
 		ID:             m.PublicID(),
@@ -205,6 +209,7 @@ func mailRowOf(m *model.Message, idx mailNameIndex, now time.Time) mailMessageRo
 		Deleted:        m.DeletedAt != nil,
 		Unread:         m.Flags.Unread,
 		Flagged:        m.Flags.Flagged,
+		Draft:          m.Flags.Draft,
 		Answered:       m.Flags.Answered,
 		HasAttachments: m.HasAttachments,
 		Mailboxes:      idx.names(m.AccountID, m.MailboxRemotes),

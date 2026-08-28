@@ -469,8 +469,15 @@ func (t *threadView) viewCompact(w, rows int) string {
 	out := make([]string, 0, rows)
 	for i := t.top; i < len(t.messages) && len(out) < rows; i++ {
 		m := &t.messages[i]
+		// A draft takes the mark column over the unread dot: the row is still
+		// drawn in the unread style below, so nothing is lost, and "this was
+		// never sent" is the more surprising thing to say about a message
+		// sitting in the middle of a conversation.
 		mark := " "
-		if m.Flags.Unread {
+		switch {
+		case m.Flags.Draft:
+			mark = "D"
+		case m.Flags.Unread:
 			mark = "●"
 		}
 		flags := output.MailFlags(m.Flags, m.HasAttachments)

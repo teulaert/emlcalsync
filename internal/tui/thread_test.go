@@ -356,3 +356,31 @@ func addUnreadThreadMessage(t *testing.T, d Deps, mail *fake.Mail, remote, subje
 		t.Fatalf("UpsertMessage: %v", err)
 	}
 }
+
+// An unsent draft reply sits in the thread it belongs to, next to mail that
+// really was sent. Nothing in the row said so before, so it read as sent.
+func TestThreadMarksADraft(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "First", "anna", 2*time.Hour, false)
+	addDraft(t, d, "work", "w2", "t1", "My reply", time.Hour)
+
+	// Compact marks the draft in the mark column, expanded in the flag run of
+	// the message header; both put it on the draft's own row and nowhere else.
+	for _, tc := range []struct {
+		expanded bool
+		want     string
+	}{
+		{false, "D work"},
+		{true, "· D"},
+	} {
+		tv := openThreadView(t, d, tc.expanded)
+		got := view(tv, 80, 30)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("expanded=%v: no %q draft marker:\n%s", tc.expanded, tc.want, got)
+		}
+		if n := strings.Count(got, tc.want); n != 1 {
+			t.Errorf("expanded=%v: %q appears %d times, want 1 (the draft):\n%s",
+				tc.expanded, tc.want, n, got)
+		}
+	}
+}

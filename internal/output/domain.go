@@ -20,10 +20,17 @@ func ShortAddr(a model.Address) string {
 	return a.Email
 }
 
-// MailFlags is the compact flag column: U unread, * flagged, A attachments,
-// R answered.
+// MailFlags is the compact flag column: D draft, U unread, * flagged,
+// A attachments, R answered.
+//
+// Draft comes first because it is the one flag that changes what the message
+// is rather than how it has been handled: unsent text of your own, which a
+// reader must not mistake for mail that was actually sent.
 func MailFlags(f model.Flags, hasAttachments bool) string {
 	var b strings.Builder
+	if f.Draft {
+		b.WriteByte('D')
+	}
 	if f.Unread {
 		b.WriteByte('U')
 	}

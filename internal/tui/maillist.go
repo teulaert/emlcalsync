@@ -27,6 +27,7 @@ var mailboxCycle = []struct {
 	{"inbox", string(model.RoleInbox)},
 	{"all", ""},
 	{"flagged", string(model.RoleInbox)}, // narrowed further by flagged below
+	{"drafts", string(model.RoleDrafts)},
 	{"sent", string(model.RoleSent)},
 	{"archive", string(model.RoleArchive)},
 }

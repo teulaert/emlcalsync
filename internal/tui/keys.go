@@ -80,7 +80,7 @@ func (k keymap) helpLines() [][2]string {
 		{"z", "undo the last action"},
 		{"", ""},
 		{"A", "cycle the account filter"},
-		{"M", "cycle the mailbox (inbox / all / …)"},
+		{"M", "cycle the mailbox (inbox / all / flagged / drafts / sent / archive)"},
 		{"R", "refresh now (and nudge the sync daemon)"},
 		{"?", "this help"},
 		{"", ""},

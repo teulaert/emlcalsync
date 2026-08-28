@@ -38,6 +38,7 @@ func newTestDeps(t *testing.T, accounts ...string) Deps {
 			{RemoteID: "inbox", Name: "Inbox", Role: model.RoleInbox, SortOrder: 1},
 			{RemoteID: "archive", Name: "Archive", Role: model.RoleArchive, SortOrder: 2},
 			{RemoteID: "trash", Name: "Trash", Role: model.RoleTrash, SortOrder: 3},
+			{RemoteID: "drafts", Name: "Drafts", Role: model.RoleDrafts, SortOrder: 4},
 		}); err != nil {
 			t.Fatalf("ReplaceMailboxes %s: %v", a, err)
 		}
@@ -67,6 +68,31 @@ func addMessage(t *testing.T, d Deps, account, remote, thread, subject, from str
 		TextBody:       subject + " body\n\nOn earlier, someone wrote:\n> quoted",
 		Flags:          model.Flags{Unread: unread},
 		MailboxRemotes: []string{"inbox"},
+		IndexedAt:      testNow,
+	}
+	if _, err := d.Store.UpsertMessage(context.Background(), m, nil); err != nil {
+		t.Fatalf("UpsertMessage %s: %v", remote, err)
+	}
+}
+
+// addDraft indexes one unsent message in the drafts mailbox: from the account
+// itself, addressed to someone else, the way a provider hands a draft over.
+func addDraft(t *testing.T, d Deps, account, remote, thread, subject string, ago time.Duration) {
+	t.Helper()
+	when := testNow.Add(-ago)
+	m := &model.Message{
+		AccountID:      account,
+		RemoteID:       remote,
+		ThreadID:       thread,
+		Subject:        subject,
+		From:           model.Address{Name: account, Email: account + "@example.com"},
+		To:             []model.Address{{Email: "anna@example.com"}},
+		Date:           when,
+		Received:       when,
+		Snippet:        subject + " body",
+		TextBody:       subject + " body",
+		Flags:          model.Flags{Draft: true},
+		MailboxRemotes: []string{"drafts"},
 		IndexedAt:      testNow,
 	}
 	if _, err := d.Store.UpsertMessage(context.Background(), m, nil); err != nil {
