@@ -605,8 +605,10 @@ func mailAttachmentTextCmd(app *App) *cobra.Command {
 		Short: "Read one attachment as text",
 		Long: `Print the text of one attachment: a PDF's words, an HTML file's prose, a
 text file as it is. The second argument is the part path (as printed by
-` + "`mail attachment list`" + `) or the file name. A scanned PDF holds no text and
-says so; images and other binary types are not readable this way.
+` + "`mail attachment list`" + `) or the file name. PDFs are read with pdftotext,
+so poppler-utils must be installed (` + "`emlcal doctor`" + ` checks). A scanned PDF
+holds no text and says so; images and other binary types are not readable
+this way.
 
 This is how an invoice's amount, which lives in the PDF and not in the mail,
 is read -- by a person, an agent, or the model summarizing the thread.`,
@@ -618,7 +620,7 @@ is read -- by a person, an agent, or the model summarizing the thread.`,
 			}
 			text, err := doctext.Extract(cmd.Context(), att.ContentType, att.Filename, data)
 			if err != nil {
-				if errors.Is(err, doctext.ErrUnsupported) || errors.Is(err, doctext.ErrNoText) {
+				if errors.Is(err, doctext.ErrUnsupported) || errors.Is(err, doctext.ErrNoText) || errors.Is(err, doctext.ErrNoPDFReader) {
 					return output.Errorf(output.ExitUsage, "%v", err)
 				}
 				return err

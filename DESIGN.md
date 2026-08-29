@@ -930,6 +930,7 @@ internal/
   blob/           content-addressed zstd store
   mime/           parse, text extraction, quote/signature stripping, RFC822 builder
   compose/        reply headers, quoting, address parsing, SMTP envelope (cli + tui)
+  doctext/        attachment -> text: pdftotext for PDFs, html2text, plain text
   ai/             language-model layer: Client interface, tool loop (Run), reply prompt, CleanText
     ollama/       the one backend: /api/chat over HTTP, streamed, tool calls
   sync/           engine: backfill, delta, reconcile, outbox, scheduler, watch
@@ -1342,13 +1343,14 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     that an attachment can be read and when to bother -- amounts, terms,
     dates -- and to say what the document holds, not that it read it. A
     scanned PDF holds no text and says so; images are not readable this
-    way. The pure-Go reader (rsc.io/pdf's lineage) handles simple documents
-    and loops forever on some real ones -- the first real invoice tried
-    spun at 100% CPU in `buffer.readToken` -- so it never runs in the
-    process that asked: `pdftotext` (poppler) is used when it is on PATH,
-    which reads everything, and otherwise the binary re-runs itself with a
-    hidden `__pdf-text` command under a 30-second deadline that kills it.
-    `apt install poppler-utils` is the recommendation when a PDF times out.
+    way. PDFs are read by `pdftotext` (poppler-utils) and only by it: a
+    pure-Go reader was tried first and looped forever on the first real
+    invoice it met (100% CPU in `buffer.readToken`), and a child process
+    with a deadline to contain it was machinery in service of a fallback
+    that did not work. A PDF is the one document type where the mature
+    tool is worth a runtime dependency, and it is what an agent on a shell
+    reaches for anyway. `doctor` warns when it is missing; the command
+    says what to install; the exec still runs under a 30-second deadline.
   - The shared half lives in **`internal/compose`**: subject, recipients,
     threading headers, quoting, address parsing and the SMTP envelope. It was
     all in `internal/cli` while `mail reply` was the only composer; the TUI

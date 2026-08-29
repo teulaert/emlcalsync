@@ -164,8 +164,8 @@ status · doctor · outbox · reindex · gc · export (--mbox | --maildir) · se
 tui       interactive mail + calendar, merged across accounts
 
 mail      mailboxes · list · search · read · thread · attachment list|get      (read)
-          attachment text (a PDF or HTML attachment as text; PDFs read best
-                           with poppler-utils' pdftotext installed)            (read)
+          attachment text (a PDF or HTML attachment as text; PDFs need
+                           poppler-utils' pdftotext -- `doctor` checks)         (read)
           mark · move · archive · trash · draft · send · reply                 (write)
 cal       calendars · agenda · show · free                                    (read)
           create · update · delete · respond                                  (write)

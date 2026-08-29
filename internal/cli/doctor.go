@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/doctext"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/provider"
@@ -84,6 +85,7 @@ func coreDoctor(app *App) error {
 	checks = append(checks, coreCheckDB(app))
 	checks = append(checks, coreCheckBlobs(app, cfg))
 	checks = append(checks, coreCheckDaemon(app, cfg))
+	checks = append(checks, coreCheckPDFReader())
 	checks = append(checks, coreCheckOnline(app, cfg)...)
 	return coreReport(app, checks)
 }
@@ -240,6 +242,15 @@ func coreCheckBlobs(app *App, cfg *config.Config) coreCheck {
 		}
 	}
 	return coreOK("blobs", detail)
+}
+
+// coreCheckPDFReader says whether PDF attachments can be read as text. It is
+// a warning, not a failure: mail and calendar work without it.
+func coreCheckPDFReader() coreCheck {
+	if doctext.HavePDFReader() {
+		return coreOK("pdftotext", "present; PDF attachments readable as text")
+	}
+	return coreWarn("pdftotext", "not installed; `mail attachment text` cannot read PDFs and the AI cannot read an invoice -- apt install poppler-utils")
 }
 
 func coreCheckDaemon(app *App, cfg *config.Config) coreCheck {

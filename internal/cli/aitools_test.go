@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/teulaert/emlcalsync/internal/ai"
 	"github.com/teulaert/emlcalsync/internal/ai/ollama"
-	"github.com/teulaert/emlcalsync/internal/doctext"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/provider/fake"
@@ -258,13 +259,21 @@ func TestLiveAgentDraft(t *testing.T) {
 }
 
 // A PDF attachment is readable as text, and so through the tool: the whole
-// reason the command exists.
+// reason the command exists. pdftotext is stood in for by a script on PATH.
 func TestAIToolsReadAnAttachment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "pdftotext"), []byte("#!/bin/sh\ncat >/dev/null\necho 'FACTUUR 360954   Totaal EUR 1.234,56   vervaldatum 25-09-2026'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	env := newTestEnv(t)
 	raw, err := mime.Build(&mime.Draft{
 		From: model.Address{Email: "info@oostwatering.example"}, To: []model.Address{{Email: "me@example.com"}},
 		Subject: "FACTUUR 360954", TextBody: "Bijgaand de factuur.", Date: env.Now.Add(-time.Hour), MessageID: "inv@example.test",
-		Attachments: []mime.DraftAttachment{{Filename: "360954.pdf", ContentType: "application/pdf", Data: doctext.TinyPDF("Totaal EUR 1.234,56 vervaldatum 25-09-2026")}},
+		Attachments: []mime.DraftAttachment{{Filename: "360954.pdf", ContentType: "application/pdf", Data: []byte("%PDF-1.4 stand-in")}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -286,6 +295,15 @@ func TestAIToolsReadAnAttachment(t *testing.T) {
 	if !strings.Contains(got.Text, "1.234,56") || got.Filename != "360954.pdf" || got.Truncated {
 		t.Errorf("out = %+v", got)
 	}
+
+	// Without pdftotext the command says what to install, and does not fail
+	// the process.
+	t.Setenv("PATH", bin+"-nowhere")
+	_, errOut, code := env.Run("mail", "attachment", "text", "work:inv", "360954.pdf")
+	if code != 2 || !strings.Contains(errOut, "poppler-utils") {
+		t.Errorf("without pdftotext: exit %d, %s", code, errOut)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// The command itself, plain: just the text.
 	if plain := env.MustRun("mail", "attachment", "text", "work:inv", "360954.pdf", "-o", "plain"); !strings.Contains(plain, "vervaldatum 25-09-2026") {
