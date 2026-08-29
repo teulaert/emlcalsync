@@ -926,8 +926,8 @@ internal/
   blob/           content-addressed zstd store
   mime/           parse, text extraction, quote/signature stripping, RFC822 builder
   compose/        reply headers, quoting, address parsing, SMTP envelope (cli + tui)
-  ai/             language-model layer: Client interface, reply prompt assembly, CleanText
-    ollama/       the one backend: /api/chat over HTTP, streamed
+  ai/             language-model layer: Client interface, tool loop (Run), reply prompt, CleanText
+    ollama/       the one backend: /api/chat over HTTP, streamed, tool calls
   sync/           engine: backfill, delta, reconcile, outbox, scheduler, watch
   provider/       interfaces + registry
     gmail/  gcal/  jmap/ (mail + calendar)  caldav/  imap/ (mail + smtp)  oauth/
@@ -972,7 +972,7 @@ partial pages, and crashes mid-batch.
 | 6 | `skill`, `reindex`, `gc`, `export`, completions, docs | agent polish + archive guarantees |
 | 7 | `tui`: unified mail list, thread, reader, agenda, event; archive/trash/mark/star with undo | the archive is usable by a person, not only an agent |
 | 8 | `tui` reply: `r` / `a` open a composer over the message in focus, send or save as a draft | a person can answer their mail without leaving the archive |
-| 9 | `internal/ai` + Ollama, `ctrl+g` in the composer drafts the reply from the thread | a local model can read the archive and write for the person, through one layer the CLI can share later |
+| 9 | `internal/ai` + Ollama, `ctrl+g` in the composer drafts the reply from the thread; the read commands are its tools | a local model can read the archive and write for the person, through one layer the CLI can share later |
 | later | AI from the CLI (`ai draft`, `ai summarize`), summaries in the reader, cloud backends, forwarding and new mail from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
 
 Phase 1 is deliberately Fastmail-first: an API token, no consent screens, and
@@ -1283,6 +1283,31 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     whole thing, a `Subject:` line. Thinking is left to the model's default
     rather than forced off: a `think` parameter is rejected by models that
     do not support it, and Ollama already keeps reasoning out of `content`.
+  - **The model can look other mail up, through the read commands.** A
+    tool is a read command: its parameters are the command's flags and
+    positionals (`Use: "search <query>"` makes `query` required), its
+    description is the command's help, and running it builds an argv, runs
+    the command in-process on a child `App` -- same store, engine and
+    config, its own stdout -- with `-o json`, and hands the model what was
+    printed. The list of commands is the allow list `skill --install`
+    prints, held once in `internal/cli/aitools.go` and rendered into the
+    permissions JSON from there, so what is safe to run unasked from a
+    shell and what a model may run unasked from a prompt are the same list
+    by construction; `status` is dropped from the tools because it says
+    nothing about mail. A flag added to `mail search` is a parameter the
+    model has the same day, and a hand-written schema that would have
+    drifted from the command does not exist. `ai.Run` is the loop: call
+    the model, run what it asks, tell it the result, call again, until it
+    writes -- capped at eight lookups, each result cut at 24 KB with a note
+    to narrow the query, tool errors told back as text so a bad FTS query
+    is a retry rather than a failure. Text the model streams before it
+    asks for a lookup is a lead-in, not the draft; the observer is told to
+    discard it and the composer clears the body. The status line names
+    each lookup as it happens. Ollama's shape is followed exactly: tools as
+    `function`s, arguments back as a JSON object, the assistant turn echoed
+    with its `tool_calls`, results as `role: tool` with `tool_name`.
+    `--limit` defaults to 20 for a model that did not say, not the
+    command's 50: it has to read every row it is given.
   - The shared half lives in **`internal/compose`**: subject, recipients,
     threading headers, quoting, address parsing and the SMTP envelope. It was
     all in `internal/cli` while `mail reply` was the only composer; the TUI

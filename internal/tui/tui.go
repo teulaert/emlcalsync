@@ -38,6 +38,9 @@ type Deps struct {
 	// AI is the configured language model, or nil when there is none: the
 	// composer's ctrl+g then says so and nothing is sent anywhere.
 	AI ai.Client
+	// Tools is what the model may look up while drafting -- the read
+	// commands, in practice. Nil means it writes from the thread alone.
+	Tools ai.Toolset
 
 	// StatePath is the directory holding emlcal.pid, so a manual refresh can
 	// nudge a running daemon. Empty disables the nudge.

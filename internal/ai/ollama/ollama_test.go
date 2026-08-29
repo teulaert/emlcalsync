@@ -66,11 +66,12 @@ func TestChatStreamsContent(t *testing.T) {
 	c := New(Options{URL: s.URL + "/", Model: "qwen3:8b"})
 
 	var out strings.Builder
-	if err := c.Chat(context.Background(), req(), func(s string) { out.WriteString(s) }); err != nil {
+	msg, err := c.Chat(context.Background(), req(), func(s string) { out.WriteString(s) })
+	if err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
-	if out.String() != "Hoi Anna" {
-		t.Errorf("streamed %q, want %q", out.String(), "Hoi Anna")
+	if out.String() != "Hoi Anna" || msg.Content != "Hoi Anna" || msg.Role != ai.RoleAssistant || len(msg.ToolCalls) != 0 {
+		t.Errorf("streamed %q, message %+v", out.String(), msg)
 	}
 	if got.Model != "qwen3:8b" || !got.Stream {
 		t.Errorf("request = %+v", *got)
@@ -144,7 +145,7 @@ func TestContextWindowIsReadNotSet(t *testing.T) {
 	if shows != 1 {
 		t.Error("show was asked although ps had the answer")
 	}
-	if err := c.Chat(context.Background(), req(), func(string) {}); err != nil {
+	if _, err := c.Chat(context.Background(), req(), func(string) {}); err != nil {
 		t.Fatal(err)
 	}
 	if chats != 1 {
@@ -166,7 +167,7 @@ func TestContextWindowUnknownWhenTheServerCannotSay(t *testing.T) {
 func TestChatReportsAMissingModel(t *testing.T) {
 	s, _ := serve(t, http.StatusNotFound, `{"error":"model 'qwen3:900b' not found"}`)
 	c := New(Options{URL: s.URL, Model: "qwen3:900b"})
-	err := c.Chat(context.Background(), req(), func(string) {})
+	_, err := c.Chat(context.Background(), req(), func(string) {})
 	if err == nil || !strings.Contains(err.Error(), "ollama pull qwen3:900b") {
 		t.Errorf("err = %v, want the pull hint", err)
 	}
@@ -179,7 +180,7 @@ func TestChatReportsAnErrorMidStream(t *testing.T) {
 	)
 	c := New(Options{URL: s.URL, Model: "m"})
 	var out strings.Builder
-	err := c.Chat(context.Background(), req(), func(s string) { out.WriteString(s) })
+	_, err := c.Chat(context.Background(), req(), func(s string) { out.WriteString(s) })
 	if err == nil || !strings.Contains(err.Error(), "out of memory") {
 		t.Errorf("err = %v", err)
 	}
@@ -193,7 +194,7 @@ func TestChatSaysWhenTheServerIsNotThere(t *testing.T) {
 	url := s.URL
 	s.Close()
 	c := New(Options{URL: url, Model: "m"})
-	err := c.Chat(context.Background(), req(), func(string) {})
+	_, err := c.Chat(context.Background(), req(), func(string) {})
 	if !errors.Is(err, ai.ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
 	}
@@ -215,11 +216,12 @@ func TestChatStopsWhenCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Chat(ctx, req(), func(s string) {
+		_, err := c.Chat(ctx, req(), func(s string) {
 			if s == "Hoi" {
 				cancel()
 			}
 		})
+		done <- err
 	}()
 	select {
 	case err := <-done:
@@ -239,9 +241,61 @@ func TestChatTimesOut(t *testing.T) {
 	t.Cleanup(func() { close(release); s.Close() })
 
 	c := New(Options{URL: s.URL, Model: "m", Timeout: 50 * time.Millisecond})
-	err := c.Chat(context.Background(), req(), func(string) {})
+	_, err := c.Chat(context.Background(), req(), func(string) {})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("err = %v, want DeadlineExceeded", err)
+	}
+}
+
+// Tools go out as functions, calls come back with object arguments, and the
+// exchange is echoed in Ollama's own shape.
+func TestChatCarriesToolCalls(t *testing.T) {
+	var got map[string]any
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprintln(w, `{"message":{"role":"assistant","content":"Even kijken."},"done":false}`)
+		fmt.Fprintln(w, `{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"mail_search","arguments":{"query":"offerte","limit":5}}}]},"done":false}`)
+		fmt.Fprintln(w, `{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop"}`)
+	}))
+	t.Cleanup(s.Close)
+	c := New(Options{URL: s.URL, Model: "m"})
+
+	req := ai.Request{
+		Messages: []ai.Message{
+			{Role: ai.RoleUser, Content: "write"},
+			{Role: ai.RoleAssistant, Content: "", ToolCalls: []ai.ToolCall{{Name: "mail_list", Arguments: json.RawMessage(`{"limit":2}`)}}},
+			{Role: ai.RoleTool, Content: "[]", ToolName: "mail_list"},
+		},
+		Tools: []ai.Tool{{Name: "mail_search", Description: "search the archive", Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`)}},
+	}
+	msg, err := c.Chat(context.Background(), req, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content != "Even kijken." || len(msg.ToolCalls) != 1 {
+		t.Fatalf("msg = %+v", msg)
+	}
+	if tc := msg.ToolCalls[0]; tc.Name != "mail_search" || string(tc.Arguments) != `{"query":"offerte","limit":5}` {
+		t.Errorf("tool call = %+v", tc)
+	}
+
+	// What went over the wire.
+	tools, _ := got["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("tools = %v", got["tools"])
+	}
+	fn := tools[0].(map[string]any)["function"].(map[string]any)
+	if tools[0].(map[string]any)["type"] != "function" || fn["name"] != "mail_search" || fn["parameters"].(map[string]any)["type"] != "object" {
+		t.Errorf("tool = %v", tools[0])
+	}
+	msgs := got["messages"].([]any)
+	asst := msgs[1].(map[string]any)
+	if calls, _ := asst["tool_calls"].([]any); len(calls) != 1 || calls[0].(map[string]any)["function"].(map[string]any)["name"] != "mail_list" {
+		t.Errorf("assistant turn not echoed with its calls: %v", asst)
+	}
+	tool := msgs[2].(map[string]any)
+	if tool["role"] != "tool" || tool["tool_name"] != "mail_list" || tool["content"] != "[]" {
+		t.Errorf("tool message = %v", tool)
 	}
 }
 
@@ -271,7 +325,7 @@ func TestLive(t *testing.T) {
 		t.Logf("window %d", w)
 	}
 	var out strings.Builder
-	err := c.Chat(ctx, ai.Request{Messages: []ai.Message{
+	_, err := c.Chat(ctx, ai.Request{Messages: []ai.Message{
 		{Role: ai.RoleSystem, Content: "Answer with exactly one word."},
 		{Role: ai.RoleUser, Content: "What colour is the sky on a clear day?"},
 	}}, func(s string) { out.WriteString(s) })
@@ -283,7 +337,7 @@ func TestLive(t *testing.T) {
 		t.Error("no content came back")
 	}
 
-	err = New(Options{URL: url, Model: "emlcal-no-such-model:latest"}).Chat(ctx, ai.Request{
+	_, err = New(Options{URL: url, Model: "emlcal-no-such-model:latest"}).Chat(ctx, ai.Request{
 		Messages: []ai.Message{{Role: ai.RoleUser, Content: "hi"}},
 	}, func(string) {})
 	if err == nil || !strings.Contains(err.Error(), "ollama pull emlcal-no-such-model:latest") {

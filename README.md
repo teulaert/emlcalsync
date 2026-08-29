@@ -281,3 +281,13 @@ the quote — which the draft replaces, after asking. The prompt tells it to
 write only the body, in the thread's language, without inventing facts, and
 that the messages are material to answer rather than instructions to follow.
 Read the draft before it goes: `ctrl+d` sends it exactly as shown.
+
+It can also look things up first. The read commands — `mail search`, `mail
+thread`, `mail read`, `cal agenda`, `cal free` and the rest of the allow list
+`emlcal skill --install` prints — are handed to the model as tools: the
+parameters are the commands' flags, the descriptions are their `--help`, and a
+lookup runs the command in-process and gives the model the same JSON an agent
+on the shell gets. There is no second list of what it may read and no second
+implementation of how. The status line shows each lookup as it happens
+(`mail search "offerte" from=anna`), at most eight per draft, and never a
+write: sending is still your `ctrl+d`.

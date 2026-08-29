@@ -152,11 +152,38 @@ type chatRequest struct {
 	Model    string        `json:"model"`
 	Messages []chatMessage `json:"messages"`
 	Stream   bool          `json:"stream"`
+	Tools    []chatTool    `json:"tools,omitempty"`
 }
 
+// chatMessage is Ollama's message shape. A tool result names the tool it
+// answers with tool_name; an assistant turn that asked for tools carries
+// them in tool_calls and is echoed back verbatim.
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	ToolName  string     `json:"tool_name,omitempty"`
+	ToolCalls []toolCall `json:"tool_calls,omitempty"`
+}
+
+type chatTool struct {
+	Type     string       `json:"type"`
+	Function toolFunction `json:"function"`
+}
+
+type toolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
+}
+
+// toolCall is Ollama's call shape: the arguments arrive as a JSON object,
+// not the string OpenAI sends.
+type toolCall struct {
+	ID       string `json:"id,omitempty"`
+	Function struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"function"`
 }
 
 // chatChunk is one line of the streamed response. Thinking models put their
@@ -164,15 +191,31 @@ type chatMessage struct {
 // answer.
 type chatChunk struct {
 	Message struct {
-		Content string `json:"content"`
+		Content   string     `json:"content"`
+		ToolCalls []toolCall `json:"tool_calls"`
 	} `json:"message"`
 	Done       bool   `json:"done"`
 	DoneReason string `json:"done_reason"`
 	Error      string `json:"error"`
 }
 
+func toWire(m ai.Message) chatMessage {
+	out := chatMessage{Role: string(m.Role), Content: m.Content, ToolName: m.ToolName}
+	for _, tc := range m.ToolCalls {
+		var w toolCall
+		w.ID = tc.ID
+		w.Function.Name = tc.Name
+		w.Function.Arguments = tc.Arguments
+		if len(w.Function.Arguments) == 0 {
+			w.Function.Arguments = json.RawMessage("{}")
+		}
+		out.ToolCalls = append(out.ToolCalls, w)
+	}
+	return out
+}
+
 // Chat implements ai.Client.
-func (c *Client) Chat(ctx context.Context, req ai.Request, emit func(string)) error {
+func (c *Client) Chat(ctx context.Context, req ai.Request, emit func(string)) (ai.Message, error) {
 	if c.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)
@@ -180,28 +223,39 @@ func (c *Client) Chat(ctx context.Context, req ai.Request, emit func(string)) er
 	}
 	body := chatRequest{Model: c.model, Stream: true}
 	for _, m := range req.Messages {
-		body.Messages = append(body.Messages, chatMessage{Role: string(m.Role), Content: m.Content})
+		body.Messages = append(body.Messages, toWire(m))
+	}
+	for _, t := range req.Tools {
+		params := t.Parameters
+		if len(params) == 0 {
+			params = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		body.Tools = append(body.Tools, chatTool{Type: "function", Function: toolFunction{
+			Name: t.Name, Description: t.Description, Parameters: params,
+		}})
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return err
+		return ai.Message{}, err
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url+"/api/chat", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return ai.Message{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return c.classify(err)
+		return ai.Message{}, c.classify(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
-		return c.httpError(resp)
+		return ai.Message{}, c.httpError(resp)
 	}
 
+	answer := ai.Message{Role: ai.RoleAssistant}
+	var text strings.Builder
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -211,22 +265,29 @@ func (c *Client) Chat(ctx context.Context, req ai.Request, emit func(string)) er
 		}
 		var ch chatChunk
 		if err := json.Unmarshal(line, &ch); err != nil {
-			return fmt.Errorf("ollama: bad line in stream: %w", err)
+			return ai.Message{}, fmt.Errorf("ollama: bad line in stream: %w", err)
 		}
 		if ch.Error != "" {
-			return fmt.Errorf("ollama: %s", ch.Error)
+			return ai.Message{}, fmt.Errorf("ollama: %s", ch.Error)
 		}
 		if ch.Message.Content != "" {
+			text.WriteString(ch.Message.Content)
 			emit(ch.Message.Content)
 		}
+		for _, tc := range ch.Message.ToolCalls {
+			answer.ToolCalls = append(answer.ToolCalls, ai.ToolCall{
+				ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments,
+			})
+		}
 		if ch.Done {
-			return nil
+			answer.Content = text.String()
+			return answer, nil
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return c.classify(err)
+		return ai.Message{}, c.classify(err)
 	}
-	return errors.New("ollama: the stream ended without a final message")
+	return ai.Message{}, errors.New("ollama: the stream ended without a final message")
 }
 
 // classify turns a transport failure into something a status line can act

@@ -503,7 +503,7 @@ func (c *composeView) footer(w int) string {
 	case c.sending:
 		return "sending…"
 	case c.assist != nil:
-		return "drafting with " + c.d.AI.Describe() + "… esc to stop"
+		return c.assistFooter()
 	case c.asking:
 		return padCells("ai · instructions, or enter alone to just answer it: "+c.instr+"█", w)
 	case c.err != nil:

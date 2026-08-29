@@ -3,6 +3,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/teulaert/emlcalsync/internal/ai"
 	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/tui"
 )
@@ -26,7 +27,8 @@ here is the action ` + "`emlcal mail archive`" + ` would have taken. That
 includes replying: r and a open a composer on the message in focus, and what
 it sends is what ` + "`emlcal mail reply`" + ` would have sent. With a model
 configured under [ai] in config.toml, ctrl+g in the composer drafts the reply
-from the thread, with or without instructions.
+from the thread, with or without instructions; the model can look other mail
+and the calendar up first, through the same read commands.
 
 Press ? for the keys.`,
 		Args: cobra.NoArgs,
@@ -63,6 +65,10 @@ Press ? for the keys.`,
 			if err != nil {
 				return err
 			}
+			var tools ai.Toolset
+			if model != nil {
+				tools = app.AITools()
+			}
 			return tui.Run(cmd.Context(), tui.Deps{
 				Store:     st,
 				Engine:    eng,
@@ -72,6 +78,7 @@ Press ? for the keys.`,
 				Now:       app.Now,
 				Logger:    app.Logger(),
 				AI:        model,
+				Tools:     tools,
 				StatePath: cfg.General.StateDir,
 			})
 		},

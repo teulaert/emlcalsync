@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -25,14 +26,16 @@ func (s *scriptedAI) client() ai.Client {
 	return ai.Func{
 		Name:   "fake-model · test",
 		Window: 8192,
-		Run: func(ctx context.Context, req ai.Request, emit func(string)) error {
+		Run: func(ctx context.Context, req ai.Request, emit func(string)) (ai.Message, error) {
 			s.calls++
 			r := req
 			s.got = &r
+			var all strings.Builder
 			for _, c := range s.chunks {
 				emit(c)
+				all.WriteString(c)
 			}
-			return s.err
+			return ai.Message{Role: ai.RoleAssistant, Content: all.String()}, s.err
 		},
 	}
 }
@@ -219,15 +222,15 @@ func TestAIDraftEscStopsAndRestores(t *testing.T) {
 	addConversation(t, d, "work", "w1", "t1")
 	release := make(chan struct{})
 	var calls int
-	d.AI = ai.Func{Name: "slow", Run: func(ctx context.Context, req ai.Request, emit func(string)) error {
+	d.AI = ai.Func{Name: "slow", Run: func(ctx context.Context, req ai.Request, emit func(string)) (ai.Message, error) {
 		calls++
 		emit("Hoi ")
 		select {
 		case <-release:
 			emit("Anna")
-			return nil
+			return ai.Message{Role: ai.RoleAssistant, Content: "Hoi Anna"}, nil
 		case <-ctx.Done():
-			return ctx.Err()
+			return ai.Message{}, ctx.Err()
 		}
 	}}
 
@@ -344,5 +347,74 @@ func TestAIDraftPromptEscCloses(t *testing.T) {
 	}
 	if _, still := r.top().(*composeView); !still {
 		t.Error("esc in the prompt closed the composer")
+	}
+}
+
+// lookupToolset answers every call with one canned listing and records it.
+type lookupToolset struct {
+	calls []ai.ToolCall
+}
+
+func (l *lookupToolset) Tools() []ai.Tool {
+	return []ai.Tool{{Name: "mail_search", Description: "search", Parameters: json.RawMessage(`{"type":"object"}`)}}
+}
+
+func (l *lookupToolset) Call(_ context.Context, c ai.ToolCall) (string, error) {
+	l.calls = append(l.calls, c)
+	return `[{"id":"work:w0","subject":"offerte maart","snippet":"prijs 12,50"}]`, nil
+}
+
+// With tools the model may look things up first; what it said while asking
+// is not the draft, the draft is what it says once it knows.
+func TestAIDraftLooksUpOtherMailFirst(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+	tools := &lookupToolset{}
+	d.Tools = tools
+	var calls int
+	var seen []ai.Request
+	d.AI = ai.Func{Name: "agent", Run: func(ctx context.Context, req ai.Request, emit func(string)) (ai.Message, error) {
+		calls++
+		seen = append(seen, req)
+		if calls == 1 {
+			emit("Even kijken…")
+			return ai.Message{Role: ai.RoleAssistant, Content: "Even kijken…", ToolCalls: []ai.ToolCall{
+				{Name: "mail_search", Arguments: json.RawMessage(`{"query":"offerte","from":"anna"}`)},
+			}}, nil
+		}
+		emit("Hoi Anna,\n\nJa, zoals in maart: 12,50.")
+		return ai.Message{Role: ai.RoleAssistant, Content: "Hoi Anna,\n\nJa, zoals in maart: 12,50."}, nil
+	}}
+
+	r := newTestRoot(t, d)
+	send(t, r, "r")
+	c := composerOn(t, r)
+	send(t, r, "ctrl+g")
+	send(t, r, "enter")
+
+	if c.err != nil || c.assist != nil {
+		t.Fatalf("err=%v assist=%v", c.err, c.assist != nil)
+	}
+	if !strings.HasPrefix(c.body.Value(), "Hoi Anna,\n\nJa, zoals in maart: 12,50.\n\n") || strings.Contains(c.body.Value(), "Even kijken") {
+		t.Errorf("body = %q", c.body.Value())
+	}
+	if len(tools.calls) != 1 || string(tools.calls[0].Arguments) != `{"query":"offerte","from":"anna"}` {
+		t.Errorf("lookups = %+v", tools.calls)
+	}
+	if len(seen) != 2 || len(seen[0].Tools) != 1 {
+		t.Fatalf("the model was called %d times, tools on the first: %d", len(seen), len(seen[0].Tools))
+	}
+	if !strings.Contains(seen[0].Messages[0].Content, "look things up") {
+		t.Error("the system prompt does not explain the lookups")
+	}
+	if last := seen[1].Messages[len(seen[1].Messages)-1]; last.Role != ai.RoleTool || !strings.Contains(last.Content, "offerte maart") {
+		t.Errorf("the result was not handed back: %+v", last)
+	}
+}
+
+func TestLookupNote(t *testing.T) {
+	got := lookupNote(ai.ToolCall{Name: "mail_search", Arguments: json.RawMessage(`{"query":"offerte Q4","from":"anna","limit":10}`)})
+	if got != `mail search from=anna limit=10 "offerte Q4"` {
+		t.Errorf("note = %q", got)
 	}
 }

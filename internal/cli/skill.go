@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -17,27 +18,33 @@ func init() {
 	})
 }
 
-// coreSuggestedPermissions is the ~/.claude/settings.json fragment from
+// suggestedPermissions is the ~/.claude/settings.json fragment from
 // DESIGN.md §10: every read command allowed outright, every write asked for.
-const coreSuggestedPermissions = `{
-  "permissions": {
-    "allow": [
-      "Bash(emlcal mail list*)", "Bash(emlcal mail search*)",
-      "Bash(emlcal mail read*)", "Bash(emlcal mail thread*)",
-      "Bash(emlcal mail mailboxes*)", "Bash(emlcal mail attachment list*)",
-      "Bash(emlcal cal agenda*)", "Bash(emlcal cal show*)",
-      "Bash(emlcal cal free*)", "Bash(emlcal cal calendars*)",
-      "Bash(emlcal status*)", "Bash(emlcal sync)"
-    ],
-    "ask": [
-      "Bash(emlcal mail send*)", "Bash(emlcal mail reply*)",
-      "Bash(emlcal mail trash*)", "Bash(emlcal mail move*)",
-      "Bash(emlcal cal create*)", "Bash(emlcal cal update*)",
-      "Bash(emlcal cal delete*)"
-    ]
-  }
+// The lists it is rendered from (aitools.go) are also what a model gets as
+// tools, so the two cannot disagree about what is safe.
+func suggestedPermissions() string {
+	rules := func(cmds []string, extra ...string) string {
+		var out []string
+		for _, c := range cmds {
+			out = append(out, `"Bash(emlcal `+c+`*)"`)
+		}
+		out = append(out, extra...)
+		var b strings.Builder
+		for i := 0; i < len(out); i += 2 {
+			b.WriteString("      " + strings.Join(out[i:min(i+2, len(out))], ", "))
+			if i+2 < len(out) {
+				b.WriteString(",")
+			}
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+	return "{\n  \"permissions\": {\n    \"allow\": [\n" +
+		rules(readCommands, `"Bash(emlcal sync)"`) +
+		"    ],\n    \"ask\": [\n" +
+		rules(writeCommands) +
+		"    ]\n  }\n}\n"
 }
-`
 
 func coreSkillCmd(app *App) *cobra.Command {
 	var install bool
@@ -80,7 +87,7 @@ func coreInstallSkill(app *App) error {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	fmt.Fprintf(app.Stderr, "Add to ~/.claude/settings.json so reads run unattended and writes ask:\n%s", coreSuggestedPermissions)
+	fmt.Fprintf(app.Stderr, "Add to ~/.claude/settings.json so reads run unattended and writes ask:\n%s", suggestedPermissions())
 	return app.Printer().Print(struct {
 		Path      string `json:"path"      table:"PATH"`
 		Bytes     int    `json:"bytes"     table:"BYTES"`

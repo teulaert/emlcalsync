@@ -2,7 +2,11 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,12 +30,19 @@ import (
 // generation they belong to, so a stopped generation's stragglers are
 // ignored, the same way stale loads are everywhere else.
 
-// draftEvent is one step of a generation: a piece of text, or the end.
+// draftEvent is one step of a generation: a piece of text, a lookup the
+// model asked for, or the end.
 type draftEvent struct {
 	seq  int
 	text string
-	done bool
-	err  error
+	// reset says the text so far was a lead-in to a lookup, not the draft.
+	reset bool
+	// note is what the model is doing, for the status line; noteSet tells
+	// an empty note from no note.
+	note    string
+	noteSet bool
+	done    bool
+	err     error
 }
 
 // assistState is a generation in flight.
@@ -46,6 +57,8 @@ type assistState struct {
 	// model's way and put back under its draft.
 	quoted string
 	text   strings.Builder
+	// note is the lookup under way, shown on the status line.
+	note string
 }
 
 var errNoAI = errors.New("no AI model configured — add an [[ai.models]] block to config.toml")
@@ -169,8 +182,17 @@ func (c *composeView) onDraft(ev draftEvent) tea.Cmd {
 		return nil
 	}
 	if !ev.done {
-		a.text.WriteString(ev.text)
-		c.body.InsertString(ev.text)
+		if ev.reset {
+			a.text.Reset()
+			c.body.SetValue("")
+		}
+		if ev.noteSet {
+			a.note = ev.note
+		}
+		if ev.text != "" {
+			a.text.WriteString(ev.text)
+			c.body.InsertString(ev.text)
+		}
 		return nextDraft(a.events)
 	}
 
@@ -191,6 +213,40 @@ func (c *composeView) onDraft(ev draftEvent) tea.Cmd {
 	c.body.MoveToBegin()
 	c.info = "drafted by " + c.d.AI.Describe() + " — read it before it goes"
 	return nil
+}
+
+// assistFooter is the status line while a draft is arriving.
+func (c *composeView) assistFooter() string {
+	s := "drafting with " + c.d.AI.Describe() + "…"
+	if c.assist != nil && c.assist.note != "" {
+		s += " " + c.assist.note
+	}
+	return s + " · esc to stop"
+}
+
+// lookupNote says what a lookup is, in a few words: "mail search offerte
+// from=anna".
+func lookupNote(call ai.ToolCall) string {
+	var args map[string]any
+	_ = json.Unmarshal(call.Arguments, &args)
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := []string{strings.ReplaceAll(call.Name, "_", " ")}
+	for _, k := range keys {
+		v := fmt.Sprint(args[k])
+		if f, ok := args[k].(float64); ok {
+			v = strconv.FormatFloat(f, 'f', -1, 64)
+		}
+		if k == "query" || k == "id" {
+			parts = append(parts, `"`+v+`"`)
+		} else {
+			parts = append(parts, k+"="+v)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // nextDraft waits for the next event of a generation. It returns nil once
@@ -235,8 +291,22 @@ func (d Deps) draftReply(ctx context.Context, seq int, account, thread string, i
 			}
 		}
 		in.ContextWindow = d.AI.ContextWindow() // may go to the server; that is why it is here
+		in.Lookups = d.Tools != nil
 		req := ai.ReplyPrompt(in)
-		err := d.AI.Chat(ctx, req, func(s string) { send(draftEvent{text: s}) })
+		_, err := ai.Run(ctx, d.AI, req, d.Tools, ai.Observer{
+			Text:    func(s string) { send(draftEvent{text: s}) },
+			Discard: func() { send(draftEvent{reset: true}) },
+			Lookup: func(call ai.ToolCall) {
+				d.log().Info("ai draft: lookup", "tool", call.Name, "args", string(call.Arguments))
+				send(draftEvent{note: "· " + lookupNote(call), noteSet: true})
+			},
+			Result: func(call ai.ToolCall, out string, err error) {
+				if err != nil {
+					d.log().Warn("ai draft: lookup failed", "tool", call.Name, "err", err)
+				}
+				send(draftEvent{note: "· " + lookupNote(call) + " ✓ · thinking", noteSet: true})
+			},
+		})
 		send(draftEvent{done: true, err: err})
 		return nil
 	}
