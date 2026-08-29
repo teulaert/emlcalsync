@@ -61,3 +61,13 @@ func TestSummaryPromptSkipsDrafts(t *testing.T) {
 		t.Error("the draft should not be part of the conversation")
 	}
 }
+
+// The model must not chat: the summary is read on a screen.
+func TestSummaryPromptForbidsChatter(t *testing.T) {
+	sys := SummaryPrompt(SummaryInput{}).Messages[0].Content
+	for _, want := range []string{"no offer to do more", "no question back", "cannot open attachments"} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("system prompt lacks %q", want)
+		}
+	}
+}

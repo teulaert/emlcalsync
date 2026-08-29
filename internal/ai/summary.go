@@ -87,6 +87,8 @@ Facts: the numbers, dates and names that matter
 Open: what is unresolved or contradicts something earlier; or "nothing"
 
 When a question is asked, answer it instead, briefly, and say which message the answer rests on.
+
+The summary or the answer is the whole of your reply. It is read on a screen, not in a chat: no greeting, no closing line, no offer to do more, no question back, and nothing about what you could or could not do. You cannot open attachments; when a fact lives only in one, the Open line says which attachment holds it -- "bedrag en vervaldatum staan in 360954.pdf" -- and nothing about you.
 `, who, who))
 	if lookups {
 		s += "\n\n" + lookupsGuidance("answering")
