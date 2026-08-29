@@ -429,6 +429,8 @@ func (t *threadView) headerText(m *model.Message, w int) string {
 	if f := output.MailFlags(m.Flags, m.HasAttachments); f != "" {
 		s += " · " + f
 	}
+	// The id last, where a narrow terminal cuts it rather than the sender.
+	s += " · " + m.PublicID()
 	return padCells(s, w)
 }
 

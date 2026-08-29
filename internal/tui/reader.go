@@ -131,7 +131,10 @@ func (r *reader) headerLines(w int) []string {
 	for _, a := range m.To {
 		to = append(to, a.String())
 	}
+	// The id first: it is what anything else that reads the archive -- an
+	// agent with the skill -- needs to be told, and y copies it.
 	lines := []string{
+		truncCells("Id:      "+m.PublicID(), w),
 		truncCells("From:    "+m.From.String(), w),
 	}
 	if len(to) > 0 {

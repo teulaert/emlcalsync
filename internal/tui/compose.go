@@ -12,6 +12,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/compose"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/sync"
 )
 
@@ -74,6 +75,12 @@ type composeView struct {
 
 	// focus indexes fields, or is bodyFocus for the body.
 	focus int
+
+	// files are the attachments going out with the message: a forward's, and
+	// nothing else's. filesNote names any the fetch could not get, and stays
+	// on screen rather than in a status that the next keystroke clears.
+	files     []mime.DraftAttachment
+	filesNote string
 
 	// quote is the quoted original the reply opened with, so the AI draft
 	// can tell the person's own text from what sits under it. Empty on a
@@ -212,16 +219,19 @@ func newDraftCompose(d Deps, m *model.Message) *composeView {
 // rounds before the last one included and none of it marked "> ". A reply
 // strips those because the person being answered wrote them; the whole point
 // of a forward is that this person has none of it.
-func newForwardCompose(d Deps, orig *model.Message) *composeView {
+//
+// The files come with it. They are fetched with the message rather than at
+// send time -- the composer shows what is going out, and a row of attachments
+// nobody can see until afterwards is the same as not having them -- and any
+// that could not be fetched are named in that row rather than dropped.
+func newForwardCompose(d Deps, orig *model.Message, files []mime.DraftAttachment, note string) *composeView {
 	c := newComposeView(d, kindForward, orig.AccountID, d.sendFrom(orig.AccountID))
+	c.files, c.filesNote = files, note
 	// Two blank lines above the forwarded message, with the cursor waiting in
 	// To: a note over somebody else's mail, addressed first.
 	c.fill("", "", "", compose.ForwardSubject(orig.Subject),
 		"\n\n"+compose.Forwarded(orig, d.loc()))
 	c.focusField(0)
-	if orig.HasAttachments {
-		c.info = "the attachments do not go with it — a forward carries the words"
-	}
 	return c
 }
 
@@ -523,15 +533,16 @@ func (c *composeView) build(kind sync.OpKind) (sync.Op, error) {
 		return sync.Op{}, errNoRecipient
 	}
 	draft := &mime.Draft{
-		From:       c.from,
-		To:         to,
-		Cc:         cc,
-		Bcc:        bcc,
-		Subject:    strings.TrimSpace(c.subj.Value()),
-		TextBody:   c.body.Value(),
-		InReplyTo:  c.inReplyTo,
-		References: c.references,
-		Date:       c.d.now(),
+		From:        c.from,
+		To:          to,
+		Cc:          cc,
+		Bcc:         bcc,
+		Subject:     strings.TrimSpace(c.subj.Value()),
+		TextBody:    c.body.Value(),
+		InReplyTo:   c.inReplyTo,
+		References:  c.references,
+		Attachments: c.files,
+		Date:        c.d.now(),
 	}
 	raw, err := mime.Build(draft)
 	if err != nil {
@@ -546,6 +557,32 @@ func (c *composeView) build(kind sync.OpKind) (sync.Op, error) {
 	return op, nil
 }
 
+// headerRows is how many rows sit above the rule: the four fields, and the
+// files row when there is one. The body gets what is left.
+func (c *composeView) headerRows() int {
+	if len(c.files) > 0 || c.filesNote != "" {
+		return len(c.fields) + 1
+	}
+	return len(c.fields)
+}
+
+// filesView is the attachments row: what is going out with the message, and
+// what could not be got.
+func (c *composeView) filesView(w int) string {
+	names := make([]string, 0, len(c.files)+1)
+	for _, f := range c.files {
+		names = append(names, f.Filename+" "+output.HumanSize(int64(len(f.Data))))
+	}
+	line := strings.Join(names, ", ")
+	if c.filesNote != "" {
+		if line != "" {
+			line += " · "
+		}
+		line += c.filesNote
+	}
+	return padCells(line, max(w-labelW, 0))
+}
+
 // ensure lays the fields out for the window the root is handing down.
 func (c *composeView) ensure(w, h int) {
 	if c.sized == [2]int{w, h} || w <= 0 || h <= 0 {
@@ -557,7 +594,7 @@ func (c *composeView) ensure(w, h int) {
 		f.SetWidth(fw)
 	}
 	c.body.SetWidth(max(w-2, 1))
-	c.body.SetHeight(max(listRows(h)-len(c.fields)-1, 1))
+	c.body.SetHeight(max(listRows(h)-c.headerRows()-1, 1))
 }
 
 func (c *composeView) View(w, h int) string {
@@ -570,6 +607,9 @@ func (c *composeView) View(w, h int) string {
 			label = styleFaint.Render(label)
 		}
 		out = append(out, label+f.View())
+	}
+	if c.headerRows() > len(c.fields) {
+		out = append(out, styleFaint.Render(padCells(" Files", labelW))+c.filesView(w))
 	}
 	out = append(out, styleFaint.Render(strings.Repeat("─", max(w, 0))))
 	for _, l := range strings.Split(c.body.View(), "\n") {

@@ -35,6 +35,7 @@ type keymap struct {
 	Refresh     key.Binding
 	Undo        key.Binding
 	AI          key.Binding
+	Copy        key.Binding
 	Help        key.Binding
 
 	// The composer's own keys. They live here with the rest rather than as
@@ -84,6 +85,7 @@ func defaultKeys() keymap {
 		Refresh:    key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "refresh")),
 		Undo:       key.NewBinding(key.WithKeys("z"), key.WithHelp("z", "undo")),
 		AI:         key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "ask the AI")),
+		Copy:       key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy the id")),
 		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 
 		Send:        key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "send")),
@@ -116,6 +118,7 @@ func (k keymap) helpLines() [][2]string {
 		{"s", "toggle star"},
 		{"z", "undo the last action"},
 		{"ctrl+g", "ask the AI about the conversation: a summary, or a question typed at the prompt"},
+		{"y", "copy the id to the clipboard: the thread's on a row, the message's in a thread or the reader"},
 		{"  r", "on the summary: reply to the conversation"},
 		{"", ""},
 		{"r", "reply (carries on the thread's draft, if there is one)"},

@@ -8,6 +8,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/teulaert/emlcalsync/internal/compose"
+	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/store"
 )
@@ -63,7 +65,12 @@ type composeLoaded struct {
 	seq int
 	req composeRequest
 	msg *model.Message
-	err error
+	// files are the attachments a forward carries, fetched with the message;
+	// filesNote names the ones it could not, which is the one thing about a
+	// forward that must not be found out afterwards.
+	files     []mime.DraftAttachment
+	filesNote string
+	err       error
 }
 
 // submitted reports the outcome of a send or a draft save.
@@ -201,15 +208,90 @@ func (d Deps) openEvent(seq int, accountID, calRemote, remote string) tea.Cmd {
 // newest one in it that was actually sent.
 func (d Deps) loadCompose(seq int, req composeRequest) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// A forward carries the files, and those can be a download rather
+		// than a read off disk: the budget is the one a fetch gets, not the
+		// one a row lookup gets.
+		timeout := 15 * time.Second
+		if req.forward {
+			timeout = 90 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		m, resolved, err := resolveCompose(ctx, d, req)
 		if err != nil {
 			return composeLoaded{seq: seq, req: req, err: err}
 		}
 		ensureText(ctx, d, m)
-		return composeLoaded{seq: seq, req: resolved, msg: m}
+		out := composeLoaded{seq: seq, req: resolved, msg: m}
+		if resolved.forward {
+			out.files, out.filesNote = d.forwardFiles(ctx, m)
+		}
+		return out
 	}
+}
+
+// maxForwardBytes is what a forward will hold in memory and hand to a
+// provider. It is generous next to what either of them accepts on a message
+// (Gmail 25 MB, JMAP whatever the server says) and is here so that a mailbox
+// with a 400 MB video in it cannot be forwarded into the machine's memory by
+// one keystroke.
+const maxForwardBytes = 25 << 20
+
+// forwardFiles fetches the attachments the forward carries, and says which
+// ones it could not.
+//
+// The bytes come through the engine, which reads them out of the archived raw
+// message when it has one and downloads them from the provider when it does
+// not -- the same path `mail attachment` takes. A file that will not come is
+// named rather than dropped: forwarding is mostly done *for* the attachment,
+// so "it went without them" is the one outcome nobody may discover at the
+// other end.
+func (d Deps) forwardFiles(ctx context.Context, m *model.Message) ([]mime.DraftAttachment, string) {
+	if !m.HasAttachments || d.Store == nil || d.Engine == nil {
+		return nil, ""
+	}
+	atts, err := d.Store.ListAttachments(ctx, m.ID)
+	if err != nil {
+		d.log().Warn("forward: list attachments", "id", m.PublicID(), "err", err)
+		return nil, "the attachments could not be read: " + err.Error()
+	}
+	var (
+		out   []mime.DraftAttachment
+		left  = int64(maxForwardBytes)
+		short []string
+	)
+	for _, a := range compose.ForwardAttachments(atts) {
+		name := a.Filename
+		if name == "" {
+			name = a.PartPath
+		}
+		if a.Size > left {
+			short = append(short, name+" (too large)")
+			continue
+		}
+		ref := a.RemoteRef
+		if ref == "" {
+			ref = a.PartPath
+		}
+		data, err := d.Engine.FetchAttachment(ctx, m.AccountID, m.RemoteID, ref)
+		if err != nil {
+			d.log().Warn("forward: fetch attachment", "id", m.PublicID(), "part", a.PartPath, "err", err)
+			short = append(short, name)
+			continue
+		}
+		if int64(len(data)) > left {
+			short = append(short, name+" (too large)")
+			continue
+		}
+		left -= int64(len(data))
+		out = append(out, mime.DraftAttachment{
+			Filename: name, ContentType: a.ContentType, Data: data,
+		})
+	}
+	if len(short) > 0 {
+		return out, "not carried: " + strings.Join(short, ", ")
+	}
+	return out, ""
 }
 
 // resolveCompose finds the message the composer opens on, and says which kind

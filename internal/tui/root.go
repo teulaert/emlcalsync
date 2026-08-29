@@ -314,12 +314,16 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return r, r.startSummary()
 	}
 
-	// RSVP only means something on an event.
+	// RSVP only means something on an event -- and y is one of its keys, so
+	// it is matched ahead of the copy below.
 	if ev, ok := r.top().(*eventView); ok && ev.ev != nil {
 		if p, ok := ev.rsvp(msg.String()); ok {
 			r.note("sending RSVP…")
 			return r, r.d.apply(string(p), respondOp(ev.accountID, ev.calRemote, ev.remote, p), nil)
 		}
+	}
+	if key.Matches(msg, r.keys.Copy) {
+		return r, r.copyID()
 	}
 
 	s, cmd := r.top().Update(msg, r.keys, r.w, r.bodyHeight())
@@ -469,6 +473,40 @@ func (r *root) focused() (composeRequest, bool) {
 	return req, true
 }
 
+// copyID is y: the id of what is in focus goes to the clipboard, so it can
+// be handed to whatever else reads the archive -- an agent with the emlcal
+// skill, most likely, which wants exactly this string. A list row is a
+// conversation, so its thread id; a message in a thread or the reader is
+// that message's id; the summary screen is its conversation's.
+func (r *root) copyID() tea.Cmd {
+	var id, what string
+	switch s := r.top().(type) {
+	case *mailList:
+		t := s.selected()
+		if t == nil {
+			return nil
+		}
+		id, what = model.ThreadPublicID(t.AccountID, t.ThreadID), "thread"
+	case *threadView:
+		m := s.selected()
+		if m == nil {
+			return nil
+		}
+		id, what = m.PublicID(), "message"
+	case *reader:
+		if s.msg == nil {
+			return nil
+		}
+		id, what = s.msg.PublicID(), "message"
+	case *summaryView:
+		id, what = model.ThreadPublicID(s.account, s.threadID), "thread"
+	default:
+		return nil
+	}
+	r.note("copied " + id + " (" + what + " id)")
+	return tea.SetClipboard(id)
+}
+
 // startSummary is ctrl+g anywhere but the composer: it asks the model about
 // the conversation in focus -- a summary, or a question typed at the prompt
 // -- on a screen of its own. On the summary screen itself it opens the
@@ -536,7 +574,7 @@ func (r *root) onComposeLoaded(msg composeLoaded) tea.Cmd {
 	case msg.req.draft:
 		return r.push(newDraftCompose(r.d, msg.msg))
 	case msg.req.forward:
-		return r.push(newForwardCompose(r.d, msg.msg))
+		return r.push(newForwardCompose(r.d, msg.msg, msg.files, msg.filesNote))
 	}
 	return r.push(newReplyCompose(r.d, msg.msg, msg.req.all))
 }

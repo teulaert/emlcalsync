@@ -278,3 +278,33 @@ func TestUIsALetterInTheComposer(t *testing.T) {
 		t.Errorf("body = %q, want the u that was typed", c.body.Value())
 	}
 }
+
+// y copies the id in focus, and says which kind it was.
+func TestCopyID(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "Hello", "anna", time.Hour, false)
+	r := newTestRoot(t, d)
+
+	_, cmd := r.Update(keyPress("y"))
+	if cmd == nil || !strings.Contains(r.status, "copied work:t:t1 (thread id)") {
+		t.Errorf("on the list: cmd=%v status=%q", cmd != nil, r.status)
+	}
+
+	send(t, r, "enter") // the thread
+	_, cmd = r.Update(keyPress("y"))
+	if cmd == nil || !strings.Contains(r.status, "copied work:w1 (message id)") {
+		t.Errorf("in the thread: cmd=%v status=%q", cmd != nil, r.status)
+	}
+	if !strings.Contains(r.render(), "work:w1") {
+		t.Errorf("the expanded thread does not show the id:\n%s", r.render())
+	}
+
+	send(t, r, "enter") // the reader
+	_, cmd = r.Update(keyPress("y"))
+	if cmd == nil || !strings.Contains(r.status, "copied work:w1 (message id)") {
+		t.Errorf("in the reader: cmd=%v status=%q", cmd != nil, r.status)
+	}
+	if !strings.Contains(r.render(), "Id:      work:w1") {
+		t.Errorf("the reader does not show the id:\n%s", r.render())
+	}
+}

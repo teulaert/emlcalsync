@@ -146,6 +146,26 @@ func Forwarded(orig *model.Message, loc *time.Location) string {
 	return b.String()
 }
 
+// ForwardAttachments is the files a forward carries: everything on the
+// original except the inline parts its body refers to by Content-ID.
+//
+// Those are the signature logo and the images laid into the HTML -- part of
+// how the message looked, not things anybody meant to pass on. A forward is
+// built out of the text body, which no longer refers to them at all, so
+// carrying them would turn somebody's letterhead into two files the recipient
+// has to wonder about. An attachment marked inline with nothing referring to
+// it is an ordinary attachment: plenty of clients send a PDF that way.
+func ForwardAttachments(atts []model.Attachment) []model.Attachment {
+	out := make([]model.Attachment, 0, len(atts))
+	for _, a := range atts {
+		if a.Inline && a.ContentID != "" {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 // MergeAddresses appends add to base, dropping the addresses in skip and any
 // duplicates (case-insensitive on the address).
 func MergeAddresses(base, add []model.Address, skip map[string]bool) []model.Address {

@@ -266,7 +266,10 @@ of its own, from which `r` replies; in the composer it drafts the reply, with
 instructions or without. Either way the model reads the whole thread and can
 look other mail and the calendar up first. Not yet: forwarding or new mail
 from the TUI, creating or editing events from the TUI, embeddings for
-semantic search, contacts.
+semantic search, contacts. `y` copies the id in focus to the clipboard — the
+thread's on a list row, the message's in a thread or the reader — which is
+what an agent with the skill wants to be told; the reader and the expanded
+thread show it too.
 
 ## AI
 

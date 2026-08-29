@@ -1418,6 +1418,11 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     tool is worth a runtime dependency, and it is what an agent on a shell
     reaches for anyway. `doctor` warns when it is missing; the command
     says what to install; the exec still runs under a 30-second deadline.
+  - **`y` copies the id in focus** (OSC 52, so it works over SSH), and the
+    reader and the expanded thread show it: the id is what anything else
+    that reads the archive -- an agent with the skill -- needs to be told,
+    and it was only ever in the reader's faint status line. On an event `y`
+    is still yes: the RSVP keys are matched first.
   - The shared half lives in **`internal/compose`**: subject, recipients,
     threading headers, quoting, address parsing and the SMTP envelope. It was
     all in `internal/cli` while `mail reply` was the only composer; the TUI
