@@ -418,3 +418,19 @@ func TestLookupNote(t *testing.T) {
 		t.Errorf("note = %q", got)
 	}
 }
+
+// The model writes as the person by name when their sent mail says it.
+func TestAIDraftSignsAsTheSentMailDoes(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+	addMessageIn(t, d, "sent", "work", "s1", "t0", "Eerder", "work", 24*time.Hour, false) // From: work <work@example.com>
+	fake := &scriptedAI{chunks: []string{"Hoi."}}
+	d.AI = fake.client()
+	r := newTestRoot(t, d)
+	send(t, r, "r")
+	send(t, r, "ctrl+g")
+	send(t, r, "enter")
+	if sys := fake.got.Messages[0].Content; !strings.Contains(sys, "work <work@example.com>") {
+		t.Errorf("system prompt does not name the person:\n%s", sys)
+	}
+}

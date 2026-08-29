@@ -234,7 +234,10 @@ func resolveCompose(ctx context.Context, d Deps, req composeRequest) (*model.Mes
 		m, err := newestDraft(ctx, d, req.account, req.thread)
 		return m, req, err
 	}
-	if req.thread != "" {
+	// A forward is never the draft in the thread: f says "send this message
+	// on", and an unfinished answer is neither that message nor somewhere to
+	// write a forward.
+	if req.thread != "" && !req.forward {
 		if m, err := newestDraft(ctx, d, req.account, req.thread); err == nil {
 			req.draft = true
 			return m, req, nil
@@ -254,10 +257,11 @@ type composeRequest struct {
 	// remote names the message outright. Empty means "work it out from the
 	// thread": the newest draft in it when draft is set, else the newest
 	// message that was actually sent.
-	remote string
-	thread string
-	draft  bool
-	all    bool
+	remote  string
+	thread  string
+	draft   bool
+	forward bool
+	all     bool
 }
 
 // newestSent is the message in a thread that a reply belongs under: the last

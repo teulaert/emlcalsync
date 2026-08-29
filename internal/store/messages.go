@@ -1048,3 +1048,26 @@ func (tx *Tx) ListAttachments(ctx context.Context, messageRowID int64) ([]model.
 	}
 	return out, rows.Err()
 }
+
+// SenderName is the display name an account's own mail goes out with, read
+// off its newest sent message: what a model writing as the person should
+// sign, rather than a surname guessed from the address. It is "" when the
+// account has sent nothing, or signs with the bare address.
+func (s *Store) SenderName(ctx context.Context, accountID, email string) string {
+	for _, f := range []MessageFilter{
+		{Accounts: []string{accountID}, MailboxRole: "sent", Limit: 10},
+		{Accounts: []string{accountID}, From: email, Limit: 10},
+	} {
+		msgs, err := s.ListMessages(ctx, f)
+		if err != nil {
+			return ""
+		}
+		for i := range msgs {
+			from := msgs[i].From
+			if strings.EqualFold(strings.TrimSpace(from.Email), strings.TrimSpace(email)) && strings.TrimSpace(from.Name) != "" {
+				return strings.TrimSpace(from.Name)
+			}
+		}
+	}
+	return ""
+}

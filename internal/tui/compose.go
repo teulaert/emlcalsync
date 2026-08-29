@@ -32,6 +32,11 @@ import (
 type composeView struct {
 	d Deps
 
+	// kind is what this composer was opened as. It decides the title, what the
+	// status line calls a submission, and -- with threadID -- whether there is
+	// a conversation behind the screen for ctrl+g to read at all.
+	kind composeKind
+
 	// account is the one the message goes out from: the account that received
 	// what is being answered, or the one the draft is stored in. `mail reply`
 	// follows the same rule, and there is no --from here to override it.
@@ -96,6 +101,17 @@ type composeView struct {
 	sized [2]int // the w, h the fields were last laid out for
 }
 
+// composeKind is the four things a composer can be: an answer, an answer being
+// finished, a message passed on, and one with nothing behind it at all.
+type composeKind int
+
+const (
+	kindReply composeKind = iota
+	kindDraft
+	kindForward
+	kindNew
+)
+
 const (
 	// bodyFocus is the focus index of the body, one past the header fields.
 	bodyFocus = 4
@@ -139,7 +155,7 @@ func newReplyCompose(d Deps, orig *model.Message, all bool) *composeView {
 	seed := &mime.Draft{From: from}
 	compose.Reply(seed, orig, all, []string{from.Email})
 
-	c := newComposeView(d, orig.AccountID, from)
+	c := newComposeView(d, kindReply, orig.AccountID, from)
 	c.orig = orig
 	c.threadID = orig.ThreadID
 	c.inReplyTo, c.references = seed.InReplyTo, seed.References
@@ -168,7 +184,7 @@ func newDraftCompose(d Deps, m *model.Message) *composeView {
 	if from.Email == "" {
 		from = d.sendFrom(m.AccountID)
 	}
-	c := newComposeView(d, m.AccountID, from)
+	c := newComposeView(d, kindDraft, m.AccountID, from)
 	c.draftRemote = m.RemoteID
 	c.threadID = m.ThreadID
 	c.inReplyTo = m.InReplyTo
@@ -183,8 +199,51 @@ func newDraftCompose(d Deps, m *model.Message) *composeView {
 	return c
 }
 
-func newComposeView(d Deps, account string, from model.Address) *composeView {
-	c := &composeView{d: d, account: account, from: from, focus: bodyFocus}
+// newForwardCompose passes orig on to somebody else.
+//
+// A forward is not a reply and is not built like one. There are no recipients
+// to work out -- who it goes to is the whole of what the person has to say, so
+// the cursor opens in To rather than in the body -- and it carries no
+// threading headers: In-Reply-To would file the message at the other end under
+// a conversation the recipient has never seen a word of. Nor does it mark the
+// original answered, because it does not answer it.
+//
+// What goes into the body is [compose.Forwarded]: the original entire, the
+// rounds before the last one included and none of it marked "> ". A reply
+// strips those because the person being answered wrote them; the whole point
+// of a forward is that this person has none of it.
+func newForwardCompose(d Deps, orig *model.Message) *composeView {
+	c := newComposeView(d, kindForward, orig.AccountID, d.sendFrom(orig.AccountID))
+	// Two blank lines above the forwarded message, with the cursor waiting in
+	// To: a note over somebody else's mail, addressed first.
+	c.fill("", "", "", compose.ForwardSubject(orig.Subject),
+		"\n\n"+compose.Forwarded(orig, d.loc()))
+	c.focusField(0)
+	if orig.HasAttachments {
+		c.info = "the attachments do not go with it — a forward carries the words"
+	}
+	return c
+}
+
+// newBlankCompose opens a message with nothing behind it: c.
+//
+// Every other composer takes its account from the message it opened on. This
+// one has no message, so the caller decides -- the list's account filter, in
+// practice -- and the status line names the address it will go out as, because
+// a sender nobody picked on screen is the one thing about a new message that
+// is not written anywhere on it.
+func newBlankCompose(d Deps, account string, from model.Address) *composeView {
+	c := newComposeView(d, kindNew, account, from)
+	c.fill("", "", "", "", "")
+	c.focusField(0)
+	if from.Email != "" {
+		c.info = "from " + from.Email
+	}
+	return c
+}
+
+func newComposeView(d Deps, kind composeKind, account string, from model.Address) *composeView {
+	c := &composeView{d: d, kind: kind, account: account, from: from, focus: bodyFocus}
 	c.to, c.cc, c.bcc, c.subj = newField(), newField(), newField(), newField()
 	c.fields = []*textinput.Model{&c.to, &c.cc, &c.bcc, &c.subj}
 
@@ -245,10 +304,22 @@ func (c *composeView) Title() string {
 	if s == "" {
 		s = "(no subject)"
 	}
-	if c.draftRemote != "" {
-		return "draft · " + s
+	return c.kindWord() + " · " + s
+}
+
+// kindWord names the composer on the title bar. A stored draft says so
+// whatever it started life as: what is on screen then is the person's own
+// words from before, which is the thing worth being told.
+func (c *composeView) kindWord() string {
+	switch {
+	case c.draftRemote != "":
+		return "draft"
+	case c.kind == kindForward:
+		return "fwd"
+	case c.kind == kindNew:
+		return "new"
 	}
-	return "reply · " + s
+	return "reply"
 }
 
 // Init has nothing to load: everything the composer shows was in hand when it
@@ -290,23 +361,26 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 		return c, c.askKey(press)
 	}
 
-	switch press.String() {
+	switch {
 	// ctrl+c never reaches here: the root takes it as quit, ahead of the
 	// capture gate, so a composer cannot hold the program.
-	case "esc":
+	//
+	// esc is matched on the key rather than through k.Back, which also answers
+	// to u: in here that is a letter somebody is typing into a To field.
+	case press.String() == "esc":
 		return c, c.cancel()
-	case "ctrl+d":
+	case key.Matches(press, k.Send):
 		return c, c.submit(sync.OpSend)
-	case "ctrl+s":
+	case key.Matches(press, k.SaveDraft):
 		return c, c.submit(sync.OpDraft)
-	case "ctrl+x":
+	case key.Matches(press, k.DeleteDraft):
 		return c, c.delete()
-	case "ctrl+g":
+	case key.Matches(press, k.AI):
 		return c, c.startAsk()
-	case "tab":
+	case key.Matches(press, k.NextField):
 		c.moveFocus(1)
 		return c, nil
-	case "shift+tab":
+	case key.Matches(press, k.PrevField):
 		c.moveFocus(-1)
 		return c, nil
 	}
@@ -332,15 +406,22 @@ func (c *composeView) toFocused(msg tea.Msg) tea.Cmd {
 
 func (c *composeView) moveFocus(d int) {
 	n := bodyFocus + 1
-	c.focus = ((c.focus+d)%n + n) % n
-	for i, f := range c.fields {
-		if i == c.focus {
+	c.focusField(((c.focus+d)%n + n) % n)
+}
+
+// focusField puts the cursor in one field. A reply opens in the body, over the
+// quote it answers; a forward and a new message open in To, because they are
+// addressed before they are written.
+func (c *composeView) focusField(i int) {
+	c.focus = i
+	for j, f := range c.fields {
+		if j == i {
 			f.Focus()
 		} else {
 			f.Blur()
 		}
 	}
-	if c.focus == bodyFocus {
+	if i == bodyFocus {
 		c.body.Focus()
 	} else {
 		c.body.Blur()
@@ -414,8 +495,10 @@ func (c *composeView) what(kind sync.OpKind) string {
 	switch {
 	case kind == sync.OpDraft:
 		return "draft"
-	case c.draftRemote != "":
+	case c.draftRemote != "", c.kind == kindNew:
 		return "send"
+	case c.kind == kindForward:
+		return "forward"
 	}
 	return "reply"
 }
@@ -518,10 +601,20 @@ func (c *composeView) footer(w int) string {
 		return "esc again to throw this reply away"
 	case c.info != "":
 		return c.info
-	case c.draftRemote != "":
-		return "ctrl+d send · ctrl+s save · ctrl+x delete · ctrl+g ai draft · tab next field · esc cancel"
 	}
-	return "ctrl+d send · ctrl+s save as draft · ctrl+g ai draft · tab next field · esc cancel"
+	// The hints are what this composer can actually do: there is nothing to
+	// delete without a stored draft, and nothing for the model to read without
+	// a conversation behind the screen.
+	hints := []string{"ctrl+d send"}
+	if c.draftRemote != "" {
+		hints = append(hints, "ctrl+s save", "ctrl+x delete")
+	} else {
+		hints = append(hints, "ctrl+s save as draft")
+	}
+	if c.threadID != "" {
+		hints = append(hints, "ctrl+g ai draft")
+	}
+	return strings.Join(append(hints, "tab / shift+tab field", "esc cancel"), " · ")
 }
 
 var (

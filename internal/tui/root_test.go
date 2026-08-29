@@ -241,3 +241,40 @@ func TestBackgroundScreenStillReceivesItsLoad(t *testing.T) {
 		t.Errorf("switching to the calendar showed no events:\n%s", r.render())
 	}
 }
+
+// u is what Gmail goes back with, and nothing in the TUI was using it. esc and
+// q still do; this is one more way up, not a different one.
+func TestUGoesBackUpTheStack(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "Hello", "anna", time.Hour, false)
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	if _, ok := r.top().(*threadView); !ok {
+		t.Fatalf("top = %T, want the thread", r.top())
+	}
+
+	send(t, r, "u")
+	if _, ok := r.top().(*mailList); !ok {
+		t.Errorf("top = %T, want u to have gone back to the list", r.top())
+	}
+}
+
+// The letter keys are typed in a composer, not pressed: u there is a letter,
+// and the search prompt has always had the same protection.
+func TestUIsALetterInTheComposer(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+
+	r := newTestRoot(t, d)
+	send(t, r, "r")
+	send(t, r, "u")
+
+	c, ok := r.top().(*composeView)
+	if !ok {
+		t.Fatalf("top = %T, want the composer still open", r.top())
+	}
+	if !strings.HasPrefix(c.body.Value(), "u") {
+		t.Errorf("body = %q, want the u that was typed", c.body.Value())
+	}
+}

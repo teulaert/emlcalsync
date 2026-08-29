@@ -143,6 +143,8 @@ func keyPress(s string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	case "backspace":
 		return tea.KeyPressMsg{Code: tea.KeyBackspace}
+	case "delete":
+		return tea.KeyPressMsg{Code: tea.KeyDelete}
 	case "tab":
 		return tea.KeyPressMsg{Code: tea.KeyTab}
 	case "shift+tab":

@@ -67,7 +67,11 @@ type assistState struct {
 	note string
 }
 
-var errNoAI = errors.New("no AI model configured — add an [[ai.models]] block to config.toml")
+var (
+	errNoAI = errors.New("no AI model configured — add an [[ai.models]] block to config.toml")
+	// errNoConversation is ctrl+g on a composer with no thread under it.
+	errNoConversation = errors.New("ctrl+g answers a conversation — this message has none behind it")
+)
 
 // startAsk is ctrl+g: it opens the instructions prompt. When there is text
 // above the quote it asks first, because the draft replaces that text -- it
@@ -75,6 +79,14 @@ var errNoAI = errors.New("no AI model configured — add an [[ai.models]] block 
 func (c *composeView) startAsk() tea.Cmd {
 	if c.d.AI == nil {
 		c.err = errNoAI
+		return nil
+	}
+	// There has to be something to read. A new message has no conversation
+	// behind it, and a forward's conversation is one the model would answer
+	// rather than pass on -- it would write to the person who sent it, not to
+	// the person it is being sent to.
+	if c.threadID == "" {
+		c.err = errNoConversation
 		return nil
 	}
 	own, _ := c.split()
@@ -281,10 +293,25 @@ func (d Deps) draftReply(ctx context.Context, seq int, account, thread string, i
 			if len(msgs) > 0 {
 				in.Thread = msgs
 			}
+			in.Self = d.selfFor(account, in.Self)
 			in.ContextWindow, in.Lookups = window, lookups
 			return ai.ReplyPrompt(in)
 		},
 	}, ch)
+}
+
+// selfFor is who the model writes as: the address it was given, with the
+// display name the account's own sent mail carries -- so a draft is signed
+// with the person's name rather than one guessed from the address. It
+// queries the store, so it belongs inside a Cmd.
+func (d Deps) selfFor(account string, self model.Address) model.Address {
+	if self.Name != "" || d.Store == nil || self.Email == "" {
+		return self
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	self.Name = d.Store.SenderName(ctx, account, self.Email)
+	return self
 }
 
 // modelJob is one thing to ask the model about a conversation.

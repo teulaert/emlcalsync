@@ -155,7 +155,7 @@ func (s *summaryView) start(question string) tea.Cmd {
 		what: "summary", account: s.account, thread: s.threadID,
 		build: func(msgs []model.Message, window int, lookups bool) ai.Request {
 			return ai.SummaryPrompt(ai.SummaryInput{
-				Self: self, Thread: msgs, Question: question,
+				Self: s.d.selfFor(s.account, self), Thread: msgs, Question: question,
 				ContextWindow: window, Lookups: lookups, Loc: s.d.loc(),
 			})
 		},

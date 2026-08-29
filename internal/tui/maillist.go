@@ -480,6 +480,16 @@ func (m *mailList) footer(w int) string {
 	return s
 }
 
+// currentAccount is the account the list is filtered to, empty while it is
+// showing all of them. It is what a new message -- which has no message behind
+// it to take an account from -- goes out as.
+func (m *mailList) currentAccount() string {
+	if m.account > 0 && m.account <= len(m.accounts) {
+		return m.accounts[m.account-1]
+	}
+	return ""
+}
+
 // capturingKeys is true while the search prompt is open: the letters go into
 // the query, not into the root's bindings.
 func (m *mailList) capturingKeys() bool { return m.searching }

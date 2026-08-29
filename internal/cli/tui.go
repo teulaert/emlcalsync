@@ -25,7 +25,8 @@ Mail and calendar are both shown merged across every configured account —
 commands use, and writes go through the same sync engine, so an action taken
 here is the action ` + "`emlcal mail archive`" + ` would have taken. That
 includes replying: r and a open a composer on the message in focus, and what
-it sends is what ` + "`emlcal mail reply`" + ` would have sent. With a model
+it sends is what ` + "`emlcal mail reply`" + ` would have sent. f forwards that
+message on and c starts a new one. With a model
 configured under [ai] in config.toml, ctrl+g in the composer drafts the reply
 from the thread, with or without instructions; the model can look other mail
 and the calendar up first, through the same read commands.

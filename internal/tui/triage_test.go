@@ -349,3 +349,26 @@ func TestTrashFromTheThreadClosesItWhenNothingIsLeft(t *testing.T) {
 		t.Errorf("undo did not put the row back (%d rows)", got)
 	}
 }
+
+// ⌫ and delete are what a hand off Mail.app or Thunderbird reaches for. They
+// are the same trash d is -- undo included -- not a second, quieter one.
+func TestTheDeleteKeysTrashLikeD(t *testing.T) {
+	for _, k := range []string{"delete", "backspace"} {
+		d, mail := newTriageDeps(t)
+		addTriageMessage(t, d, mail, "m1", "Trash me", time.Hour)
+
+		r := newTestRoot(t, d)
+		send(t, r, k)
+
+		_, boxes, ok := mail.Lookup("m1")
+		if !ok {
+			t.Fatalf("%s: message vanished from the provider", k)
+		}
+		if !contains(boxes, "TRASH") {
+			t.Errorf("%s: after trash the provider lacks TRASH: %v", k, boxes)
+		}
+		if r.undo == nil {
+			t.Errorf("%s: trash offered no undo", k)
+		}
+	}
+}

@@ -124,6 +124,57 @@ func TestQuoteFallsBackToReceivedWhenThereIsNoDate(t *testing.T) {
 	}
 }
 
+// A forward hands the whole thing to somebody who has seen none of it, which
+// is the opposite of what a quote does.
+func TestForwardedCarriesTheMessageWhole(t *testing.T) {
+	got := Forwarded(original(), time.UTC)
+	for _, want := range []string{
+		"---------- Forwarded message ----------",
+		"From: Anna de Vries <anna@example.com>",
+		"Date: Tue, 25 Aug 2026 at 11:00",
+		"Subject: offerte Q4",
+		"To: me@example.com, bob@example.com",
+		"Cc: carol@example.com",
+		"Kun je dit bevestigen?",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the forwarded message lacks %q:\n%s", want, got)
+		}
+	}
+	// The round before this one goes too: the person it is being sent to was
+	// not in any of them.
+	if !strings.Contains(got, "> oud") {
+		t.Errorf("forwarding stripped the earlier round:\n%s", got)
+	}
+	// And none of it is marked as quoted -- the header block says where it
+	// came from, so re-marking it would only say it twice.
+	if strings.Contains(got, "> Kun je dit bevestigen?") {
+		t.Errorf("the forwarded body was quoted:\n%s", got)
+	}
+}
+
+func TestForwardedLeavesOutEmptyHeaders(t *testing.T) {
+	orig := original()
+	orig.Cc = nil
+	if strings.Contains(Forwarded(orig, time.UTC), "Cc:") {
+		t.Errorf("a message with no Cc got one:\n%s", Forwarded(orig, time.UTC))
+	}
+}
+
+func TestForwardSubjectDoesNotStackPrefixes(t *testing.T) {
+	for in, want := range map[string]string{
+		"offerte Q4":      "Fwd: offerte Q4",
+		"Fwd: offerte Q4": "Fwd: offerte Q4",
+		"FWD: offerte Q4": "FWD: offerte Q4",
+		"Fw: offerte Q4":  "Fw: offerte Q4",
+		"Re: offerte Q4":  "Fwd: Re: offerte Q4",
+	} {
+		if got := ForwardSubject(in); got != want {
+			t.Errorf("ForwardSubject(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // Bcc is deliberately not in the message bytes, so the envelope is the only
 // place a submission learns to deliver there.
 func TestEnvelopeCarriesBccAndDeduplicates(t *testing.T) {

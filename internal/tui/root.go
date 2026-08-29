@@ -304,6 +304,12 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, r.keys.ReplyAll):
 		return r, r.startReply(true)
 
+	case key.Matches(msg, r.keys.Forward):
+		return r, r.startForward()
+
+	case key.Matches(msg, r.keys.New):
+		return r, r.startNew()
+
 	case key.Matches(msg, r.keys.AI):
 		return r, r.startSummary()
 	}
@@ -366,36 +372,101 @@ func (r *root) open() tea.Cmd {
 }
 
 // startReply opens the composer on whatever message the screen has in focus.
-// Nothing on the calendar side answers to it, and neither does the composer
-// itself -- r there is a letter being typed, which the capture gate above has
-// already dealt with.
 func (r *root) startReply(all bool) tea.Cmd {
-	req := composeRequest{all: all}
+	req, ok := r.focused()
+	if !ok {
+		return nil
+	}
+	req.all = all
+	return r.startCompose(req)
+}
+
+// startForward is f: the message in focus, passed on to somebody else.
+//
+// It resolves the same way a reply does, with one difference that matters: a
+// thread with an unfinished answer in it is not continued. r there means "go
+// on with what you were writing"; f means "send this one somewhere", and the
+// draft is neither the message being forwarded nor a place to put a forward.
+func (r *root) startForward() tea.Cmd {
+	req, ok := r.focused()
+	if !ok {
+		return nil
+	}
+	req.forward = true
+	return r.startCompose(req)
+}
+
+// startNew is c: a message with nothing behind it.
+//
+// Nothing on screen says which account it goes out from, so the list's own
+// filter does -- it is the only account the person has named -- and "all
+// accounts" means the first, the same one every unfiltered view leads with.
+// The composer says the address on its status line, because a sender chosen
+// this way is a sender nobody was asked about.
+//
+// Unlike every other composer this one loads nothing, so it is pushed here
+// rather than through a Cmd: there is no message to go and find.
+func (r *root) startNew() tea.Cmd {
+	if r.onCal {
+		// The calendar has no composer, the same as r and a there. Jumping to
+		// the mail stack from a key pressed on the agenda would leave esc
+		// going somewhere nobody asked to be.
+		return nil
+	}
+	account := r.composeAccount()
+	if account == "" {
+		r.note("no account to send from")
+		return nil
+	}
+	r.note("")
+	return r.push(newBlankCompose(r.d, account, r.d.sendFrom(account)))
+}
+
+// composeAccount is the account a message with no message behind it goes out
+// from: whichever one the mail list is filtered to, else the first configured.
+func (r *root) composeAccount() string {
+	if m, ok := r.mail[0].(*mailList); ok {
+		if a := m.currentAccount(); a != "" {
+			return a
+		}
+	}
+	if len(r.d.Accounts) > 0 {
+		return r.d.Accounts[0]
+	}
+	return ""
+}
+
+// focused is the message the screen in focus is about, as the request a
+// composer opens from. Nothing on the calendar side answers to it, and neither
+// does the composer itself -- r and f there are letters being typed, which the
+// capture gate has already dealt with.
+func (r *root) focused() (composeRequest, bool) {
+	var req composeRequest
 	switch s := r.top().(type) {
 	case *mailList:
 		t := s.selected()
 		if t == nil {
-			return nil
+			return req, false
 		}
 		req.account, req.thread = t.AccountID, t.ThreadID
 	case *threadView:
 		m := s.selected()
 		if m == nil {
-			return nil
+			return req, false
 		}
 		req.account, req.remote, req.thread = m.AccountID, m.RemoteID, m.ThreadID
 	case *reader:
 		if s.msg == nil {
-			return nil
+			return req, false
 		}
 		req.account, req.remote, req.thread = s.msg.AccountID, s.msg.RemoteID, s.msg.ThreadID
 	case *summaryView:
 		// The point of the summary: read four lines, answer the thread.
 		req.account, req.thread = s.account, s.threadID
 	default:
-		return nil
+		return req, false
 	}
-	return r.startCompose(req)
+	return req, true
 }
 
 // startSummary is ctrl+g anywhere but the composer: it asks the model about
@@ -461,8 +532,11 @@ func (r *root) onComposeLoaded(msg composeLoaded) tea.Cmd {
 	// A status left over from the last action would sit where the composer's
 	// own key hints belong; the composer is a new thing to be doing.
 	r.note("")
-	if msg.req.draft {
+	switch {
+	case msg.req.draft:
 		return r.push(newDraftCompose(r.d, msg.msg))
+	case msg.req.forward:
+		return r.push(newForwardCompose(r.d, msg.msg))
 	}
 	return r.push(newReplyCompose(r.d, msg.msg, msg.req.all))
 }
@@ -490,6 +564,8 @@ func (r *root) onSubmitted(s submitted) tea.Cmd {
 		r.note("sent")
 	case s.what == "delete":
 		r.note("draft deleted — it is in the trash")
+	case s.what == "forward":
+		r.note("forwarded")
 	default:
 		r.note("reply sent")
 	}
@@ -732,7 +808,7 @@ func (r *root) helpView() string {
 		if l[0] == "" {
 			b.WriteString("\n")
 		} else {
-			b.WriteString("  " + padCells(l[0], 18) + l[1] + "\n")
+			b.WriteString("  " + padCells(l[0], 20) + l[1] + "\n")
 		}
 		n++
 	}

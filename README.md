@@ -255,6 +255,11 @@ in the composer to finish and send — straight off the row in the drafts
 mailbox, so finishing one is `M` to drafts, `enter`, `ctrl+d`. Replying to a
 thread you have already half answered carries that draft on instead of starting
 a second one, and `ctrl+x` in the composer deletes the draft being edited.
+`f` forwards the message in focus — the words, not the attachments — and `c`
+writes a new one from the account the list is filtered to; both open with the
+cursor in To. The keys are Gmail's over vim's (`e` archive, `s` star, `d`
+trash, `j`/`k`/`g`/`G` to move, `z` undo, `/` search), with `⌫` trashing beside
+`d` and `u` going back beside `esc` and `q` for hands trained on a GUI client.
 With a model configured (see below), `ctrl+g` is the AI key: on a
 conversation it summarizes it — or answers a question you type — on a screen
 of its own, from which `r` replies; in the composer it drafts the reply, with
@@ -268,8 +273,12 @@ semantic search, contacts.
 The TUI can hand a conversation to a language model: `ctrl+g` on a thread
 summarizes it in four fixed lines (About / Asked of you / Facts / Open) or
 answers a question you type at the prompt, and `r` from there replies; `ctrl+g`
-in the composer drafts the reply. `emlcal ai summarize <id> [--ask "…"]` is
-the same from the command line, JSON when piped. Only a local Ollama is supported
+in the composer drafts the reply. `emlcal ai summarize <id> [--ask "…"]` and
+`emlcal ai draft <id> [--intent "…"] [--save]` are the same from the command
+line, JSON when piped: the summary to read, the draft to print, to pipe into
+`mail reply --body-file -`, or with `--save` to store on the server under the
+thread — where your phone's mail app shows it, ready to edit and send. Nothing
+under `ai` ever sends. Only a local Ollama is supported
 so far; the layer behind it (`internal/ai`) is one small interface, so a
 cloud backend is a config block and one switch case away. Nothing is sent
 anywhere unless a model is configured, and then only to the server you name.

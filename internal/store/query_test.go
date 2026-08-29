@@ -629,3 +629,29 @@ func TestListMessagesLargeResultSet(t *testing.T) {
 		}
 	}
 }
+
+func TestSenderName(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	seedAccount(t, st, "work")
+	if got := st.SenderName(ctx, "work", "work@example.com"); got != "" {
+		t.Errorf("no sent mail: name = %q, want none", got)
+	}
+	// Someone else's mail with a name is not the person's.
+	putMessage(t, st, &model.Message{
+		AccountID: "work", RemoteID: "in-1", ThreadID: "t1", Subject: "hoi",
+		From: model.Address{Name: "Anna", Email: "anna@example.com"},
+		Date: base.Add(-time.Hour), Received: base.Add(-time.Hour), MailboxRemotes: []string{"mb-inbox"}, IndexedAt: base,
+	}, nil)
+	if got := st.SenderName(ctx, "work", "work@example.com"); got != "" {
+		t.Errorf("only inbound mail: name = %q, want none", got)
+	}
+	putMessage(t, st, &model.Message{
+		AccountID: "work", RemoteID: "out-1", ThreadID: "t1", Subject: "Re: hoi",
+		From: model.Address{Name: "Lennert den Teuling", Email: "Work@Example.com"},
+		Date: base, Received: base, MailboxRemotes: []string{"mb-sent"}, IndexedAt: base,
+	}, nil)
+	if got := st.SenderName(ctx, "work", "work@example.com"); got != "Lennert den Teuling" {
+		t.Errorf("name = %q", got)
+	}
+}

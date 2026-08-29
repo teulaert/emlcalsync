@@ -751,6 +751,8 @@ emlcal skill                                  prints SKILL.md for agents
 
 AI (needs an [ai] model; not on the allow list — the model must not call itself)
 emlcal ai summarize <id> [--ask "…"] [--no-lookups]   summary or an answer, JSON when piped
+emlcal ai draft <id> [--intent "…"] [--all] [--save | --dry-run] [--no-lookups]
+                                              the reply as the composer would open it; --save stores it
 emlcal completion zsh|bash|fish
 ```
 
@@ -979,7 +981,7 @@ partial pages, and crashes mid-batch.
 | 8 | `tui` reply: `r` / `a` open a composer over the message in focus, send or save as a draft | a person can answer their mail without leaving the archive |
 | 9 | `internal/ai` + Ollama, `ctrl+g` in the composer drafts the reply from the thread; the read commands are its tools | a local model can read the archive and write for the person, through one layer the CLI can share later |
 | 10 | `ctrl+g` on a conversation summarizes it or answers a question, `r` replies from there; `ai summarize` on the CLI | a person can act on mail without reading it, and an agent can ask the local model the same |
-| later | `ai draft` on the CLI, persisted summaries for a list digest, cloud backends, forwarding and new mail from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
+| later | `ai ask` across the archive, persisted summaries for a list digest, cloud backends, forwarding and new mail from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
 
 Phase 1 is deliberately Fastmail-first: an API token, no consent screens, and
 push support make it the fastest path to a real archive you can query.
@@ -1196,14 +1198,70 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     row the newest message in the thread that actually went somewhere (a draft
     sitting at the end of a conversation is an unfinished reply of your own,
     not something to answer). `ctrl+d` sends, `ctrl+s` stores a draft, `tab`
-    moves between To / Cc / Bcc / Subject / body, and `esc` cancels — twice,
-    once something has been written.
+    and `shift+tab` move between To / Cc / Bcc / Subject / body, and `esc`
+    cancels — twice, once something has been written.
   - **`r` on a conversation that already has a draft carries it on** rather
     than opening a second reply beside it — from the list, from inside the
     thread, and from the reader, since the draft is where the earlier words
     are. The header reads `draft ·` rather than `reply ·`, which is what says
     the text on screen is your own from before. `a` lands on the same draft:
     there is only ever one answer under way.
+  - **`f` forwards and `c` writes a new message**, the two keys every mail
+    client has had since before it had a mouse. `f` resolves the message the
+    way `r` does, with one difference: a thread with an unfinished answer in
+    it is *not* continued. `r` there means "go on with what you were
+    writing"; `f` means "send this one to somebody", and the draft is neither
+    the message being sent nor a place to put a forward. What goes into the
+    body is `compose.Forwarded`: the header block every client writes, then
+    the original entire — the rounds before the last one included, and none
+    of it marked `> `. That is the whole difference from `compose.Quote`,
+    which strips them: a reply is read by the person who wrote them, a
+    forward by somebody who has seen none of it. It carries no threading
+    headers, because `In-Reply-To` would file it at the far end under a
+    conversation the recipient was never in, and it does not mark the
+    original answered, because it does not answer it. The attachments stay
+    behind — the index holds a reference, not the bytes — and the status
+    line says so rather than letting it be found out later.
+  - **`c` is the one composer with no message behind it**, which makes the
+    account a question nobody on screen has answered. The mail list's own
+    filter decides — it is the only place the person has said which account
+    they are in — "all accounts" means the first, and the status line names
+    the address, because a sender chosen this way is a sender nobody was
+    asked about. It is also the only composer pushed straight from the key
+    rather than through a load: there is no message to go and find. Both `c`
+    and `f` open with the cursor in To, not in the body: they are addressed
+    before they are written, where a reply already knows who it is to.
+    `ctrl+g` is refused on both — a new message has no conversation to read,
+    and a forward's would be *answered* rather than passed on, which would
+    write to the person who sent it instead of the person it is going to —
+    and the status line stops offering the key rather than refusing it after
+    the fact.
+  - **The scheme is Gmail's over vim's**, and where the two disagree the
+    letters follow whichever one a hand in a terminal reaches for: `e`
+    archives and `s` stars as in Gmail, `d` trashes and `j`/`k`/`g`/`G` move
+    as in vim, `z` undoes and `/` searches as in both. Mac Mail and
+    Thunderbird are not a yardstick here — every action they name is a chord
+    (⌘R, ⌘⇧F, ⌃⌘A), and a full-screen TUI has single letters. What those two
+    *do* get is aliases onto the keys they have trained: `⌫`/`delete` trash
+    beside `d`, and `u` goes back beside `esc` and `q`. Aliases only: there
+    is one binding per action, and the help overlay names the letter.
+  - **Shift is not a modifier here, it is a different key.** `j`/`J`,
+    `k`/`K` and `g`/`G` are variants of each other, but `r`/`R`, `a`/`A` and
+    `m`/`M` are unrelated pairs — reply and refresh, reply-all and the
+    account filter, mark-read and the mailbox cycle. That is worth knowing
+    and not worth fixing: the uppercase set is the view controls, they are
+    grouped as their own block in `?`, and none of them destroys anything, so
+    a stray shift costs a glance rather than a message.
+  - **The composer's keys are bindings like the rest.** They were string
+    cases inside `compose.go`, outside the keymap and so outside anything
+    that could check them, which is how `shift+tab` came to work for a
+    release without being written down anywhere. `helpLines` stays prose —
+    what a key is *for* is not what its name is — but `TestHelpCoversEveryKey`
+    walks every binding looking for its keys in that text, so the comment
+    claiming the two cannot drift apart is now enforced rather than asserted.
+    `esc` in the composer is still matched on the key itself rather than
+    through `keys.Back`, which now also answers to `u`: in there that is a
+    letter somebody is typing into a To field.
   - **`ctrl+x` deletes the draft being edited**, twice, and it goes to the
     trash rather than anywhere final. On a reply that was never saved there is
     nothing stored to delete and the key says so — `esc` is what abandons
@@ -1334,7 +1392,16 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     lookups, done. `emlcal ai summarize <id> [--ask]` is the same from the
     command line; `ai` is deliberately not on the read allow list, because
     that list is what the model gets as tools and a model that can call
-    the model is a loop.
+    the model is a loop. `ai draft <id> [--intent]` is the composer's
+    ctrl+g from the command line: the same prompt, the headers from
+    `compose.Reply`, the quote appended the way `mail reply` appends it.
+    Without `--save` it prints and stores nothing -- JSON, or with `-o
+    plain` the body alone so it pipes into `mail reply --body-file -`;
+    `--save` goes through `mailSubmit(OpDraft)` so the draft lands in the
+    thread on the server, where a phone's mail app shows it under the
+    message, and `--dry-run` prints what would be stored. A thread id
+    answers its newest non-draft message, the rule `r` follows from a
+    list row. It never sends: that stays a person's key, or `mail reply`.
   - **`mail attachment text` reads a PDF, an HTML or a text attachment as
     text** (`internal/doctext`, pure Go so the binary stays static), and
     because it is a read command it is a tool the model has: the first live

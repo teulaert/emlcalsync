@@ -97,6 +97,55 @@ func Quote(orig *model.Message, loc *time.Location) string {
 	return b.String()
 }
 
+// ForwardSubject prefixes "Fwd: ", and does not do so twice. Someone else's
+// "Fw:" counts as already done: re-prefixing it would say the message had been
+// forwarded twice when it has been forwarded once.
+func ForwardSubject(s string) string {
+	s = strings.TrimSpace(s)
+	l := strings.ToLower(s)
+	if strings.HasPrefix(l, "fwd:") || strings.HasPrefix(l, "fw:") {
+		return s
+	}
+	return "Fwd: " + s
+}
+
+// Forwarded renders the message being passed on: the header block every mail
+// client writes above a forward, then the original body.
+//
+// Verbatim is the whole difference from [Quote]. A reply quotes what the
+// sender typed and strips the rounds before it, because the person being
+// answered wrote those and has them already; a forward hands the conversation
+// to somebody who has seen none of it, so nothing is stripped and no line is
+// marked "> " -- the header block is what says where the text came from, and
+// the quoting inside it is the original's own.
+//
+// Attachments are not here. They are not in the text body, and the archive
+// holds a reference rather than the bytes for most of them, so a forward built
+// from the index alone carries the words and not the files. Saying so is the
+// composer's job: this is a pure transformation like everything else in the
+// package, and it can only pass on what it was given.
+func Forwarded(orig *model.Message, loc *time.Location) string {
+	when := orig.Date
+	if when.IsZero() {
+		when = orig.Received
+	}
+	var b strings.Builder
+	b.WriteString("---------- Forwarded message ----------\n")
+	fmt.Fprintf(&b, "From: %s\n", JoinAddresses([]model.Address{orig.From}))
+	fmt.Fprintf(&b, "Date: %s\n", when.In(loc).Format("Mon, 02 Jan 2006 at 15:04"))
+	fmt.Fprintf(&b, "Subject: %s\n", strings.TrimSpace(orig.Subject))
+	if to := JoinAddresses(orig.To); to != "" {
+		fmt.Fprintf(&b, "To: %s\n", to)
+	}
+	if cc := JoinAddresses(orig.Cc); cc != "" {
+		fmt.Fprintf(&b, "Cc: %s\n", cc)
+	}
+	b.WriteString("\n")
+	b.WriteString(strings.TrimRight(orig.TextBody, "\n"))
+	b.WriteString("\n")
+	return b.String()
+}
+
 // MergeAddresses appends add to base, dropping the addresses in skip and any
 // duplicates (case-insensitive on the address).
 func MergeAddresses(base, add []model.Address, skip map[string]bool) []model.Address {

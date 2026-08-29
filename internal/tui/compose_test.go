@@ -1056,3 +1056,235 @@ func TestTheComposerOffersDeleteOnlyForAStoredDraft(t *testing.T) {
 		t.Errorf("a fresh reply offers a delete it cannot do:\n%s", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Forwarding, and a message with nothing behind it
+
+func TestForwardOpensAddressedToNobody(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+
+	r := newTestRoot(t, d)
+	send(t, r, "f")
+
+	c := composerOn(t, r)
+	if c.to.Value() != "" || c.cc.Value() != "" {
+		t.Errorf("to = %q cc = %q, want both empty: who a forward goes to is the whole of what you have to say",
+			c.to.Value(), c.cc.Value())
+	}
+	if c.focus != 0 {
+		t.Errorf("focus = %d, want To: a forward is addressed before it is written", c.focus)
+	}
+	if c.subj.Value() != "Fwd: offerte Q4" {
+		t.Errorf("subject = %q", c.subj.Value())
+	}
+	if !strings.Contains(r.render(), "fwd · ") {
+		t.Errorf("the header does not say this is a forward:\n%s", r.render())
+	}
+	body := c.body.Value()
+	if !strings.HasPrefix(body, "\n\n---------- Forwarded message ----------") {
+		t.Errorf("body does not open with room over the forwarded message:\n%q", body)
+	}
+	if !strings.Contains(body, "Kun je dit bevestigen?") || strings.Contains(body, "> Kun je") {
+		t.Errorf("the original should go on whole and unquoted:\n%s", body)
+	}
+}
+
+// A forward is not an answer. Nothing threads it to the conversation at the
+// far end, where the recipient has seen none of it, and nothing marks the
+// message it carries as answered.
+func TestForwardCarriesNoThreading(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+
+	r := newTestRoot(t, d)
+	send(t, r, "f")
+
+	c := composerOn(t, r)
+	if c.inReplyTo != "" || len(c.references) != 0 || c.threadID != "" {
+		t.Errorf("forward threads itself: in-reply-to %q, references %v, thread %q",
+			c.inReplyTo, c.references, c.threadID)
+	}
+	if c.orig != nil {
+		t.Errorf("forward holds the original (%q), which is what marks it answered", c.orig.RemoteID)
+	}
+}
+
+// r on a half-answered conversation carries the answer on. f is a different
+// question -- send this message to somebody -- and the unfinished reply is
+// neither the message being sent nor a place to write a forward.
+func TestForwardIgnoresTheThreadsDraft(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+	addDraft(t, d, "work", "w2", "t1", "Re: offerte Q4", 0)
+
+	r := newTestRoot(t, d)
+	send(t, r, "r")
+	if c := composerOn(t, r); c.draftRemote != "w2" {
+		t.Fatalf("r opened %q, want the thread's draft — the premise of this test", c.draftRemote)
+	}
+	send(t, r, "esc")
+
+	send(t, r, "f")
+	c := composerOn(t, r)
+	if c.draftRemote != "" {
+		t.Errorf("f went on with the draft %q instead of forwarding the message", c.draftRemote)
+	}
+	if !strings.Contains(c.body.Value(), "Kun je dit bevestigen?") {
+		t.Errorf("f did not forward the message in the thread:\n%s", c.body.Value())
+	}
+}
+
+// The attachments stay behind: the archive holds a reference to them, not the
+// bytes. Saying so on the status line is the difference between a limit and a
+// surprise.
+func TestForwardSaysTheAttachmentsDoNotGo(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+	ctx := context.Background()
+	m, err := d.Store.GetMessage(ctx, "work", "w1")
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	m.HasAttachments = true
+	if _, err := d.Store.UpsertMessage(ctx, m, nil); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	r := newTestRoot(t, d)
+	send(t, r, "f")
+	if got := r.render(); !strings.Contains(got, "attachments do not go with it") {
+		t.Errorf("nothing said the attachments stay behind:\n%s", got)
+	}
+}
+
+func TestForwardReachesTheProviderUnthreaded(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addAnswerable(t, d, mail, "m1", "offerte Q4")
+
+	r := newTestRoot(t, d)
+	send(t, r, "f")
+	typeInto(t, r, "bob@example.com")
+	send(t, r, "ctrl+d")
+
+	sent := mail.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("the provider was handed %d messages, want 1", len(sent))
+	}
+	parsed, err := mime.Parse(sent[0])
+	if err != nil {
+		t.Fatalf("what went out does not parse: %v", err)
+	}
+	if len(parsed.To) != 1 || parsed.To[0].Email != "bob@example.com" {
+		t.Errorf("to = %v, want the address that was typed", parsed.To)
+	}
+	if parsed.Subject != "Fwd: offerte Q4" {
+		t.Errorf("subject = %q", parsed.Subject)
+	}
+	if parsed.InReplyTo != "" {
+		t.Errorf("in-reply-to = %q, want none on a forward", parsed.InReplyTo)
+	}
+	if !strings.Contains(parsed.TextBody, "offerte Q4 body") {
+		t.Errorf("body does not carry the message:\n%s", parsed.TextBody)
+	}
+
+	if flags, _, ok := mail.Lookup("m1"); !ok || flags.Answered {
+		t.Errorf("forwarding marked the original answered (found=%v)", ok)
+	}
+	if r.status != "forwarded" {
+		t.Errorf("status = %q, want %q", r.status, "forwarded")
+	}
+}
+
+func TestNewMessageOpensEmpty(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+
+	r := newTestRoot(t, d)
+	send(t, r, "c")
+
+	c := composerOn(t, r)
+	if c.to.Value() != "" || c.subj.Value() != "" || c.body.Value() != "" {
+		t.Errorf("a new message opened holding something: to %q, subject %q, body %q",
+			c.to.Value(), c.subj.Value(), c.body.Value())
+	}
+	if c.focus != 0 {
+		t.Errorf("focus = %d, want To", c.focus)
+	}
+	if c.threadID != "" || c.orig != nil || c.inReplyTo != "" {
+		t.Error("a new message came out attached to a conversation")
+	}
+	if got := r.render(); !strings.Contains(got, "new · ") {
+		t.Errorf("the header does not say this is a new message:\n%s", got)
+	}
+	// Nothing on screen chose the account, so the status line says which one.
+	if got := r.render(); !strings.Contains(got, "from work@example.com") {
+		t.Errorf("nothing said which account it goes out from:\n%s", got)
+	}
+}
+
+// The account filter is the only place the person has said which account they
+// are working in, so it is the one a message with no message behind it uses.
+func TestNewMessageFollowsTheAccountFilter(t *testing.T) {
+	d := newTestDeps(t, "work", "home")
+
+	r := newTestRoot(t, d)
+	send(t, r, "c")
+	if c := composerOn(t, r); c.account != "work" {
+		t.Errorf("unfiltered, a new message goes out from %q, want the first account", c.account)
+	}
+	send(t, r, "esc")
+
+	send(t, r, "A")
+	send(t, r, "A") // past "work", onto "home"
+	send(t, r, "c")
+	c := composerOn(t, r)
+	if c.account != "home" || c.from.Email != "home@example.com" {
+		t.Errorf("filtered to home, a new message goes out from %q as %q", c.account, c.from.Email)
+	}
+}
+
+// ctrl+g reads the conversation the composer sits on. A new message has none,
+// and a forward's would be answered rather than passed on -- the model would
+// write to the person who sent it, not to the person it is being sent to.
+func TestTheAIKeyNeedsAConversation(t *testing.T) {
+	ai := &scriptedAI{chunks: []string{"nope"}}
+	d := newTestDeps(t, "work")
+	d.AI = ai.client()
+	addConversation(t, d, "work", "w1", "t1")
+
+	for _, k := range []string{"c", "f"} {
+		r := newTestRoot(t, d)
+		send(t, r, k)
+		send(t, r, "ctrl+g")
+
+		c := composerOn(t, r)
+		if c.err != errNoConversation {
+			t.Errorf("%s then ctrl+g: err = %v, want %v", k, c.err, errNoConversation)
+		}
+		if c.asking {
+			t.Errorf("%s then ctrl+g opened the instructions prompt anyway", k)
+		}
+	}
+	if ai.calls != 0 {
+		t.Errorf("the model was called %d times with nothing to read", ai.calls)
+	}
+}
+
+// And the composer does not offer a key it will refuse.
+func TestTheComposerOffersTheAIKeyOnlyWithAConversation(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+
+	r := newTestRoot(t, d)
+	send(t, r, "r")
+	if got := r.render(); !strings.Contains(got, "ctrl+g ai draft") {
+		t.Errorf("a reply does not offer the AI draft:\n%s", got)
+	}
+	send(t, r, "esc")
+
+	send(t, r, "c")
+	if got := r.render(); strings.Contains(got, "ctrl+g ai draft") {
+		t.Errorf("a new message offers an AI draft it has nothing to write from:\n%s", got)
+	}
+}
