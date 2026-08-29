@@ -337,3 +337,23 @@ func TestStripQuotesKeepsSenderText(t *testing.T) {
 		})
 	}
 }
+
+func TestSplitQuote(t *testing.T) {
+	own, quoted := SplitQuote("Hoi Anna,\n\nJa hoor.\n\nOp ma 25 aug. 2026 om 11:00 schreef Anna <anna@example.com>:\n> Kun je dit bevestigen?\n")
+	if own != "Hoi Anna,\n\nJa hoor.\n" {
+		t.Errorf("own = %q", own)
+	}
+	if !strings.HasPrefix(quoted, "Op ma 25 aug. 2026") || !strings.Contains(quoted, "> Kun je dit bevestigen?") {
+		t.Errorf("quoted = %q", quoted)
+	}
+
+	own, quoted = SplitQuote("Just my words.\n-- \nSig")
+	if quoted != "" || own != "Just my words.\n-- \nSig" {
+		t.Errorf("no quote: own = %q, quoted = %q (signatures stay)", own, quoted)
+	}
+
+	own, quoted = SplitQuote("\n\nOn Mon, Aug 25, 2026 at 11:00 AM Anna <anna@example.com> wrote:\n> hi")
+	if own != "\n" || !strings.HasPrefix(quoted, "On Mon") {
+		t.Errorf("untouched reply: own = %q, quoted = %q", own, quoted)
+	}
+}

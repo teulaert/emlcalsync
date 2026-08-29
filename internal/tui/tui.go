@@ -17,6 +17,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/teulaert/emlcalsync/internal/ai"
 	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/store"
 	"github.com/teulaert/emlcalsync/internal/sync"
@@ -33,6 +34,10 @@ type Deps struct {
 	Loc      *time.Location
 	Now      func() time.Time
 	Logger   *slog.Logger
+
+	// AI is the configured language model, or nil when there is none: the
+	// composer's ctrl+g then says so and nothing is sent anywhere.
+	AI ai.Client
 
 	// StatePath is the directory holding emlcal.pid, so a manual refresh can
 	// nudge a running daemon. Empty disables the nudge.

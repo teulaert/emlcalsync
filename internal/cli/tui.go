@@ -24,7 +24,9 @@ Mail and calendar are both shown merged across every configured account —
 commands use, and writes go through the same sync engine, so an action taken
 here is the action ` + "`emlcal mail archive`" + ` would have taken. That
 includes replying: r and a open a composer on the message in focus, and what
-it sends is what ` + "`emlcal mail reply`" + ` would have sent.
+it sends is what ` + "`emlcal mail reply`" + ` would have sent. With a model
+configured under [ai] in config.toml, ctrl+g in the composer drafts the reply
+from the thread, with or without instructions.
 
 Press ? for the keys.`,
 		Args: cobra.NoArgs,
@@ -57,6 +59,10 @@ Press ? for the keys.`,
 			if err != nil {
 				return err
 			}
+			model, err := app.AI()
+			if err != nil {
+				return err
+			}
 			return tui.Run(cmd.Context(), tui.Deps{
 				Store:     st,
 				Engine:    eng,
@@ -65,6 +71,7 @@ Press ? for the keys.`,
 				Loc:       app.Location(),
 				Now:       app.Now,
 				Logger:    app.Logger(),
+				AI:        model,
 				StatePath: cfg.General.StateDir,
 			})
 		},

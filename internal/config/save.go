@@ -151,6 +151,32 @@ func render(c *Config) []byte {
 			b.WriteString("\n  # No [accounts.calendar]: this account syncs mail only.\n")
 		}
 	}
+
+	// The [ai] table is written whenever it has anything in it, so an
+	// `account add` after it was configured by hand does not lose it.
+	if len(c.AI.Models) > 0 {
+		b.WriteString("\n[ai]\n")
+		b.WriteString("# Language models the TUI can draft with (ctrl+g in the composer).\n")
+		if c.AI.Default != "" {
+			b.WriteString("# The model used when nothing picks one; otherwise the first below.\n")
+			fmt.Fprintf(&b, "default = %s\n", quote(c.AI.Default))
+		}
+		for i := range c.AI.Models {
+			m := &c.AI.Models[i]
+			b.WriteString("\n[[ai.models]]\n")
+			fmt.Fprintf(&b, "name    = %s\n", quote(m.Name))
+			if m.Backend != "" && m.Backend != DefaultAIBackend {
+				fmt.Fprintf(&b, "backend = %s\n", quote(m.Backend))
+			}
+			fmt.Fprintf(&b, "model   = %s\n", quote(m.Model))
+			if m.URL != "" && !(m.Backend == AIBackendOllama && m.URL == DefaultOllamaURL) {
+				fmt.Fprintf(&b, "url     = %s\n", quote(m.URL))
+			}
+			if m.Timeout != 0 && m.Timeout != Duration(DefaultAITimeout) {
+				fmt.Fprintf(&b, "timeout = %s\n", quote(m.Timeout.String()))
+			}
+		}
+	}
 	return b.Bytes()
 }
 

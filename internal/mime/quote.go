@@ -88,6 +88,22 @@ func StripQuotes(text string) string {
 	return out
 }
 
+// SplitQuote divides text into what its author wrote and the quoted material
+// under it, at the first line from which everything is a quote: the
+// attribution ("On …, X wrote:"), a reply separator or a forwarded header.
+// Signatures are not touched, unlike StripQuotes — the split is for an editor
+// putting the two halves back together, not for reading. quoted is empty
+// when no such line is found, and own is then the whole text.
+func SplitQuote(text string) (own, quoted string) {
+	text = reCRLF.Replace(text)
+	lines := strings.Split(text, "\n")
+	i := cutIndex(lines)
+	if i < 0 {
+		return text, ""
+	}
+	return strings.Join(lines[:i], "\n"), strings.Join(lines[i:], "\n")
+}
+
 // cutIndex finds the first line from which everything is quoted material.
 func cutIndex(lines []string) int {
 	for i, raw := range lines {

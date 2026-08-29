@@ -44,6 +44,16 @@ calendars = ["*"]                       # or explicit list of names
   backend = "caldav"
   vendor  = "fastmail"
 
+# Language models the TUI can draft with (ctrl+g in the composer). Absent =
+# off. Only Ollama for now; the block is shaped for more.
+[ai]
+default = "local"
+
+[[ai.models]]
+name    = "local"
+backend = "ollama"                      # default
+model   = "qwen3:32b"
+url     = "http://localhost:11434"      # default
 `
 
 // writeTemp puts contents in a fresh directory and returns the file path.
@@ -70,6 +80,9 @@ func TestLoadDesignExample(t *testing.T) {
 	}
 	if c.General.DefaultFormat != "auto" {
 		t.Errorf("default_format = %q", c.General.DefaultFormat)
+	}
+	if m, ok := c.DefaultAIModel(); !ok || m.Name != "local" || m.Model != "qwen3:32b" {
+		t.Errorf("ai model = %+v, %v", m, ok)
 	}
 	if c.General.RawMaxSize != Unlimited {
 		t.Errorf("raw_max_size = %v, want unlimited", c.General.RawMaxSize)
@@ -1035,5 +1048,130 @@ func TestIMAPSurvivesASaveLoadRoundTrip(t *testing.T) {
 	}
 	if !sameMail(in.Mail, got.Mail) {
 		t.Errorf("mail block changed:\n in: %+v\nout: %+v", in.Mail, got.Mail)
+	}
+}
+
+func TestLoadAIModels(t *testing.T) {
+	p := writeTemp(t, "config.toml", `
+[[accounts]]
+name  = "work"
+email = "w@example.com"
+  [accounts.mail]
+  backend = "jmap"
+
+[ai]
+default = "big"
+
+[[ai.models]]
+name  = "small"
+model = "qwen3:8b"
+
+[[ai.models]]
+name    = "big"
+backend = "ollama"
+model   = "qwen3:32b"
+url     = "http://gpu-box:11434"
+timeout = "10m"
+`)
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(c.AI.Models) != 2 {
+		t.Fatalf("got %d models, want 2", len(c.AI.Models))
+	}
+	small := c.AI.Models[0]
+	if small.Backend != AIBackendOllama || small.URL != DefaultOllamaURL || small.Timeout != Duration(DefaultAITimeout) {
+		t.Errorf("defaults not filled in: %+v", small)
+	}
+	m, ok := c.DefaultAIModel()
+	if !ok || m.Name != "big" {
+		t.Fatalf("DefaultAIModel = %+v, %v; want big", m, ok)
+	}
+	if m.URL != "http://gpu-box:11434" || m.Timeout != Duration(10*time.Minute) {
+		t.Errorf("big = %+v", *m)
+	}
+
+	c.AI.Default = ""
+	if m, ok := c.DefaultAIModel(); !ok || m.Name != "small" {
+		t.Errorf("with no default the first model should be it, got %+v", m)
+	}
+	c.AI.Models = nil
+	if _, ok := c.DefaultAIModel(); ok {
+		t.Error("no models configured should report none")
+	}
+}
+
+func TestValidateAI(t *testing.T) {
+	base := func() *Config {
+		c := Default()
+		c.Accounts = []Account{{Name: "w", Email: "w@example.com", Mail: &MailBackend{Backend: model.BackendJMAP}}}
+		c.AI.Models = []AIModel{{Name: "local", Backend: AIBackendOllama, Model: "qwen3:8b", URL: DefaultOllamaURL}}
+		return c
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("baseline should validate: %v", err)
+	}
+	cases := []struct {
+		name string
+		mut  func(*Config)
+		want string
+	}{
+		{"bad name", func(c *Config) { c.AI.Models[0].Name = "Not Valid" }, "name must be"},
+		{"dup name", func(c *Config) { c.AI.Models = append(c.AI.Models, c.AI.Models[0]) }, "duplicate model name"},
+		{"bad backend", func(c *Config) { c.AI.Models[0].Backend = "openai" }, `backend "openai"`},
+		{"no model", func(c *Config) { c.AI.Models[0].Model = " " }, "model is required"},
+		{"bad url", func(c *Config) { c.AI.Models[0].URL = "gpu-box:11434" }, "must be an http(s) URL"},
+		{"unknown default", func(c *Config) { c.AI.Default = "cloud" }, `ai.default: "cloud"`},
+	}
+	for _, tc := range cases {
+		c := base()
+		tc.mut(c)
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want it to mention %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestSaveKeepsAIModels(t *testing.T) {
+	dir := t.TempDir()
+	orig := Default()
+	orig.Accounts = []Account{{Name: "w", Email: "w@example.com", Mail: &MailBackend{Backend: model.BackendJMAP, Vendor: model.VendorFastmail}}}
+	orig.AI.Default = "big"
+	orig.AI.Models = []AIModel{
+		{Name: "small", Backend: AIBackendOllama, Model: "qwen3:8b", URL: DefaultOllamaURL, Timeout: Duration(DefaultAITimeout)},
+		{Name: "big", Backend: AIBackendOllama, Model: "qwen3:32b", URL: "http://gpu-box:11434", Timeout: Duration(10 * time.Minute)},
+	}
+	p := filepath.Join(dir, "config.toml")
+	if err := Save(p, orig); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load after Save: %v", err)
+	}
+	if err := back.Validate(); err != nil {
+		t.Fatalf("round-tripped config does not validate: %v", err)
+	}
+	if back.AI.Default != orig.AI.Default || len(back.AI.Models) != len(orig.AI.Models) {
+		t.Fatalf("ai table changed: %+v vs %+v", back.AI, orig.AI)
+	}
+	for i := range orig.AI.Models {
+		if orig.AI.Models[i] != back.AI.Models[i] {
+			t.Errorf("model %d changed:\n orig %+v\n back %+v", i, orig.AI.Models[i], back.AI.Models[i])
+		}
+	}
+
+	// A config with no models writes no [ai] table at all.
+	orig.AI = AI{}
+	if err := Save(p, orig); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if b, _ := os.ReadFile(p); strings.Contains(string(b), "[ai]") {
+		t.Error("an empty [ai] table should not be written")
 	}
 }

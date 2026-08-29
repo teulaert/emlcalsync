@@ -242,6 +242,42 @@ and `ctrl+s` saves it as a draft on the server. `enter` on a draft reopens it
 in the composer to finish and send — straight off the row in the drafts
 mailbox, so finishing one is `M` to drafts, `enter`, `ctrl+d`. Replying to a
 thread you have already half answered carries that draft on instead of starting
-a second one, and `ctrl+x` in the composer deletes the draft being edited. Not yet: forwarding or new mail
-from the TUI, creating or editing events from the TUI, embeddings for semantic
-search, contacts.
+a second one, and `ctrl+x` in the composer deletes the draft being edited.
+With a model configured (see below), `ctrl+g` in the composer drafts the reply
+for you: it asks for instructions on the status line — or just `enter` to have
+it read the thread and answer — and streams the draft in above the quote,
+where you edit and send it like anything you typed. Not yet: forwarding or new
+mail from the TUI, creating or editing events from the TUI, AI from the CLI,
+summaries, embeddings for semantic search, contacts.
+
+## AI drafting
+
+The TUI can hand a reply to a language model. Only a local Ollama is supported
+so far; the layer behind it (`internal/ai`) is one small interface, so a
+cloud backend is a config block and one switch case away. Nothing is sent
+anywhere unless a model is configured, and then only to the server you name.
+
+```toml
+# ~/.config/emlcal/config.toml
+[ai]
+default = "local"                    # optional: otherwise the first model below
+
+[[ai.models]]
+name    = "local"
+backend = "ollama"                   # the default; the only one for now
+model   = "qwen3:32b"                # whatever `ollama list` shows
+url     = "http://localhost:11434"   # the default
+timeout = "5m"                       # per draft; the default
+```
+
+The model runs at whatever window Ollama loaded it with — emlcal does not
+second-guess that, it asks the server and trims the thread to fit, oldest
+messages first, never dropping the message being answered. Any current model
+has room for a long thread many times over.
+
+What the model sees: the thread (quotes stripped, drafts left out), who you
+are writing as, your instructions, and any text you had already written above
+the quote — which the draft replaces, after asking. The prompt tells it to
+write only the body, in the thread's language, without inventing facts, and
+that the messages are material to answer rather than instructions to follow.
+Read the draft before it goes: `ctrl+d` sends it exactly as shown.

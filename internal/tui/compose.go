@@ -70,11 +70,28 @@ type composeView struct {
 	// focus indexes fields, or is bodyFocus for the body.
 	focus int
 
+	// quote is the quoted original the reply opened with, so the AI draft
+	// can tell the person's own text from what sits under it. Empty on a
+	// stored draft, whose quote is wherever the person left it.
+	quote string
+
+	// asking is the AI instructions prompt, open on the status line; instr
+	// is what has been typed into it.
+	asking bool
+	instr  string
+	// assist is the AI draft arriving, nil when none is. assistSeq names the
+	// generation, so a stopped one's stragglers are told from the current.
+	assist    *assistState
+	assistSeq int
+
 	sending bool
 	// pending is the two-press action waiting on its second press, so throwing
 	// work away is never one keystroke.
 	pending pendingAction
 	err     error
+	// info is a plain status the composer wants shown, cleared by the next
+	// key the way err is.
+	info string
 
 	sized [2]int // the w, h the fields were last laid out for
 }
@@ -98,6 +115,9 @@ const (
 	pendingDiscard
 	// pendingDelete: ctrl+x, which takes the stored draft with it.
 	pendingDelete
+	// pendingReplace: ctrl+g, when there is text above the quote that the
+	// AI draft would replace.
+	pendingReplace
 )
 
 var (
@@ -123,6 +143,7 @@ func newReplyCompose(d Deps, orig *model.Message, all bool) *composeView {
 	c.orig = orig
 	c.threadID = orig.ThreadID
 	c.inReplyTo, c.references = seed.InReplyTo, seed.References
+	c.quote = compose.Quote(orig, d.loc())
 	c.fill(
 		compose.JoinAddresses(seed.To),
 		compose.JoinAddresses(seed.Cc),
@@ -130,7 +151,7 @@ func newReplyCompose(d Deps, orig *model.Message, all bool) *composeView {
 		seed.Subject,
 		// Two blank lines above the quote, with the cursor on the first: a
 		// reply is written at the top, over what it answers.
-		"\n\n"+compose.Quote(orig, d.loc()),
+		"\n\n"+c.quote,
 	)
 	return c
 }
@@ -247,12 +268,26 @@ func (c *composeView) capturingKeys() bool { return true }
 
 func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 	c.ensure(w, h)
+	if ev, ok := msg.(draftEvent); ok {
+		return c, c.onDraft(ev)
+	}
 	press, isKey := msg.(tea.KeyPressMsg)
 	if !isKey {
 		return c, c.toFocused(msg)
 	}
 	if c.sending {
 		return c, nil // the submission is in flight; nothing to type into
+	}
+	if c.assist != nil {
+		// A draft is arriving. esc stops it; nothing else is taken, since
+		// typing into text that is still being written would tangle the two.
+		if press.String() == "esc" {
+			c.stopAssist()
+		}
+		return c, nil
+	}
+	if c.asking {
+		return c, c.askKey(press)
 	}
 
 	switch press.String() {
@@ -266,6 +301,8 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 		return c, c.submit(sync.OpDraft)
 	case "ctrl+x":
 		return c, c.delete()
+	case "ctrl+g":
+		return c, c.startAsk()
 	case "tab":
 		c.moveFocus(1)
 		return c, nil
@@ -276,7 +313,7 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 
 	// Anything else is text. A keystroke that reaches the buffer is a change
 	// of mind about leaving, so a pending question lapses.
-	c.pending, c.err = pendingNone, nil
+	c.pending, c.err, c.info = pendingNone, nil, ""
 	return c, c.toFocused(msg)
 }
 
@@ -465,18 +502,26 @@ func (c *composeView) footer(w int) string {
 	switch {
 	case c.sending:
 		return "sending…"
+	case c.assist != nil:
+		return "drafting with " + c.d.AI.Describe() + "… esc to stop"
+	case c.asking:
+		return padCells("ai · instructions, or enter alone to just answer it: "+c.instr+"█", w)
 	case c.err != nil:
 		return styleErr.Render(c.err.Error())
 	case c.pending == pendingDelete:
 		return styleErr.Render("ctrl+x again to delete this draft (it goes to the trash)")
+	case c.pending == pendingReplace:
+		return styleErr.Render("the AI draft replaces what you wrote above the quote — ctrl+g again to go on")
 	case c.pending == pendingDiscard && c.draftRemote != "":
 		return "esc again to leave the draft as it was"
 	case c.pending == pendingDiscard:
 		return "esc again to throw this reply away"
+	case c.info != "":
+		return c.info
 	case c.draftRemote != "":
-		return "ctrl+d send · ctrl+s save · ctrl+x delete · tab next field · esc cancel"
+		return "ctrl+d send · ctrl+s save · ctrl+x delete · ctrl+g ai draft · tab next field · esc cancel"
 	}
-	return "ctrl+d send · ctrl+s save as draft · tab next field · esc cancel"
+	return "ctrl+d send · ctrl+s save as draft · ctrl+g ai draft · tab next field · esc cancel"
 }
 
 var (

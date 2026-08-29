@@ -3,9 +3,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,21 @@ import (
 type fileConfig struct {
 	General  fileGeneral   `toml:"general"`
 	Accounts []fileAccount `toml:"accounts"`
+	AI       *fileAI       `toml:"ai"`
+}
+
+// fileAI is the [ai] table.
+type fileAI struct {
+	Default *string       `toml:"default"`
+	Models  []fileAIModel `toml:"models"`
+}
+
+type fileAIModel struct {
+	Name    *string   `toml:"name"`
+	Backend *string   `toml:"backend"`
+	Model   *string   `toml:"model"`
+	URL     *string   `toml:"url"`
+	Timeout *Duration `toml:"timeout"`
 }
 
 type fileGeneral struct {
@@ -157,7 +174,30 @@ func merge(c *Config, fc *fileConfig) error {
 		}
 		c.Accounts = append(c.Accounts, a)
 	}
+	if fc.AI != nil {
+		setString(&c.AI.Default, fc.AI.Default)
+		for _, fm := range fc.AI.Models {
+			c.AI.Models = append(c.AI.Models, materializeAIModel(fm))
+		}
+	}
 	return nil
+}
+
+// materializeAIModel fills in an [[ai.models]] entry's defaults: the backend
+// is Ollama unless said otherwise, and its address is the local one.
+func materializeAIModel(fm fileAIModel) AIModel {
+	m := AIModel{Backend: DefaultAIBackend, Timeout: Duration(DefaultAITimeout)}
+	setString(&m.Name, fm.Name)
+	setString(&m.Backend, fm.Backend)
+	setString(&m.Model, fm.Model)
+	setString(&m.URL, fm.URL)
+	if fm.Timeout != nil && *fm.Timeout != 0 {
+		m.Timeout = *fm.Timeout
+	}
+	if m.URL == "" && m.Backend == AIBackendOllama {
+		m.URL = DefaultOllamaURL
+	}
+	return m
 }
 
 func materialize(fa fileAccount) (Account, error) {
@@ -326,6 +366,23 @@ func (c *Config) Account(name string) (*Account, bool) {
 }
 
 // AccountNames returns every configured account name, in file order.
+// DefaultAIModel is the model AI actions use: ai.default when set, else the
+// first configured. ok is false when there are none, which is the off state.
+func (c *Config) DefaultAIModel() (*AIModel, bool) {
+	if len(c.AI.Models) == 0 {
+		return nil, false
+	}
+	if c.AI.Default == "" {
+		return &c.AI.Models[0], true
+	}
+	for i := range c.AI.Models {
+		if c.AI.Models[i].Name == c.AI.Default {
+			return &c.AI.Models[i], true
+		}
+	}
+	return nil, false
+}
+
 func (c *Config) AccountNames() []string {
 	names := make([]string, len(c.Accounts))
 	for i := range c.Accounts {
@@ -407,10 +464,52 @@ func (c *Config) Validate() error {
 		add("general.default_account: %q is not a configured account", c.General.DefaultAccount)
 	}
 
+	validateAI(&c.AI, add)
+
 	if len(errs) == 0 {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", ErrInvalid, strings.Join(errs, "; "))
+}
+
+// validateAI checks the [ai] table. Names follow the account-id rules so a
+// model can be named on a command line without quoting.
+func validateAI(ai *AI, add func(string, ...any)) {
+	seen := make(map[string]bool, len(ai.Models))
+	for i := range ai.Models {
+		m := &ai.Models[i]
+		label := "ai.models[" + strconv.Itoa(i) + "]"
+		if m.Name != "" {
+			label = "ai.models." + m.Name
+		}
+		if !model.ValidAccountID(m.Name) {
+			add("%s: name must be 1-32 chars of [a-z0-9-]", label)
+		} else if seen[m.Name] {
+			add("%s: duplicate model name", label)
+		} else {
+			seen[m.Name] = true
+		}
+		switch m.Backend {
+		case AIBackendOllama:
+		default:
+			add("%s: backend %q is not one of %s", label, m.Backend, AIBackendOllama)
+		}
+		if strings.TrimSpace(m.Model) == "" {
+			add("%s: model is required (the backend's name for it, e.g. \"qwen3:32b\")", label)
+		}
+		if m.URL != "" {
+			u, err := url.Parse(m.URL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				add("%s: url %q must be an http(s) URL", label, m.URL)
+			}
+		}
+		if m.Timeout < 0 {
+			add("%s: timeout must not be negative", label)
+		}
+	}
+	if ai.Default != "" && !seen[ai.Default] {
+		add("ai.default: %q is not a configured model", ai.Default)
+	}
 }
 
 // validateBackends checks one account's two resource blocks.

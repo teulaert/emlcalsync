@@ -88,6 +88,7 @@ func (k keymap) helpLines() [][2]string {
 		{"  ctrl+d", "send it"},
 		{"  ctrl+s", "save it as a draft on the server"},
 		{"  ctrl+x", "delete the draft being edited (twice)"},
+		{"  ctrl+g", "draft it with the AI model: asks for instructions, enter alone just answers"},
 		{"  tab", "next field"},
 		{"  esc", "cancel (twice, once something is written)"},
 		{"", ""},

@@ -861,6 +861,16 @@ email    = "lennert@example.com"
   smtp_port     = 587
   archive_folder = "Archief"            # when the name is not recognised
 
+# Language models the TUI can draft with (ctrl+g in the composer). Absent =
+# off. Only Ollama for now; the block is shaped for more.
+[ai]
+default = "local"
+
+[[ai.models]]
+name    = "local"
+backend = "ollama"                      # default
+model   = "qwen3:32b"
+url     = "http://localhost:11434"      # default
 ```
 
 Backends: mail is `jmap`, `gmail` or `imap`; calendar is `caldav`, `gcal` or
@@ -916,6 +926,8 @@ internal/
   blob/           content-addressed zstd store
   mime/           parse, text extraction, quote/signature stripping, RFC822 builder
   compose/        reply headers, quoting, address parsing, SMTP envelope (cli + tui)
+  ai/             language-model layer: Client interface, reply prompt assembly, CleanText
+    ollama/       the one backend: /api/chat over HTTP, streamed
   sync/           engine: backfill, delta, reconcile, outbox, scheduler, watch
   provider/       interfaces + registry
     gmail/  gcal/  jmap/ (mail + calendar)  caldav/  imap/ (mail + smtp)  oauth/
@@ -960,7 +972,8 @@ partial pages, and crashes mid-batch.
 | 6 | `skill`, `reindex`, `gc`, `export`, completions, docs | agent polish + archive guarantees |
 | 7 | `tui`: unified mail list, thread, reader, agenda, event; archive/trash/mark/star with undo | the archive is usable by a person, not only an agent |
 | 8 | `tui` reply: `r` / `a` open a composer over the message in focus, send or save as a draft | a person can answer their mail without leaving the archive |
-| later | forwarding and new mail from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
+| 9 | `internal/ai` + Ollama, `ctrl+g` in the composer drafts the reply from the thread | a local model can read the archive and write for the person, through one layer the CLI can share later |
+| later | AI from the CLI (`ai draft`, `ai summarize`), summaries in the reader, cloud backends, forwarding and new mail from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
 
 Phase 1 is deliberately Fastmail-first: an API token, no consent screens, and
 push support make it the fastest path to a real archive you can query.
@@ -1230,6 +1243,46 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     when it was queued), a failure to set that flag does not fail the send,
     and a transport error *after* the request went out is reported as "may
     already have been sent", never as queued.
+  - **`ctrl+g` drafts the reply with the configured model.** It asks for
+    instructions on the status line the way `/` asks for a search; `enter`
+    alone means "read the thread and answer it". The draft streams into the
+    body — the quote is lifted out first and put back under it once the
+    draft is whole, so what the model writes never touches what it answers —
+    and lands with the cursor at the top and the status line naming the
+    model. From there it is text the person typed: `ctrl+d` sends it as shown,
+    `esc` asks before throwing it away. Text already above the quote is
+    replaced, so `ctrl+g` asks first (twice, like every discarding key), and
+    what was written goes into the prompt as what the person meant. `esc`
+    while the draft is arriving cancels the generation and puts the body back
+    exactly as it was; so does a failure. A stored draft has no quote of its
+    own to point at, so the split falls back to `mime.SplitQuote`, the same
+    attribution-finding the reader uses — which is why that is exported now.
+  - **The model layer is `internal/ai`**, one interface (`Describe`,
+    `ContextWindow`, `Chat` streaming through a callback) and the prompt
+    assembly beside it, with `ai/ollama` the one backend. The backend is
+    picked in `internal/cli` (`App.AI`) from the `[ai]` table, the way
+    `Factory` picks providers from an account's blocks, so adding one is a
+    switch case; `Validate` refuses a backend it does not know. Nothing in
+    the layer touches the store: the composer's Cmd reads the thread and
+    hands `ai.ReplyPrompt` a `ReplyInput`, which is what keeps the prompt
+    testable without a model and the model drivable from the CLI later. The
+    prompt is budgeted against the window the model is actually running at,
+    which the Ollama client asks the server for (`/api/ps` while it is
+    loaded, else the model's native length from `/api/show`) and caches. A
+    `context` key was tried and taken out again: current Ollama loads a
+    model at its full native window, and sending `num_ctx` only forced a
+    reload to a smaller one — the first live draft waited eight seconds on
+    exactly that. So nothing is sent, and the one thing the window is used
+    for is trimming: the thread oldest-first, the message being answered
+    only ever shortened in the middle, never dropped. Asking the server is a
+    round trip, so it happens inside the draft Cmd, not on the update loop. Drafts in the thread are
+    left out (they are the person's own half-written words), and the system
+    prompt says the messages are material, not instructions — an inbox is
+    the textbook prompt-injection surface. `ai.CleanText` strips what chat
+    models add around an answer: a leaked `<think>` block, a fence round the
+    whole thing, a `Subject:` line. Thinking is left to the model's default
+    rather than forced off: a `think` parameter is rejected by models that
+    do not support it, and Ollama already keeps reasoning out of `content`.
   - The shared half lives in **`internal/compose`**: subject, recipients,
     threading headers, quoting, address parsing and the SMTP envelope. It was
     all in `internal/cli` while `mail reply` was the only composer; the TUI

@@ -162,6 +162,7 @@ func (d Duration) MarshalText() ([]byte, error) { return []byte(d.String()), nil
 type Config struct {
 	General  General   `toml:"general"`
 	Accounts []Account `toml:"accounts"`
+	AI       AI        `toml:"ai"`
 
 	// Path is the file this config was loaded from (empty when it did not
 	// exist and defaults were used).
@@ -191,6 +192,32 @@ type General struct {
 
 	// SecretBackend is "file" (default) or "libsecret".
 	SecretBackend string `toml:"secret_backend"`
+}
+
+// AI is the [ai] table: the language models the app can call on. Its
+// presence is the on switch, the way a resource block is for an account: no
+// models configured means every AI action in the TUI says so and does nothing
+// else, and nothing is ever sent anywhere.
+type AI struct {
+	// Default names the model used when nothing picks one. Empty means the
+	// first one configured.
+	Default string    `toml:"default"`
+	Models  []AIModel `toml:"models"`
+}
+
+// AIModel is one [[ai.models]] entry: a backend and the model it should run.
+type AIModel struct {
+	// Name is how the entry is referred to (ai.default, and later --model).
+	Name string `toml:"name"`
+	// Backend is the API spoken: "ollama" for now.
+	Backend string `toml:"backend"`
+	// Model is the backend's own name for the model, e.g. "qwen3:32b".
+	Model string `toml:"model"`
+	// URL is where the backend listens; empty means the backend's default
+	// (http://localhost:11434 for Ollama).
+	URL string `toml:"url"`
+	// Timeout bounds one whole generation; 0 means DefaultAITimeout.
+	Timeout Duration `toml:"timeout"`
 }
 
 // MailBackend is the [accounts.mail] table. Its presence is the on switch: an
@@ -316,6 +343,12 @@ const (
 	DefaultFormat        = "auto"
 	DefaultSecretBackend = "file"
 	DefaultConcurrency   = 4
+
+	// AI backends.
+	AIBackendOllama  = "ollama"
+	DefaultAIBackend = AIBackendOllama
+	DefaultOllamaURL = "http://localhost:11434"
+	DefaultAITimeout = 5 * time.Minute
 
 	DefaultPollGmail  = 60 * time.Second
 	DefaultPollJMAP   = 300 * time.Second
