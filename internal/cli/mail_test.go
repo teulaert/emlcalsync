@@ -524,6 +524,139 @@ func TestMailReplySends(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// mail forward
+
+func TestMailForwardDryRun(t *testing.T) {
+	env := mailSeed(t)
+	out := env.MustRun("mail", "forward", "work:m-unread",
+		"--to", "jan@example.com", "--body", "zie hieronder", "--dry-run")
+
+	for _, want := range []string{
+		"Subject: Fwd: Hello there",
+		"jan@example.com",
+		"zie hieronder",
+		"---------- Forwarded message ----------",
+		"From: Alice <alice@example.com>",
+		"Subject: Hello there",
+		"hello, the numbers are attached",
+		"report.csv", // the file comes with it
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry-run output missing %q:\n%s", want, out)
+		}
+	}
+	// A forward is not an answer: it threads nowhere, and it quotes nothing.
+	if strings.Contains(out, "In-Reply-To:") {
+		t.Errorf("the forward threads itself onto the original:\n%s", out)
+	}
+	if strings.Contains(out, "> hello, the numbers") {
+		t.Errorf("the forwarded message was quoted:\n%s", out)
+	}
+	if n := len(env.Mail["work"].Sent()); n != 0 {
+		t.Errorf("--dry-run sent %d messages", n)
+	}
+}
+
+// A forward with nothing written above it is an ordinary thing to send, where
+// a send or a reply with no body is a mistake.
+func TestMailForwardNeedsNoBody(t *testing.T) {
+	env := mailSeed(t)
+	out := env.MustRun("mail", "forward", "work:m-unread", "--to", "jan@example.com", "--dry-run")
+	if !strings.Contains(out, "---------- Forwarded message ----------") {
+		t.Errorf("no body, no forward:\n%s", out)
+	}
+}
+
+func TestMailForwardSendsAndAnswersNothing(t *testing.T) {
+	env := mailSeed(t)
+	env.MustRun("mail", "forward", "work:m-unread", "--to", "jan@example.com")
+
+	sent := env.Mail["work"].Sent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %d messages, want 1", len(sent))
+	}
+	parsed, err := mime.Parse(sent[0])
+	if err != nil {
+		t.Fatalf("what went out does not parse: %v", err)
+	}
+	if parsed.Subject != "Fwd: Hello there" {
+		t.Errorf("subject = %q", parsed.Subject)
+	}
+	if len(parsed.Attachments) != 1 || parsed.Attachments[0].Filename != "report.csv" {
+		t.Fatalf("what went out carries %v, want report.csv", parsed.Attachments)
+	}
+	data, _, _, err := mime.PartContent(sent[0], parsed.Attachments[0].Path)
+	if err != nil {
+		t.Fatalf("PartContent: %v", err)
+	}
+	if string(data) != string(mailAttachmentData) {
+		t.Errorf("the file that went out is not the one on the message: %q", data)
+	}
+
+	// Forwarding is not answering.
+	if flags, _, ok := env.Mail["work"].Lookup("m-unread"); !ok || flags.Answered {
+		t.Errorf("the forwarded message was marked answered (flags %+v)", flags)
+	}
+}
+
+func TestMailForwardWithoutTheFiles(t *testing.T) {
+	env := mailSeed(t)
+	out := env.MustRun("mail", "forward", "work:m-unread",
+		"--to", "jan@example.com", "--no-attachments", "--dry-run")
+	if strings.Contains(out, "report.csv") {
+		t.Errorf("--no-attachments still carried the file:\n%s", out)
+	}
+	if !strings.Contains(out, "---------- Forwarded message ----------") {
+		t.Errorf("--no-attachments dropped the message too:\n%s", out)
+	}
+}
+
+// --to is the whole of what a forward has to be told, so its absence is a
+// usage error rather than a message sent to nobody.
+func TestMailForwardNeedsARecipient(t *testing.T) {
+	env := mailSeed(t)
+	_, errs, code := env.Run("mail", "forward", "work:m-unread", "--dry-run")
+	if code != 2 {
+		t.Errorf("exit = %d, want 2 (usage)", code)
+	}
+	if !strings.Contains(errs, "recipient") {
+		t.Errorf("stderr = %q", errs)
+	}
+}
+
+func TestMailSendRefusesToReplyAndForwardAtOnce(t *testing.T) {
+	env := mailSeed(t)
+	_, errs, code := env.Run("mail", "send",
+		"--reply", "work:m-unread", "--forward", "work:m-old",
+		"--to", "jan@example.com", "--body", "x", "--dry-run")
+	if code != 2 {
+		t.Errorf("exit = %d, want 2 (usage)", code)
+	}
+	if !strings.Contains(errs, "contradict") {
+		t.Errorf("stderr = %q", errs)
+	}
+}
+
+// The same forward, saved rather than sent: `mail draft --forward` is what the
+// composer's ctrl+s does.
+func TestMailDraftForwardIsStored(t *testing.T) {
+	env := mailSeed(t)
+	env.MustRun("mail", "draft", "--forward", "work:m-unread",
+		"--to", "jan@example.com", "--body", "zie hieronder")
+
+	drafts := env.Mail["work"].Drafts()
+	if len(drafts) != 1 {
+		t.Fatalf("stored %d drafts, want 1", len(drafts))
+	}
+	if !strings.Contains(string(drafts[0]), "Fwd: Hello there") {
+		t.Errorf("the stored draft is not the forward:\n%s", drafts[0])
+	}
+	if n := len(env.Mail["work"].Sent()); n != 0 {
+		t.Errorf("a draft sent %d messages", n)
+	}
+}
+
 func TestMailReplyAll(t *testing.T) {
 	env := newTestEnv(t)
 	raw, err := mime.Build(&mime.Draft{

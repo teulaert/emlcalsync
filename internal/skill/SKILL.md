@@ -86,6 +86,7 @@ emlcal mail draft --account A --to .. [--cc ..] --subject .. (--body .. | --body
                   [--reply <id> [--all]] [--attach f]
 emlcal mail send --draft <id> | (same flags as draft) [--dry-run]
 emlcal mail reply <id> (--body .. | --body-file f) [--all] [--dry-run]
+emlcal mail forward <id> --to .. [--body ..] [--no-attachments] [--dry-run]
 emlcal cal create --title .. --start .. --end .. [--calendar C] [--attendees ..] \
                   [--location ..] [--description ..] [--dry-run]
 emlcal cal update <id> [same flags]

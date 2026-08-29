@@ -146,6 +146,14 @@ func Forwarded(orig *model.Message, loc *time.Location) string {
 	return b.String()
 }
 
+// MaxForwardBytes is the ceiling on what a forward will hold in memory and
+// hand to a provider. It is generous next to what either of them accepts on
+// one message, and it is here so that a mailbox with a 400 MB video in it
+// cannot be pulled into the process by one keystroke. Both surfaces use it;
+// what they do at the limit differs, because a person watching a composer can
+// be shown what was left out and a script cannot.
+const MaxForwardBytes = 25 << 20
+
 // ForwardAttachments is the files a forward carries: everything on the
 // original except the inline parts its body refers to by Content-ID.
 //

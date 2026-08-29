@@ -60,6 +60,7 @@ Examples:
 		mailDraftCmd(app),
 		mailSendCmd(app),
 		mailReplyCmd(app),
+		mailForwardCmd(app),
 	)
 	return cmd
 }

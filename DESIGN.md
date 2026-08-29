@@ -1441,6 +1441,19 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     that reads the archive -- an agent with the skill -- needs to be told,
     and it was only ever in the reader's faint status line. On an event `y`
     is still yes: the RSVP keys are matched first.
+  - **`emlcal mail forward <id> --to …` is the same thing from the shell**,
+    down to the same `compose.Forwarded` and `compose.ForwardAttachments`, so
+    the two surfaces cannot come to disagree about what a forward is. It
+    differs in what it does when a file will not come: the TUI names it in the
+    Files row and lets the person decide, the command fails, because nobody is
+    watching a script and a forward that quietly went without its attachment
+    is the worst outcome on offer -- `--no-attachments` is how you ask for the
+    text alone. A body is optional here and required for `send` and `reply`: a
+    forward with nothing written above it is an ordinary thing to send.
+    `--forward` is on `send` and `draft` too (it contradicts `--reply`, which
+    is a usage error), so saving a forward unsent is the composer's `ctrl+s`
+    from the command line, and `mail forward` joins the write list in
+    `aitools.go` -- asked about first, never a tool the model calls by itself.
   - The shared half lives in **`internal/compose`**: subject, recipients,
     threading headers, quoting, address parsing and the SMTP envelope. It was
     all in `internal/cli` while `mail reply` was the only composer; the TUI

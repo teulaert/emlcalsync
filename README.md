@@ -176,7 +176,7 @@ tui       interactive mail + calendar, merged across accounts
 mail      mailboxes · list · search · read · thread · attachment list|get      (read)
           attachment text (a PDF or HTML attachment as text; PDFs need
                            poppler-utils' pdftotext -- `doctor` checks)         (read)
-          mark · move · archive · trash · draft · send · reply                 (write)
+          mark · move · archive · trash · draft · send · reply · forward       (write)
 cal       calendars · agenda · show · free                                    (read)
           create · update · delete · respond                                  (write)
 ```
@@ -258,16 +258,17 @@ a second one, and `ctrl+x` in the composer deletes the draft being edited.
 `f` forwards the message in focus, attachments and all — they are fetched
 with it, shown in the composer, and any that could not be got are named there
 rather than quietly left off — and `c` writes a new one from the account the
-list is filtered to; both open with the cursor in To. The keys are Gmail's over vim's (`e` archive, `s` star, `d`
-trash, `j`/`k`/`g`/`G` to move, `z` undo, `/` search), with `⌫` trashing beside
-`d` and `u` going back beside `esc` and `q` for hands trained on a GUI client.
+list is filtered to; both open with the cursor in To. `emlcal mail forward <id>
+--to ..` is the same thing from the shell, files and all. The keys are Gmail's
+over vim's (`e` archive, `s` star, `d` trash, `j`/`k`/`g`/`G` to move, `z`
+undo, `/` search), with `⌫` trashing beside `d` and `u` going back beside `esc`
+and `q` for hands trained on a GUI client.
 With a model configured (see below), `ctrl+g` is the AI key: on a
 conversation it summarizes it — or answers a question you type — on a screen
 of its own, from which `r` replies; in the composer it drafts the reply, with
 instructions or without. Either way the model reads the whole thread and can
-look other mail and the calendar up first. Not yet: forwarding or new mail
-from the TUI, creating or editing events from the TUI, embeddings for
-semantic search, contacts. `y` copies the id in focus to the clipboard — the
+look other mail and the calendar up first. Not yet: creating or editing events from
+the TUI, embeddings for semantic search, contacts. `y` copies the id in focus to the clipboard — the
 thread's on a list row, the message's in a thread or the reader — which is
 what an agent with the skill wants to be told; the reader and the expanded
 thread show it too.

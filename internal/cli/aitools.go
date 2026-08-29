@@ -41,7 +41,7 @@ var (
 	}
 	// writeCommands reach the provider and are asked about first.
 	writeCommands = []string{
-		"mail send", "mail reply", "mail trash", "mail move",
+		"mail send", "mail reply", "mail forward", "mail trash", "mail move",
 		"cal create", "cal update", "cal delete",
 	}
 	// notATool is the read commands that tell a model nothing about the

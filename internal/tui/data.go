@@ -230,13 +230,6 @@ func (d Deps) loadCompose(seq int, req composeRequest) tea.Cmd {
 	}
 }
 
-// maxForwardBytes is what a forward will hold in memory and hand to a
-// provider. It is generous next to what either of them accepts on a message
-// (Gmail 25 MB, JMAP whatever the server says) and is here so that a mailbox
-// with a 400 MB video in it cannot be forwarded into the machine's memory by
-// one keystroke.
-const maxForwardBytes = 25 << 20
-
 // forwardFiles fetches the attachments the forward carries, and says which
 // ones it could not.
 //
@@ -257,7 +250,7 @@ func (d Deps) forwardFiles(ctx context.Context, m *model.Message) ([]mime.DraftA
 	}
 	var (
 		out   []mime.DraftAttachment
-		left  = int64(maxForwardBytes)
+		left  = int64(compose.MaxForwardBytes)
 		short []string
 	)
 	for _, a := range compose.ForwardAttachments(atts) {

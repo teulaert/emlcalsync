@@ -16,6 +16,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/store"
 	"github.com/teulaert/emlcalsync/internal/sync"
 )
 
@@ -190,6 +191,8 @@ type mailComposeFlags struct {
 	all      bool
 	dryRun   bool
 	draft    string
+	forward  string
+	noFiles  bool
 }
 
 func (f *mailComposeFlags) register(cmd *cobra.Command, withReply, withDraft bool) {
@@ -207,14 +210,22 @@ func (f *mailComposeFlags) register(cmd *cobra.Command, withReply, withDraft boo
 	if withReply {
 		fl.StringVar(&f.reply, "reply", "", "reply to this message id")
 		fl.BoolVar(&f.all, "all", false, "reply to all recipients")
+		fl.StringVar(&f.forward, "forward", "", "forward this message id")
+		fl.BoolVar(&f.noFiles, "no-attachments", false,
+			"with --forward: leave the original's files behind")
 	}
 	if withDraft {
 		fl.StringVar(&f.draft, "draft", "", "send an existing draft by id")
 	}
 }
 
-// mailBodyText resolves --body / --body-file.
-func (f *mailComposeFlags) bodyText(cmd *cobra.Command, app *App) (string, error) {
+// mailBodyText resolves --body / --body-file. optional is for a forward,
+// where sending somebody a message with nothing written above it is an
+// ordinary thing to do -- a send or a reply with no body is a mistake.
+func (f *mailComposeFlags) bodyText(cmd *cobra.Command, app *App, optional bool) (string, error) {
+	if optional && f.bodyFile == "" && !cmd.Flags().Changed("body") {
+		return "", nil
+	}
 	switch {
 	case f.bodyFile != "" && cmd.Flags().Changed("body"):
 		return "", output.Errorf(output.ExitUsage, "--body and --body-file are mutually exclusive")
@@ -274,6 +285,17 @@ type mailComposed struct {
 // mailCompose resolves the account, builds the reply context if any and
 // produces the RFC 822 bytes.
 func mailCompose(cmd *cobra.Command, app *App, f *mailComposeFlags, replyID string) (*mailComposed, error) {
+	if replyID != "" && f.forward != "" {
+		return nil, output.Errorf(output.ExitUsage,
+			"--reply and --forward contradict each other: a message is either answered or passed on")
+	}
+	// contextID is the message this one is about, answered or forwarded. It
+	// says which account to send from when nothing else does.
+	contextID := replyID
+	if contextID == "" {
+		contextID = f.forward
+	}
+
 	// Account: --account wins, then the account of the message replied to,
 	// then the configured default (or the only account).
 	var acct *config.Account
@@ -281,9 +303,9 @@ func mailCompose(cmd *cobra.Command, app *App, f *mailComposeFlags, replyID stri
 	switch {
 	case f.account != "":
 		acct, err = app.ResolveAccount(f.account)
-	case replyID != "":
+	case contextID != "":
 		var a string
-		a, _, err = app.ParseMessageID(replyID)
+		a, _, err = app.ParseMessageID(contextID)
 		if err == nil {
 			acct, err = app.ResolveAccount(a)
 		}
@@ -315,7 +337,7 @@ func mailCompose(cmd *cobra.Command, app *App, f *mailComposeFlags, replyID stri
 		return nil, err
 	}
 
-	text, err := f.bodyText(cmd, app)
+	text, err := f.bodyText(cmd, app, f.forward != "")
 	if err != nil {
 		return nil, err
 	}
@@ -336,13 +358,21 @@ func mailCompose(cmd *cobra.Command, app *App, f *mailComposeFlags, replyID stri
 	}
 	out := &mailComposed{account: acct}
 
-	if replyID != "" {
+	switch {
+	case replyID != "":
 		orig, err := mailReplyContext(cmd.Context(), app, replyID, acct, from, f.all, draft, text)
 		if err != nil {
 			return nil, err
 		}
 		out.original = orig
 		out.threadID = orig.ThreadID
+	case f.forward != "":
+		// No original and no thread id on purpose: a forward answers nothing,
+		// so nothing is marked answered, and it starts a conversation with
+		// somebody who was never in the old one.
+		if err := mailForwardContext(cmd.Context(), app, f.forward, draft, text, f.noFiles); err != nil {
+			return nil, err
+		}
 	}
 
 	if len(draft.To) == 0 && len(draft.Cc) == 0 && len(draft.Bcc) == 0 {
@@ -373,6 +403,111 @@ func mailReplyContext(ctx context.Context, app *App, replyID string, acct *confi
 	compose.Reply(draft, orig, all, []string{acct.Email, from.Email})
 	draft.TextBody = text + "\n\n" + compose.Quote(orig, app.Location())
 	return orig, nil
+}
+
+// mailForwardContext fills the subject, the body and the files of a forward
+// into draft.
+//
+// It is [mailReplyContext]'s opposite number and differs from it in every way
+// that matters: no recipients are worked out (who a forward goes to is the
+// whole of what the sender has to say), no threading headers are set, and the
+// original goes in whole through compose.Forwarded rather than quoted through
+// compose.Quote -- the person receiving it has seen none of it.
+func mailForwardContext(ctx context.Context, app *App, id string,
+	draft *mime.Draft, text string, noFiles bool) error {
+
+	_, orig, st, err := mailLoadMessage(ctx, app, id)
+	if err != nil {
+		return err
+	}
+	// An envelope-only stub (DESIGN.md §16) has no body until the raw bytes
+	// are fetched, and a forward with nothing in it is not worth sending.
+	if strings.TrimSpace(orig.TextBody) == "" && !orig.RawComplete {
+		if raw, err := mailRawBytes(ctx, app, orig); err == nil {
+			if parsed, err := mime.Parse(raw); err == nil {
+				orig.TextBody = parsed.TextBody
+			}
+		}
+	}
+	if draft.Subject == "" {
+		draft.Subject = compose.ForwardSubject(orig.Subject)
+	}
+	body := compose.Forwarded(orig, app.Location())
+	if strings.TrimSpace(text) == "" {
+		draft.TextBody = body
+	} else {
+		draft.TextBody = text + "\n\n" + body
+	}
+	if noFiles || !orig.HasAttachments {
+		return nil
+	}
+	files, err := mailForwardFiles(ctx, app, st, orig)
+	if err != nil {
+		return err
+	}
+	// After --attach, so a file named on the command line is not pushed down
+	// the list by the ones that came with the message.
+	draft.Attachments = append(draft.Attachments, files...)
+	return nil
+}
+
+// mailForwardFiles fetches the attachments the forward carries, through the
+// same engine call `mail attachment` uses: out of the archived raw message
+// when there is one, off the provider when there is not.
+//
+// A file that will not come is an error here, where the TUI names it in the
+// composer and lets the person decide. Nobody is watching a command run, and
+// forwarding is mostly done for the attachment, so a forward that quietly went
+// without one is the worst of the outcomes available. --no-attachments is how
+// you ask for the text alone.
+func mailForwardFiles(ctx context.Context, app *App, st *store.Store,
+	orig *model.Message) ([]mime.DraftAttachment, error) {
+
+	atts, err := st.ListAttachments(ctx, orig.ID)
+	if err != nil {
+		return nil, err
+	}
+	carry := compose.ForwardAttachments(atts)
+	if len(carry) == 0 {
+		return nil, nil
+	}
+	eng, err := app.Engine()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]mime.DraftAttachment, 0, len(carry))
+	total := 0
+	for _, a := range carry {
+		name := a.Filename
+		if name == "" {
+			name = a.PartPath
+		}
+		ref := a.RemoteRef
+		if ref == "" {
+			ref = a.PartPath
+		}
+		data, err := eng.FetchAttachment(ctx, orig.AccountID, orig.RemoteID, ref)
+		if err != nil {
+			code := output.ExitProvider
+			if provider.IsOffline(err) {
+				code = output.ExitOffline
+			}
+			return nil, output.Errorf(code,
+				"attachment %q could not be fetched: %w — pass --no-attachments to forward the text alone",
+				name, err)
+		}
+		total += len(data)
+		if total > compose.MaxForwardBytes {
+			return nil, output.Errorf(output.ExitUsage,
+				"the attachments come to more than %s, which no provider will take: "+
+					"pass --no-attachments and send the files another way",
+				output.HumanSize(compose.MaxForwardBytes))
+		}
+		out = append(out, mime.DraftAttachment{
+			Filename: name, ContentType: a.ContentType, Data: data,
+		})
+	}
+	return out, nil
 }
 
 // mailSubmit applies a draft/send op and prints the result row.
@@ -544,6 +679,47 @@ func mailSendDraft(cmd *cobra.Command, app *App, f *mailComposeFlags) error {
 		return err
 	}
 	return mailSubmit(cmd, app, c, sync.OpSend)
+}
+
+func mailForwardCmd(app *App) *cobra.Command {
+	var f mailComposeFlags
+	cmd := &cobra.Command{
+		Use:   "forward <id> --to <addr>",
+		Short: "Forward a message to somebody else",
+		Long: `Pass a message on to somebody who has not seen it, from the account that
+holds it. The original goes below your text whole -- the earlier rounds of the
+conversation included, none of it quoted -- under the header block every mail
+client writes, and the files come with it.
+
+A body is optional here: a forward with nothing written above it is an
+ordinary thing to send. The subject becomes "Fwd: ..." unless --subject says
+otherwise, and no threading headers are set, so it starts a conversation with
+the person receiving it rather than landing in one they were never in. The
+message being forwarded is not marked answered, because it has not been.
+
+The attachments are fetched from the archive, or from the provider when the
+archive kept only the envelope. If one cannot be fetched the forward fails
+rather than going out without it; --no-attachments forwards the text alone.`,
+		Example: `  emlcal mail forward work:18f3a2b9c1d4e5f6 --to jan@example.com
+  emlcal mail forward work:18f3a2b9c1d4e5f6 --to jan@example.com --body "Zie hieronder." --dry-run`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			f.forward = args[0]
+			c, err := mailCompose(cmd, app, &f, "")
+			if err != nil {
+				return err
+			}
+			if f.dryRun {
+				_, err := app.Stdout.Write(c.raw)
+				return err
+			}
+			return mailSubmit(cmd, app, c, sync.OpSend)
+		},
+	}
+	f.register(cmd, false, false)
+	fl := cmd.Flags()
+	fl.BoolVar(&f.noFiles, "no-attachments", false, "forward the text alone, without the original's files")
+	return cmd
 }
 
 func mailReplyCmd(app *App) *cobra.Command {
