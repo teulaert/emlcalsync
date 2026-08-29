@@ -860,6 +860,7 @@ email    = "lennert@example.com"
   smtp_host     = "mail.example.com"
   smtp_port     = 587
   archive_folder = "Archief"            # when the name is not recognised
+
 ```
 
 Backends: mail is `jmap`, `gmail` or `imap`; calendar is `caldav`, `gcal` or
@@ -914,10 +915,12 @@ internal/
   store/          SQLite open/migrate, typed queries (sqlc-generated), FTS helpers
   blob/           content-addressed zstd store
   mime/           parse, text extraction, quote/signature stripping, RFC822 builder
+  compose/        reply headers, quoting, address parsing, SMTP envelope (cli + tui)
   sync/           engine: backfill, delta, reconcile, outbox, scheduler, watch
   provider/       interfaces + registry
     gmail/  gcal/  jmap/ (mail + calendar)  caldav/  imap/ (mail + smtp)  oauth/
   calendar/       recurrence expansion, free/busy, timezone helpers
+  tui/            the interactive view: mail list, thread, reader, composer, agenda
   skill/          embedded SKILL.md template
 ```
 
@@ -936,7 +939,7 @@ internal/
 | Compression | `klauspost/compress/zstd` | pure Go, fast |
 | Recurrence | `teambition/rrule-go` | RFC 5545 |
 | CLI | `spf13/cobra` | completions, help, ubiquitous |
-| TUI | `charm.land/bubbletea/v2` (+ `bubbles/v2`, `lipgloss/v2`) | same language, same store package. The v2 module path is `charm.land/*`; it is the current stable line and pulls a smaller indirect set than v1 |
+| TUI | `charm.land/bubbletea/v2` (+ `bubbles/v2`, `lipgloss/v2`) | same language, same store package. The v2 module path is `charm.land/*`; it is the current stable line and pulls a smaller indirect set than v1. The composer's `bubbles/textarea` adds one indirect dependency, `atotto/clipboard`, reached only by its ctrl+v paste — text editing is fiddly enough to be worth borrowing rather than hand-rolling, the way the reader borrows `viewport` |
 
 Tests: provider clients tested against recorded fixtures (`httptest` +
 golden JSON); MIME tested with a corpus of nasty real-world messages; sync
@@ -956,7 +959,8 @@ partial pages, and crashes mid-batch.
 | 5 | calendars: GCal + JMAP Calendars, recurrence expansion, `cal *` | second resource type on the same engine |
 | 6 | `skill`, `reindex`, `gc`, `export`, completions, docs | agent polish + archive guarantees |
 | 7 | `tui`: unified mail list, thread, reader, agenda, event; archive/trash/mark/star with undo | the archive is usable by a person, not only an agent |
-| later | composing from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
+| 8 | `tui` reply: `r` / `a` open a composer over the message in focus, send or save as a draft | a person can answer their mail without leaving the archive |
+| later | forwarding and new mail from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
 
 Phase 1 is deliberately Fastmail-first: an API token, no consent screens, and
 push support make it the fastest path to a real archive you can query.
@@ -1154,7 +1158,86 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     read, the same rule as opening one in the reader — its text is on screen.
     The collapsed view leaves the flag alone: a row is not a message you have
     read.
-  - Composing (reply/forward) is deliberately absent; `r` is reserved.
+  - **Triage moves on.** `e`/`d` in a thread drops the message and leaves the
+    cursor on the next one down; in the reader it drops the message from the
+    thread underneath and reads on. Either way, a thread with nothing left
+    closes and takes its row on the list with it — which is what a
+    one-message thread, most of them, amounts to. The reader has no rows of
+    its own, so its optimistic drop — and the restore or commit that follows
+    it — is applied to the screen one level down, which is also what keeps
+    `z` working from in there.
+  - **A triaged message stays gone.** `GetThread` returns the whole
+    conversation whatever mailbox each message now sits in, correctly: a
+    thread is not a mailbox. So the thread view keeps the set it has triaged
+    away and filters each reload through it, or the daemon's next commit —
+    a second or two later — would put the message back and make the trash
+    look like it did nothing. Undo takes the message out of that set again.
+  - **`r` and `a` open a composer** on the message in focus — the one under
+    the cursor in a thread, the one being read in the reader, and from a list
+    row the newest message in the thread that actually went somewhere (a draft
+    sitting at the end of a conversation is an unfinished reply of your own,
+    not something to answer). `ctrl+d` sends, `ctrl+s` stores a draft, `tab`
+    moves between To / Cc / Bcc / Subject / body, and `esc` cancels — twice,
+    once something has been written.
+  - **`r` on a conversation that already has a draft carries it on** rather
+    than opening a second reply beside it — from the list, from inside the
+    thread, and from the reader, since the draft is where the earlier words
+    are. The header reads `draft ·` rather than `reply ·`, which is what says
+    the text on screen is your own from before. `a` lands on the same draft:
+    there is only ever one answer under way.
+  - **`ctrl+x` deletes the draft being edited**, twice, and it goes to the
+    trash rather than anywhere final. On a reply that was never saved there is
+    nothing stored to delete and the key says so — `esc` is what abandons
+    that. Cancelling is never deleting: `esc` on a stored draft leaves it
+    exactly as it was.
+  - **In the drafts view a row's actions are about the draft, not the
+    thread.** Everywhere else a row stands for every message in the
+    conversation, which is what makes `e` there mean `emlcal mail archive` on
+    each id. In drafts that rule trashed the mail the draft answers along with
+    the draft, which is the one place the thread-wide reading is plainly
+    wrong.
+  - **`enter` on a draft reopens it in the composer** rather than the reader:
+    a draft is not a message to read, it is one to finish. In the drafts
+    mailbox that happens straight off the list row, without the thread in
+    between — a row there stands for something unsent, not a conversation.
+    Going by way of the thread put two keys between the list and the draft and
+    landed on the wrong one of them whenever the mail the draft answers was
+    still unread, because the newest unread is where a thread opens. A row
+    whose draft has since gone (sent from another client) falls back to
+    opening the conversation, which is what it otherwise is. The draft's text
+    goes back in whole — the quote included — because it is someone's
+    unfinished writing, not something to be re-derived. Neither provider can update a
+    draft in place, so `ctrl+s` and `ctrl+d` both create the new message and
+    trash the one it supersedes, and only once the new one is really there: a
+    save that was merely queued must not take the work with it. Sending a
+    draft marks nothing answered, the same as `mail send --draft`, because the
+    draft carries the threading headers but not which message they point at.
+  - **The quote goes into the editor, not onto the message at send time.**
+    `emlcal mail reply` appends it to `--body`, where it is invisible either
+    way; in an editor what is on screen has to be what goes out, and trimming
+    the quote to the line being answered is the normal thing to write. The
+    cursor opens two lines above it.
+  - **The composer captures every key**, which the root asks about through
+    `capturingKeys()` rather than by type-switching on the screen — the mail
+    list's search prompt needed the same thing and had its own special case.
+    Without it `e` in a To field would archive the message being answered.
+    `ctrl+c` is matched *before* that gate and always quits: a screen taking
+    every key must not be able to hold the program, least of all while a send
+    is in flight and nothing else is accepted. (The search prompt swallowed it
+    until now.)
+  - Sending follows `mail send` exactly, because it is the same engine call:
+    the original is marked answered only once the reply has really gone (not
+    when it was queued), a failure to set that flag does not fail the send,
+    and a transport error *after* the request went out is reported as "may
+    already have been sent", never as queued.
+  - The shared half lives in **`internal/compose`**: subject, recipients,
+    threading headers, quoting, address parsing and the SMTP envelope. It was
+    all in `internal/cli` while `mail reply` was the only composer; the TUI
+    cannot import that package, and a second copy is how the two surfaces
+    would come to disagree about what a reply is. `compose.FormatAddress`
+    replaced `model.Address.String()` for the editable To/Cc fields: that is a
+    display formatter and leaves a comma in a display name unquoted, which the
+    parser then reads back as two addresses.
 
 ### Still to verify against live accounts
 

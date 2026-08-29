@@ -2,13 +2,13 @@ package cli
 
 import (
 	"context"
-	"net/mail"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/teulaert/emlcalsync/internal/calendar"
+	"github.com/teulaert/emlcalsync/internal/compose"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/store"
@@ -323,61 +323,25 @@ func mailAccountMailbox(ctx context.Context, st *store.Store, account, nameOrRol
 // ---------------------------------------------------------------------------
 // Addresses.
 
-// mailParseAddress accepts "Name <a@b>" and a bare "a@b".
+// mailParseAddress accepts "Name <a@b>" and a bare "a@b". The parsing lives
+// in internal/compose, which the TUI's composer shares; what belongs here is
+// the exit code, which is a CLI concept.
 func mailParseAddress(s string) (model.Address, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return model.Address{}, output.Errorf(output.ExitUsage, "empty address")
-	}
-	a, err := mail.ParseAddress(s)
+	a, err := compose.ParseAddress(s)
 	if err != nil {
-		// A bare address without angle brackets that ParseAddress rejects
-		// (e.g. missing a domain) is a usage error, not a crash.
-		return model.Address{}, output.Errorf(output.ExitUsage, "invalid address %q", s)
+		return model.Address{}, output.Errorf(output.ExitUsage, "%v", err)
 	}
-	return model.Address{Name: a.Name, Email: a.Address}, nil
+	return a, nil
 }
 
 // mailParseAddressList splits repeated/comma-separated flag values into
 // addresses.
 func mailParseAddressList(values []string) ([]model.Address, error) {
-	var out []model.Address
-	for _, v := range values {
-		for _, part := range mailSplitAddresses(v) {
-			a, err := mailParseAddress(part)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, a)
-		}
+	out, err := compose.ParseAddressList(values)
+	if err != nil {
+		return nil, output.Errorf(output.ExitUsage, "%v", err)
 	}
 	return out, nil
-}
-
-// mailSplitAddresses splits on commas that are not inside a quoted display
-// name, so `--to "Doe, Jane <j@x>,b@y"` does the obvious thing.
-func mailSplitAddresses(s string) []string {
-	var parts []string
-	var cur strings.Builder
-	inQuote := false
-	for _, r := range s {
-		switch {
-		case r == '"':
-			inQuote = !inQuote
-			cur.WriteRune(r)
-		case r == ',' && !inQuote:
-			if t := strings.TrimSpace(cur.String()); t != "" {
-				parts = append(parts, t)
-			}
-			cur.Reset()
-		default:
-			cur.WriteRune(r)
-		}
-	}
-	if t := strings.TrimSpace(cur.String()); t != "" {
-		parts = append(parts, t)
-	}
-	return parts
 }
 
 // mailAddressStrings renders addresses for a header line or a JSON list.

@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,6 +145,11 @@ func keyPress(s string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyBackspace}
 	case "tab":
 		return tea.KeyPressMsg{Code: tea.KeyTab}
+	case "shift+tab":
+		return tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
+	}
+	if rest, ok := strings.CutPrefix(s, "ctrl+"); ok && len(rest) == 1 {
+		return tea.KeyPressMsg{Code: rune(rest[0]), Mod: tea.ModCtrl}
 	}
 	return tea.KeyPressMsg{Code: rune(s[0]), Text: s}
 }

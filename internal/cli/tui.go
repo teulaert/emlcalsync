@@ -22,7 +22,9 @@ func coreTUICmd(app *App) *cobra.Command {
 Mail and calendar are both shown merged across every configured account —
 --account narrows them. Reads come from the same SQLite index the other
 commands use, and writes go through the same sync engine, so an action taken
-here is the action ` + "`emlcal mail archive`" + ` would have taken.
+here is the action ` + "`emlcal mail archive`" + ` would have taken. That
+includes replying: r and a open a composer on the message in focus, and what
+it sends is what ` + "`emlcal mail reply`" + ` would have sent.
 
 Press ? for the keys.`,
 		Args: cobra.NoArgs,

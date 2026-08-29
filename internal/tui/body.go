@@ -35,3 +35,20 @@ func readableBody(ctx context.Context, d Deps, m *model.Message) string {
 	}
 	return mime.StripQuotes(parsed.TextBody)
 }
+
+// ensureText fills in the body of an envelope-only stub (DESIGN.md §16) so a
+// reply has the original to quote. Every other message already carries its
+// text. It is best effort: a reply to a message whose bytes cannot be fetched
+// is still worth writing, it just quotes nothing.
+func ensureText(ctx context.Context, d Deps, m *model.Message) {
+	if strings.TrimSpace(m.TextBody) != "" || m.RawComplete || d.Engine == nil {
+		return
+	}
+	raw, err := d.Engine.EnsureRaw(ctx, m.AccountID, m.RemoteID)
+	if err != nil {
+		return
+	}
+	if parsed, err := mime.Parse(raw); err == nil {
+		m.TextBody = parsed.TextBody
+	}
+}

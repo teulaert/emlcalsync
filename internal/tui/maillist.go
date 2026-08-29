@@ -153,6 +153,13 @@ func (m *mailList) targets() []target {
 	}
 	out := make([]target, 0, len(msgs))
 	for i := range msgs {
+		// The drafts view is the exception. A row there stands for the unsent
+		// message, not for the conversation it belongs to, so `d` on it must
+		// trash the draft and leave the mail it answers where it is -- which
+		// is emphatically not what "trash every message in the thread" does.
+		if m.showingDrafts() && !msgs[i].Flags.Draft {
+			continue
+		}
 		out = append(out, targetOf(&msgs[i]))
 	}
 	return out
@@ -461,6 +468,9 @@ func (m *mailList) footer(w int) string {
 		return padCells("/"+m.input+"█", w)
 	}
 	s := fmt.Sprintf("%d threads", len(m.threads))
+	if m.showingDrafts() {
+		s = fmt.Sprintf("%d drafts · enter to finish one", len(m.threads))
+	}
 	if !m.atEnd {
 		s += "+"
 	}
@@ -468,4 +478,16 @@ func (m *mailList) footer(w int) string {
 		s += " · loading…"
 	}
 	return s
+}
+
+// capturingKeys is true while the search prompt is open: the letters go into
+// the query, not into the root's bindings.
+func (m *mailList) capturingKeys() bool { return m.searching }
+
+// showingDrafts reports whether the list is the drafts mailbox, where a row
+// stands for an unsent message rather than a conversation to read. A search
+// does not count: it replaces the mailbox filter, so its rows are whatever
+// matched.
+func (m *mailList) showingDrafts() bool {
+	return m.query == "" && mailboxCycle[m.mailbox].label == "drafts"
 }

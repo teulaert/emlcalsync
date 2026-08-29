@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,6 +12,8 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // screen is one full-window view. The root owns a stack of them, so Esc is
@@ -25,6 +28,11 @@ type screen interface {
 	reload() tea.Cmd
 	targets() []target
 }
+
+// capturing is implemented by the screens that take every key press, because
+// a text field is open on them. The root's own single-letter bindings must not
+// fire then: the letter is being typed, not pressed.
+type capturing interface{ capturingKeys() bool }
 
 // triageable is implemented by the screens whose rows can be acted on, so the
 // root can update them optimistically without knowing which one it holds.
@@ -49,6 +57,10 @@ type root struct {
 	// threadExpanded is the thread view's mode, kept on the root so the choice
 	// survives going back to the list and opening the next thread.
 	threadExpanded bool
+
+	// composeSeq names the composer being opened, so a second r before the
+	// first message has come back off disk does not push two.
+	composeSeq int
 
 	status    string
 	statusSeq int
@@ -138,6 +150,18 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case applied:
 		return r, r.onApplied(msg)
 
+	case composeLoaded:
+		return r, r.onComposeLoaded(msg)
+
+	case submitted:
+		return r, r.onSubmitted(msg)
+
+	case composeClosed:
+		if _, ok := r.top().(*composeView); ok {
+			r.pop()
+		}
+		return r, nil
+
 	case tea.KeyPressMsg:
 		return r.onKey(msg)
 	}
@@ -180,11 +204,10 @@ func (r *root) bodyHeight() int {
 	return h
 }
 
-// searching reports whether the top screen is capturing text, in which case
-// global single-letter keys must not fire.
-func (r *root) searching() bool {
-	ml, ok := r.top().(*mailList)
-	return ok && ml.searching
+// capturing reports whether the top screen is taking the keys itself.
+func (r *root) capturing() bool {
+	c, ok := r.top().(capturing)
+	return ok && c.capturingKeys()
 }
 
 func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -192,7 +215,16 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		r.showHelp = false
 		return r, nil
 	}
-	if r.searching() {
+	// ctrl+c quits from anywhere, ahead of the capture gate below: a screen
+	// that is taking every key -- the composer, the search prompt -- must not
+	// be able to hold the program, least of all while a send is in flight and
+	// nothing else is being accepted.
+	if msg.String() == "ctrl+c" {
+		r.quitting = true
+		r.watcher.Close()
+		return r, tea.Quit
+	}
+	if r.capturing() {
 		s, cmd := r.top().Update(msg, r.keys, r.w, r.bodyHeight())
 		r.replaceTop(s)
 		return r, cmd
@@ -260,6 +292,12 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, r.keys.Star):
 		return r, r.toggleFlag("flagged")
+
+	case key.Matches(msg, r.keys.Reply):
+		return r, r.startReply(false)
+
+	case key.Matches(msg, r.keys.ReplyAll):
+		return r, r.startReply(true)
 	}
 
 	// RSVP only means something on an event.
@@ -283,21 +321,32 @@ func (r *root) open() tea.Cmd {
 		if t == nil {
 			return nil
 		}
+		// In the drafts mailbox a row stands for something unsent, not a
+		// conversation to read, so enter goes straight into the composer.
+		// Going by way of the thread put two keys between the list and the
+		// draft -- and landed on the wrong one of them whenever the mail the
+		// draft answers was still unread, because that is where a thread
+		// opens.
+		if s.showingDrafts() {
+			return r.startCompose(composeRequest{
+				account: t.AccountID, thread: t.ThreadID, draft: true,
+			})
+		}
 		return r.push(newThreadView(r.d, t.AccountID, t.ThreadID, t.Subject, r.threadExpanded))
 	case *threadView:
 		m := s.selected()
 		if m == nil {
 			return nil
 		}
-		// Opening a message marks it read, the way every mail client does.
-		var cmds []tea.Cmd
-		cmds = append(cmds, r.push(newReader(r.d, m.AccountID, m.RemoteID)))
-		if m.Flags.Unread {
-			ops, _ := flagOps([]target{targetOf(m)}, "unread", false)
-			m.Flags.Unread = false
-			cmds = append(cmds, r.d.apply("read", ops, nil))
+		// A draft is not a message to read, it is one to finish. Enter on it
+		// reopens the composer where it was left off.
+		if m.Flags.Draft {
+			return r.startCompose(composeRequest{
+				account: m.AccountID, remote: m.RemoteID, draft: true,
+			})
 		}
-		return tea.Batch(cmds...)
+		// Opening a message marks it read, the way every mail client does.
+		return tea.Batch(r.push(newReader(r.d, m.AccountID, m.RemoteID)), r.markRead(m))
 	case *agenda:
 		o := s.selectedOcc()
 		if o == nil {
@@ -306,6 +355,102 @@ func (r *root) open() tea.Cmd {
 		return r.push(newEventView(r.d, o.AccountID, o.CalendarRemote, o.CalendarName, o.EventRemoteID))
 	}
 	return nil
+}
+
+// startReply opens the composer on whatever message the screen has in focus.
+// Nothing on the calendar side answers to it, and neither does the composer
+// itself -- r there is a letter being typed, which the capture gate above has
+// already dealt with.
+func (r *root) startReply(all bool) tea.Cmd {
+	req := composeRequest{all: all}
+	switch s := r.top().(type) {
+	case *mailList:
+		t := s.selected()
+		if t == nil {
+			return nil
+		}
+		req.account, req.thread = t.AccountID, t.ThreadID
+	case *threadView:
+		m := s.selected()
+		if m == nil {
+			return nil
+		}
+		req.account, req.remote, req.thread = m.AccountID, m.RemoteID, m.ThreadID
+	case *reader:
+		if s.msg == nil {
+			return nil
+		}
+		req.account, req.remote, req.thread = s.msg.AccountID, s.msg.RemoteID, s.msg.ThreadID
+	default:
+		return nil
+	}
+	return r.startCompose(req)
+}
+
+// startCompose loads the message and opens a composer on it.
+func (r *root) startCompose(req composeRequest) tea.Cmd {
+	r.composeSeq++
+	return r.d.loadCompose(r.composeSeq, req)
+}
+
+// onComposeLoaded pushes the composer once its message is in hand.
+func (r *root) onComposeLoaded(msg composeLoaded) tea.Cmd {
+	if msg.seq != r.composeSeq {
+		return nil // a newer r has been pressed since
+	}
+	if msg.err != nil {
+		// The draft a row stood for is gone -- sent from somewhere else, or
+		// synced away between the keypress and the load. The row is still a
+		// conversation, so open that instead of saying nothing happened.
+		if msg.req.draft && msg.req.remote == "" && errors.Is(msg.err, model.ErrNotFound) {
+			r.onCal = false
+			return r.push(newThreadView(r.d, msg.req.account, msg.req.thread, "", r.threadExpanded))
+		}
+		r.note("compose: " + msg.err.Error())
+		return nil
+	}
+	// It was started from a mail screen, so that is the stack it goes on,
+	// whichever one is showing by the time it comes back off disk.
+	r.onCal = false
+	// A status left over from the last action would sit where the composer's
+	// own key hints belong; the composer is a new thing to be doing.
+	r.note("")
+	if msg.req.draft {
+		return r.push(newDraftCompose(r.d, msg.msg))
+	}
+	return r.push(newReplyCompose(r.d, msg.msg, msg.req.all))
+}
+
+// onSubmitted closes the composer once the message is away, and leaves it open
+// with the error when it is not.
+func (r *root) onSubmitted(s submitted) tea.Cmd {
+	c, onTop := r.top().(*composeView)
+	if s.err != nil {
+		if onTop {
+			c.sending, c.err = false, s.err
+		}
+		r.note(s.what + " failed: " + s.err.Error())
+		return nil
+	}
+	if onTop {
+		r.pop()
+	}
+	switch {
+	case s.queued:
+		r.note(s.what + " queued — offline, it will go out on the next sync")
+	case s.what == "draft":
+		r.note("draft saved")
+	case s.what == "send":
+		r.note("sent")
+	case s.what == "delete":
+		r.note("draft deleted — it is in the trash")
+	default:
+		r.note("reply sent")
+	}
+	// The message is on the server but not yet in the archive; the daemon is
+	// what puts it there, so ask it to look now rather than in a minute.
+	r.nudgeDaemon()
+	return r.top().reload()
 }
 
 // triage archives or trashes what the top screen has selected.
@@ -324,11 +469,80 @@ func (r *root) triage(what string) tea.Cmd {
 	case "trash":
 		ops, undo = trashOps(ctx, r.d.Store, ts)
 	}
+	// The reader is the one screen with no rows of its own: the drop belongs
+	// to the thread underneath, which then says what to read next.
+	var follow tea.Cmd
+	switch s := r.top().(type) {
+	case *reader:
+		follow = r.followOn(s)
+	case triageable:
+		s.dropSelected()
+		if tv, ok := s.(*threadView); ok && len(tv.messages) == 0 {
+			follow = r.closeThread()
+		}
+	}
+	r.note(what + "…")
+	return tea.Batch(r.d.apply(what, ops, undo), follow)
+}
+
+// followOn moves on after the message being read has been archived or trashed.
+// The thread underneath drops it and the reader takes whichever message is now
+// under the thread's cursor -- the next one down, the thread being newest
+// first -- so a run of messages can be read and cleared without going back out
+// after each one. When the thread has nothing left, the reader and the thread
+// both close and the row goes with them, which is where a one-message thread
+// ends up: back on the list, one row shorter.
+func (r *root) followOn(rd *reader) tea.Cmd {
+	st := r.stack()
+	tv, _ := st[max(len(st)-2, 0)].(*threadView)
+	if tv == nil {
+		r.pop()
+		return nil
+	}
+	tv.dropMessage(rd.remote)
+	if m := tv.selected(); m != nil {
+		return tea.Batch(rd.show(m.AccountID, m.RemoteID), r.markRead(m))
+	}
+	r.pop() // out of the reader
+	return r.closeThread()
+}
+
+// closeThread leaves a thread with nothing left to show. Its last message has
+// just been archived or trashed, so the row on the list underneath goes too --
+// what a thread of one message amounts to, which is most of them, is that the
+// list is where the next thing to read is.
+func (r *root) closeThread() tea.Cmd {
+	r.pop()
 	if t, ok := r.top().(triageable); ok {
 		t.dropSelected()
 	}
-	r.note(what + "…")
-	return r.d.apply(what, ops, undo)
+	return nil
+}
+
+// markRead is the mark-read that comes with putting a message on screen. The
+// engine is absent in tests that only draw screens; there is nothing to write
+// to then.
+func (r *root) markRead(m *model.Message) tea.Cmd {
+	if !m.Flags.Unread || r.d.Engine == nil {
+		return nil
+	}
+	ops, _ := flagOps([]target{targetOf(m)}, "unread", false)
+	m.Flags.Unread = false
+	return r.d.apply("read", ops, nil)
+}
+
+// triageScreen is the screen an action's row belongs to. That is the top one,
+// except in the reader: reading is a level below the thread the message is a
+// row of, so an optimistic drop -- and the restore or commit that follows --
+// lands one screen down.
+func (r *root) triageScreen() triageable {
+	st := r.stack()
+	if _, ok := st[len(st)-1].(*reader); ok && len(st) > 1 {
+		t, _ := st[len(st)-2].(triageable)
+		return t
+	}
+	t, _ := st[len(st)-1].(triageable)
+	return t
 }
 
 func (r *root) toggleFlag(flag string) tea.Cmd {
@@ -366,7 +580,7 @@ func (r *root) applyUndo() tea.Cmd {
 	r.undo = nil
 	r.note("undoing " + u.label + "…")
 	// Put the row back straight away; the reload that follows confirms it.
-	if t, ok := r.top().(triageable); ok {
+	if t := r.triageScreen(); t != nil {
 		t.restore()
 	}
 	return tea.Batch(r.d.apply("undo "+u.label, u.ops, nil), r.top().reload())
@@ -374,14 +588,14 @@ func (r *root) applyUndo() tea.Cmd {
 
 func (r *root) onApplied(a applied) tea.Cmd {
 	if a.err != nil {
-		if t, ok := r.top().(triageable); ok {
+		if t := r.triageScreen(); t != nil {
 			t.restore()
 		}
 		r.note(a.action + " failed: " + a.err.Error())
 		r.undo = nil
 		return nil
 	}
-	if t, ok := r.top().(triageable); ok {
+	if t := r.triageScreen(); t != nil {
 		t.commit()
 	}
 	switch {
@@ -390,6 +604,9 @@ func (r *root) onApplied(a applied) tea.Cmd {
 	case a.undo != nil:
 		r.undo = a.undo
 		r.note(a.action + " · z to undo")
+	case a.action == "read" && r.undo.live(time.Now()):
+		// The mark-read that comes with landing on the next message must not
+		// wipe the undo offer the trash before it just put up.
 	default:
 		r.note(a.action)
 	}

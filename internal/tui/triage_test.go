@@ -65,6 +65,7 @@ func newTriageDeps(t *testing.T) (Deps, *fake.Mail) {
 		{RemoteID: "INBOX", Name: "Inbox", Role: model.RoleInbox, SortOrder: 1},
 		{RemoteID: "ARCHIVE", Name: "Archive", Role: model.RoleArchive, SortOrder: 2},
 		{RemoteID: "TRASH", Name: "Trash", Role: model.RoleTrash, SortOrder: 3},
+		{RemoteID: "DRAFTS", Name: "Drafts", Role: model.RoleDrafts, SortOrder: 4},
 	}); err != nil {
 		t.Fatalf("ReplaceMailboxes: %v", err)
 	}
@@ -92,8 +93,12 @@ func newTriageDeps(t *testing.T) (Deps, *fake.Mail) {
 	}, mail
 }
 
-func addTriageMessage(t *testing.T, d Deps, mail *fake.Mail, remote, subject string) {
+// addTriageMessage indexes one message and gives the fake provider the same
+// one, ago before now, so a thread's order on screen is the order it was
+// added in.
+func addTriageMessage(t *testing.T, d Deps, mail *fake.Mail, remote, subject string, ago time.Duration) {
 	t.Helper()
+	when := testNow.Add(-ago)
 	raw := []byte("From: anna@example.com\r\nSubject: " + subject + "\r\n\r\n" + subject + " body\r\n")
 	mail.Add(fake.NewMsg(remote, raw).WithMailboxes("INBOX"))
 	m := &model.Message{
@@ -102,8 +107,8 @@ func addTriageMessage(t *testing.T, d Deps, mail *fake.Mail, remote, subject str
 		ThreadID:       "t-" + remote,
 		Subject:        subject,
 		From:           model.Address{Name: "anna", Email: "anna@example.com"},
-		Date:           testNow.Add(-time.Hour),
-		Received:       testNow.Add(-time.Hour),
+		Date:           when,
+		Received:       when,
 		TextBody:       subject + " body",
 		MailboxRemotes: []string{"INBOX"},
 		IndexedAt:      testNow,
@@ -113,9 +118,26 @@ func addTriageMessage(t *testing.T, d Deps, mail *fake.Mail, remote, subject str
 	}
 }
 
+// inThread re-files messages under one thread id, so a triage test can act on
+// a conversation rather than a run of one-message threads.
+func inThread(t *testing.T, d Deps, thread string, remotes ...string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, remote := range remotes {
+		m, err := d.Store.GetMessage(ctx, "work", remote)
+		if err != nil {
+			t.Fatalf("GetMessage %s: %v", remote, err)
+		}
+		m.ThreadID = thread
+		if _, err := d.Store.UpsertMessage(ctx, m, nil); err != nil {
+			t.Fatalf("UpsertMessage %s: %v", remote, err)
+		}
+	}
+}
+
 func TestArchiveFromTheListReachesTheProviderAndUndoRestoresIt(t *testing.T) {
 	d, mail := newTriageDeps(t)
-	addTriageMessage(t, d, mail, "m1", "Archive me")
+	addTriageMessage(t, d, mail, "m1", "Archive me", time.Hour)
 
 	r := newTestRoot(t, d)
 	if got := len(r.mail[0].(*mailList).threads); got != 1 {
@@ -154,7 +176,7 @@ func TestArchiveFromTheListReachesTheProviderAndUndoRestoresIt(t *testing.T) {
 
 func TestTrashFromTheListReachesTheProvider(t *testing.T) {
 	d, mail := newTriageDeps(t)
-	addTriageMessage(t, d, mail, "m1", "Trash me")
+	addTriageMessage(t, d, mail, "m1", "Trash me", time.Hour)
 
 	r := newTestRoot(t, d)
 	send(t, r, "d")
@@ -173,7 +195,7 @@ func TestTrashFromTheListReachesTheProvider(t *testing.T) {
 
 func TestStarFromTheListReachesTheProvider(t *testing.T) {
 	d, mail := newTriageDeps(t)
-	addTriageMessage(t, d, mail, "m1", "Star me")
+	addTriageMessage(t, d, mail, "m1", "Star me", time.Hour)
 
 	r := newTestRoot(t, d)
 	send(t, r, "s")
@@ -200,4 +222,130 @@ func contains(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// Trashing the message being read has to move on to the next one. Staying put
+// leaves a message on screen that is no longer where the person put it.
+func TestTrashFromTheReaderMovesToTheNextMessage(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter") // the thread
+	send(t, r, "enter") // the newest message, m2
+
+	rd, ok := r.top().(*reader)
+	if !ok {
+		t.Fatalf("top = %T, want the reader", r.top())
+	}
+	if rd.remote != "m2" {
+		t.Fatalf("reading %s, want the newest message m2", rd.remote)
+	}
+
+	send(t, r, "d")
+
+	rd, ok = r.top().(*reader)
+	if !ok {
+		t.Fatalf("after trash top = %T, want to still be reading", r.top())
+	}
+	if rd.remote != "m1" {
+		t.Errorf("after trash the reader shows %s, want the next message m1", rd.remote)
+	}
+	if _, boxes, _ := mail.Lookup("m2"); !contains(boxes, "TRASH") {
+		t.Errorf("the trashed message is not in TRASH: %v", boxes)
+	}
+	if r.undo == nil {
+		t.Error("trash from the reader offered no undo")
+	}
+}
+
+// The last message of a thread has no next one: the reader and the thread both
+// close, and the row goes with them.
+func TestTrashFromTheReaderClosesAThreadWithNothingLeft(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Only one", time.Hour)
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	send(t, r, "enter")
+	if _, ok := r.top().(*reader); !ok {
+		t.Fatalf("top = %T, want the reader", r.top())
+	}
+
+	send(t, r, "d")
+
+	ml, ok := r.top().(*mailList)
+	if !ok {
+		t.Fatalf("after trash top = %T, want to be back on the list", r.top())
+	}
+	if got := len(ml.threads); got != 0 {
+		t.Errorf("the trashed thread is still in the list (%d rows)", got)
+	}
+	if _, boxes, _ := mail.Lookup("m1"); !contains(boxes, "TRASH") {
+		t.Errorf("the trashed message is not in TRASH: %v", boxes)
+	}
+}
+
+// The thread view is where a message is read now that threads open expanded,
+// so trashing from there is the common case. The reload that lands a second
+// later must not bring the message back: GetThread hands over the whole
+// conversation whatever mailbox each message sits in.
+func TestTrashFromTheThreadDropsTheMessageForGood(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	if len(tv.messages) != 2 {
+		t.Fatalf("thread has %d messages, want 2", len(tv.messages))
+	}
+
+	send(t, r, "d")
+
+	if _, boxes, _ := mail.Lookup("m2"); !contains(boxes, "TRASH") {
+		t.Errorf("the trashed message is not in TRASH: %v", boxes)
+	}
+	drain(t, r, tv.reload())
+	if len(tv.messages) != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Errorf("after the reload the thread holds %d messages, want only m1", len(tv.messages))
+	}
+}
+
+// Trashing the only message a thread has leaves nothing to look at, so the
+// thread closes and the row goes with it.
+func TestTrashFromTheThreadClosesItWhenNothingIsLeft(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Only one", time.Hour)
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	if _, ok := r.top().(*threadView); !ok {
+		t.Fatalf("top = %T, want the thread", r.top())
+	}
+
+	send(t, r, "d")
+
+	ml, ok := r.top().(*mailList)
+	if !ok {
+		t.Fatalf("after trash top = %T, want to be back on the list", r.top())
+	}
+	if got := len(ml.threads); got != 0 {
+		t.Errorf("the trashed thread is still in the list (%d rows)", got)
+	}
+	if r.undo == nil {
+		t.Fatal("trash from the thread offered no undo")
+	}
+
+	send(t, r, "z")
+	if _, boxes, _ := mail.Lookup("m1"); !contains(boxes, "INBOX") {
+		t.Errorf("after undo the provider lacks INBOX: %v", boxes)
+	}
+	if got := len(r.top().(*mailList).threads); got != 1 {
+		t.Errorf("undo did not put the row back (%d rows)", got)
+	}
 }

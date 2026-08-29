@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -54,6 +55,30 @@ type eventOpened struct {
 	event *model.Event
 	err   error
 }
+
+// composeLoaded carries the message a composer is about to open on: the one
+// being answered, or the draft being finished. The request comes back with it,
+// so the root can say what to do when there turns out to be nothing to open.
+type composeLoaded struct {
+	seq int
+	req composeRequest
+	msg *model.Message
+	err error
+}
+
+// submitted reports the outcome of a send or a draft save.
+type submitted struct {
+	what   string // "reply" or "draft"
+	queued bool
+	err    error
+}
+
+// composeClosed asks the root to take the composer off the stack. A screen
+// cannot pop itself -- the stack belongs to the root -- so it says so in a
+// message.
+type composeClosed struct{}
+
+func closeCompose() tea.Cmd { return func() tea.Msg { return composeClosed{} } }
 
 // applied reports the outcome of one Engine.Apply.
 type applied struct {
@@ -166,6 +191,137 @@ func (d Deps) openEvent(seq int, accountID, calRemote, remote string) tea.Cmd {
 		ev, err := d.Store.GetEvent(ctx, accountID, calRemote, remote)
 		return eventOpened{seq: seq, event: ev, err: err}
 	}
+}
+
+// loadCompose fetches the message a composer is about to open on, off the
+// update loop like every other store call.
+//
+// remote names it outright, which is what the thread view and the reader have;
+// a list row instead names a whole thread, and the message to answer is the
+// newest one in it that was actually sent.
+func (d Deps) loadCompose(seq int, req composeRequest) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		m, resolved, err := resolveCompose(ctx, d, req)
+		if err != nil {
+			return composeLoaded{seq: seq, req: req, err: err}
+		}
+		ensureText(ctx, d, m)
+		return composeLoaded{seq: seq, req: resolved, msg: m}
+	}
+}
+
+// resolveCompose finds the message the composer opens on, and says which kind
+// of composer that turns out to be.
+//
+// A reply to a conversation that already has an answer under way continues
+// that answer instead of starting a second one beside it: the draft is where
+// the earlier words are, and two half-written replies to one thread is not
+// something anybody meant to have. That is why the answer comes back with the
+// request it resolved to rather than the one that was asked -- and why the
+// header then reads "draft ·" rather than "reply ·", which is what tells you
+// the words already on screen are your own from earlier.
+func resolveCompose(ctx context.Context, d Deps, req composeRequest) (*model.Message, composeRequest, error) {
+	byRemote := func() (*model.Message, composeRequest, error) {
+		m, err := d.Store.GetMessage(ctx, req.account, req.remote)
+		return m, req, err
+	}
+	if req.draft {
+		if req.remote != "" {
+			return byRemote()
+		}
+		m, err := newestDraft(ctx, d, req.account, req.thread)
+		return m, req, err
+	}
+	if req.thread != "" {
+		if m, err := newestDraft(ctx, d, req.account, req.thread); err == nil {
+			req.draft = true
+			return m, req, nil
+		}
+	}
+	if req.remote != "" {
+		return byRemote()
+	}
+	m, err := newestSent(ctx, d, req.account, req.thread)
+	return m, req, err
+}
+
+// composeRequest is what the root worked out from the screen in focus before
+// the load went off.
+type composeRequest struct {
+	account string
+	// remote names the message outright. Empty means "work it out from the
+	// thread": the newest draft in it when draft is set, else the newest
+	// message that was actually sent.
+	remote string
+	thread string
+	draft  bool
+	all    bool
+}
+
+// newestSent is the message in a thread that a reply belongs under: the last
+// one that actually went somewhere.
+//
+// resolveCompose has already taken any draft out of the running by the time
+// this is reached -- a thread with one in it is continued, not replied to --
+// so in practice this is the newest message. The draft check stays because it
+// is what makes that sentence true wherever this is called from.
+func newestSent(ctx context.Context, d Deps, accountID, threadID string) (*model.Message, error) {
+	_, msgs, err := d.Store.GetThread(ctx, accountID, threadID, false)
+	if err != nil {
+		return nil, err
+	}
+	if len(msgs) == 0 {
+		return nil, model.ErrNotFound
+	}
+	// GetThread hands them back oldest first.
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if !msgs[i].Flags.Draft {
+			return &msgs[i], nil
+		}
+	}
+	return &msgs[len(msgs)-1], nil
+}
+
+// newestDraft is the unsent message a drafts row stands for. A row there is a
+// thread like any other -- the conversation the draft belongs to -- but what
+// enter is asking for is the draft in it, not the mail it answers.
+func newestDraft(ctx context.Context, d Deps, accountID, threadID string) (*model.Message, error) {
+	_, msgs, err := d.Store.GetThread(ctx, accountID, threadID, false)
+	if err != nil {
+		return nil, err
+	}
+	// GetThread hands them back oldest first.
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Flags.Draft {
+			return &msgs[i], nil
+		}
+	}
+	return nil, model.ErrNotFound
+}
+
+// sendFrom is the address a reply from this account goes out as. There is no
+// --from here: `mail reply` sends from the account that received the message,
+// and so does the composer.
+func (d Deps) sendFrom(account string) model.Address {
+	if d.Config != nil {
+		if a, ok := d.Config.Account(account); ok && strings.TrimSpace(a.Email) != "" {
+			return model.Address{Email: a.Email}
+		}
+	}
+	// The index carries the address too, which is what keeps this working
+	// against a store opened without a config -- in tests, and for an account
+	// whose name in config.toml has moved on.
+	if d.Store == nil {
+		return model.Address{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if a, err := d.Store.GetAccount(ctx, account); err == nil && a != nil {
+		return model.Address{Email: a.Email}
+	}
+	return model.Address{}
 }
 
 // ---------------------------------------------------------------------------

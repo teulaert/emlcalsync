@@ -48,6 +48,13 @@ type threadView struct {
 	// the automatic mark-read does not undo it while the cursor sits there.
 	holdUnread string
 
+	// gone are the messages triaged away from this screen. GetThread returns
+	// every message of a conversation whatever mailbox it now sits in -- which
+	// is right, a thread is not a mailbox -- so without this the reload that
+	// follows a trash by a second or two puts the message straight back, and
+	// the action looks like it did nothing.
+	gone map[string]bool
+
 	seq     int
 	loading bool
 	loadErr error
@@ -121,6 +128,10 @@ func (t *threadView) dropSelected() {
 	if t.cursor < 0 || t.cursor >= len(t.messages) {
 		return
 	}
+	if t.gone == nil {
+		t.gone = map[string]bool{}
+	}
+	t.gone[t.messages[t.cursor].RemoteID] = true
 	t.removed = append(t.removed, removedMsg{at: t.cursor, m: t.messages[t.cursor]})
 	t.messages = append(t.messages[:t.cursor], t.messages[t.cursor+1:]...)
 	if t.cursor >= len(t.messages) {
@@ -132,12 +143,26 @@ func (t *threadView) dropSelected() {
 	t.dirty, t.off = true, -1
 }
 
+// dropMessage removes one named message, wherever the cursor happens to sit.
+// It is the drop for an action taken a level deeper, in the reader: the
+// message being read is the one that goes, and the cursor lands on whatever
+// takes its place -- the next one down, the thread being newest first.
+func (t *threadView) dropMessage(remote string) {
+	i := t.indexOf(remote)
+	if i < 0 {
+		return
+	}
+	t.cursor = i
+	t.dropSelected()
+}
+
 func (t *threadView) restore() {
 	if len(t.removed) == 0 {
 		return
 	}
 	r := t.removed[len(t.removed)-1]
 	t.removed = t.removed[:len(t.removed)-1]
+	delete(t.gone, r.m.RemoteID)
 	if r.at > len(t.messages) {
 		r.at = len(t.messages)
 	}
@@ -171,7 +196,7 @@ func (t *threadView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 		if m := t.selected(); m != nil {
 			anchor, delta = m.RemoteID, t.off-t.startOf(t.cursor)
 		}
-		t.messages = msg.messages
+		t.messages = t.keep(msg.messages)
 		slices.Reverse(t.messages)
 		if msg.thread != nil {
 			t.subject = msg.thread.Subject
@@ -207,6 +232,20 @@ func (t *threadView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 // place chooses where reading starts: the newest unread message, or the newest
 // one of all when the whole thread has been read. Both are at or near the top,
 // the messages being newest first.
+// keep drops the messages this screen has triaged away from a fresh load.
+func (t *threadView) keep(msgs []model.Message) []model.Message {
+	if len(t.gone) == 0 {
+		return msgs
+	}
+	out := msgs[:0]
+	for _, m := range msgs {
+		if !t.gone[m.RemoteID] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 func (t *threadView) place() {
 	for i := range t.messages {
 		if t.messages[i].Flags.Unread {

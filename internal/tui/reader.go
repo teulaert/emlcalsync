@@ -52,6 +52,19 @@ func (r *reader) reload() tea.Cmd {
 	return r.d.loadBody(r.seq, r.accountID, r.remote)
 }
 
+// show swaps the reader onto another message, keeping the screen where it is.
+// Following a triage to the next message in the thread is the one thing that
+// changes what an open reader shows; everything else pushes a new one.
+func (r *reader) show(accountID, remote string) tea.Cmd {
+	r.accountID, r.remote = accountID, remote
+	r.msg, r.body, r.loadErr = nil, "", nil
+	if r.ready {
+		r.vp.SetContent("")
+		r.vp.GotoTop()
+	}
+	return r.reload()
+}
+
 func (r *reader) targets() []target {
 	if r.msg == nil {
 		return nil

@@ -23,6 +23,8 @@ type keymap struct {
 	Trash       key.Binding
 	ToggleRead  key.Binding
 	Star        key.Binding
+	Reply       key.Binding
+	ReplyAll    key.Binding
 	Account     key.Binding
 	Mailbox     key.Binding
 	Refresh     key.Binding
@@ -52,6 +54,8 @@ func defaultKeys() keymap {
 		Trash:      key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "trash")),
 		ToggleRead: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "read / unread")),
 		Star:       key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "star")),
+		Reply:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reply")),
+		ReplyAll:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "reply to all")),
 		Account:    key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "account filter")),
 		Mailbox:    key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "mailbox")),
 		Refresh:    key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "refresh")),
@@ -66,7 +70,7 @@ func (k keymap) helpLines() [][2]string {
 		{"j / k  ↓ ↑", "move"},
 		{"g / G", "top / bottom"},
 		{"ctrl+f / ctrl+b", "page down / up"},
-		{"enter", "open"},
+		{"enter", "open (a draft: reopen it in the composer)"},
 		{"J / K", "scroll one line (an expanded thread)"},
 		{"t", "thread: expanded text / one row per message"},
 		{"esc / q", "back (quit at the top)"},
@@ -79,11 +83,17 @@ func (k keymap) helpLines() [][2]string {
 		{"s", "toggle star"},
 		{"z", "undo the last action"},
 		{"", ""},
+		{"r", "reply (carries on the thread's draft, if there is one)"},
+		{"a", "reply to all"},
+		{"  ctrl+d", "send it"},
+		{"  ctrl+s", "save it as a draft on the server"},
+		{"  ctrl+x", "delete the draft being edited (twice)"},
+		{"  tab", "next field"},
+		{"  esc", "cancel (twice, once something is written)"},
+		{"", ""},
 		{"A", "cycle the account filter"},
 		{"M", "cycle the mailbox (inbox / all / flagged / drafts / sent / archive / trash / spam)"},
 		{"R", "refresh now (and nudge the sync daemon)"},
 		{"?", "this help"},
-		{"", ""},
-		{"r", "reply — not implemented yet"},
 	}
 }

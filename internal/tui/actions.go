@@ -2,12 +2,14 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 	"github.com/teulaert/emlcalsync/internal/store"
 	"github.com/teulaert/emlcalsync/internal/sync"
 )
@@ -226,6 +228,55 @@ func (d Deps) apply(label string, ops []accountOp, undo *undoRecord) tea.Cmd {
 			res.undo.rewrite(res.renames)
 		}
 		return res
+	}
+}
+
+// submit sends a composed message, or stores it as a draft.
+//
+// It follows `mail send`: the reply goes out first, and only once it really
+// has -- not when it was merely queued -- is the message it answers marked
+// answered and the stored draft it was written in replaces trashed. Neither
+// of those may fail the send, so both are logged and dropped.
+//
+// replaces is the draft the new message supersedes, because no provider can
+// update a draft in place: saving or sending one creates the new message and
+// leaves the old one behind unless it is cleared up here.
+func (d Deps) submit(what, account string, op sync.Op, orig *model.Message, replaces string) tea.Cmd {
+	return func() tea.Msg {
+		if d.Engine == nil {
+			return submitted{what: what, err: errors.New("no sync engine")}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		res, err := d.Engine.Apply(ctx, account, op)
+		if err != nil {
+			// A submission that never left the machine comes back queued, not
+			// as an error. Being offline *here* means the connection dropped
+			// mid-request, so the engine will not replay it: the provider may
+			// already have the message, and saying "queued" would be a lie.
+			if provider.IsOffline(err) {
+				err = fmt.Errorf("%w — the connection dropped mid-request, so it was not queued; "+
+					"check your sent mail before sending again", err)
+			}
+			return submitted{what: what, err: err}
+		}
+		if !res.Queued && orig != nil {
+			var flag sync.Op
+			flag.Kind = sync.OpFlags
+			flag.IDs = []string{orig.RemoteID}
+			flag.Flags.Set.Answered = true
+			if _, err := d.Engine.Apply(ctx, orig.AccountID, flag); err != nil {
+				d.log().Warn("mark answered", "id", orig.PublicID(), "err", err)
+			}
+		}
+		if !res.Queued && replaces != "" && replaces != res.RemoteID {
+			if _, err := d.Engine.Apply(ctx, account,
+				sync.Op{Kind: sync.OpTrash, IDs: []string{replaces}}); err != nil {
+				d.log().Warn("trash the draft it replaces",
+					"id", model.MessagePublicID(account, replaces), "err", err)
+			}
+		}
+		return submitted{what: what, queued: res.Queued}
 	}
 }
 

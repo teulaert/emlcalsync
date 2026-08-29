@@ -235,6 +235,13 @@ first, with `t` for the one-row-per-message index; `M` cycles the mailbox
 (inbox, all, flagged, drafts, sent, archive, trash, spam), so unsent drafts are
 a view of their own and are marked `D` wherever they turn up in a thread;
 `enter` on an
-event opens it, where `y` / `n` / `t` answer the invitation. Not yet: composing
+event opens it, where `y` / `n` / `t` answer the invitation. `r` replies to the
+message in focus and `a` replies to everyone: the composer opens with the
+recipients, the subject and the quoted original filled in, `ctrl+d` sends it
+and `ctrl+s` saves it as a draft on the server. `enter` on a draft reopens it
+in the composer to finish and send — straight off the row in the drafts
+mailbox, so finishing one is `M` to drafts, `enter`, `ctrl+d`. Replying to a
+thread you have already half answered carries that draft on instead of starting
+a second one, and `ctrl+x` in the composer deletes the draft being edited. Not yet: forwarding or new mail
 from the TUI, creating or editing events from the TUI, embeddings for semantic
 search, contacts.

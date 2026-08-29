@@ -2,16 +2,15 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"io"
 	stdmime "mime"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/teulaert/emlcalsync/internal/compose"
 	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
@@ -358,27 +357,8 @@ func mailCompose(cmd *cobra.Command, app *App, f *mailComposeFlags, replyID stri
 	out.to = draft.To
 	out.subject = draft.Subject
 	out.from = draft.From.Email
-	out.recipients = envelopeRecipients(draft)
+	out.recipients = compose.Envelope(draft)
 	return out, nil
-}
-
-// envelopeRecipients is every address the message must actually be delivered
-// to: To, Cc and Bcc together, deduplicated. Bcc is included here precisely
-// because it is not in the message bytes.
-func envelopeRecipients(d *mime.Draft) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, group := range [][]model.Address{d.To, d.Cc, d.Bcc} {
-		for _, a := range group {
-			e := strings.TrimSpace(a.Email)
-			if e == "" || seen[strings.ToLower(e)] {
-				continue
-			}
-			seen[strings.ToLower(e)] = true
-			out = append(out, e)
-		}
-	}
-	return out
 }
 
 // mailReplyContext fills subject, recipients, threading headers and the quoted
@@ -390,73 +370,9 @@ func mailReplyContext(ctx context.Context, app *App, replyID string, acct *confi
 	if err != nil {
 		return nil, err
 	}
-
-	if draft.Subject == "" {
-		s := strings.TrimSpace(orig.Subject)
-		if strings.HasPrefix(strings.ToLower(s), "re:") {
-			draft.Subject = s
-		} else {
-			draft.Subject = "Re: " + s
-		}
-	}
-
-	// Recipients: Reply-To when the sender asked for it, else the sender.
-	if len(draft.To) == 0 {
-		if len(orig.ReplyTo) > 0 {
-			draft.To = append(draft.To, orig.ReplyTo...)
-		} else if orig.From.Email != "" {
-			draft.To = append(draft.To, orig.From)
-		}
-	}
-	if all {
-		mine := map[string]bool{strings.ToLower(acct.Email): true, strings.ToLower(from.Email): true}
-		draft.To = mailMergeAddresses(draft.To, orig.To, mine)
-		draft.Cc = mailMergeAddresses(draft.Cc, orig.Cc, mine)
-	}
-
-	draft.InReplyTo = orig.MessageIDHeader
-	draft.References = append(append([]string{}, orig.References...), orig.MessageIDHeader)
-
-	draft.TextBody = text + "\n\n" + mailQuote(orig, app.Location())
+	compose.Reply(draft, orig, all, []string{acct.Email, from.Email})
+	draft.TextBody = text + "\n\n" + compose.Quote(orig, app.Location())
 	return orig, nil
-}
-
-// mailMergeAddresses appends add to base, dropping own addresses and
-// duplicates (case-insensitive on the address).
-func mailMergeAddresses(base, add []model.Address, skip map[string]bool) []model.Address {
-	seen := map[string]bool{}
-	for _, a := range base {
-		seen[strings.ToLower(a.Email)] = true
-	}
-	for _, a := range add {
-		k := strings.ToLower(a.Email)
-		if k == "" || seen[k] || skip[k] {
-			continue
-		}
-		seen[k] = true
-		base = append(base, a)
-	}
-	return base
-}
-
-// mailQuote renders the attribution line and the quoted original body.
-func mailQuote(orig *model.Message, loc *time.Location) string {
-	when := orig.Date
-	if when.IsZero() {
-		when = orig.Received
-	}
-	who := orig.From.Name
-	if who == "" {
-		who = orig.From.Email
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "On %s, %s wrote:\n", when.In(loc).Format("Mon, 02 Jan 2006 at 15:04"), who)
-	for _, line := range strings.Split(strings.TrimRight(mime.StripQuotes(orig.TextBody), "\n"), "\n") {
-		b.WriteString("> ")
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-	return b.String()
 }
 
 // mailSubmit applies a draft/send op and prints the result row.
