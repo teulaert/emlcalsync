@@ -29,6 +29,7 @@ type keymap struct {
 	Mailbox     key.Binding
 	Refresh     key.Binding
 	Undo        key.Binding
+	AI          key.Binding
 	Help        key.Binding
 }
 
@@ -60,6 +61,7 @@ func defaultKeys() keymap {
 		Mailbox:    key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "mailbox")),
 		Refresh:    key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "refresh")),
 		Undo:       key.NewBinding(key.WithKeys("z"), key.WithHelp("z", "undo")),
+		AI:         key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "ask the AI")),
 		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	}
 }
@@ -82,6 +84,8 @@ func (k keymap) helpLines() [][2]string {
 		{"m", "toggle read / unread"},
 		{"s", "toggle star"},
 		{"z", "undo the last action"},
+		{"ctrl+g", "ask the AI about the conversation: a summary, or a question typed at the prompt"},
+		{"  r", "on the summary: reply to the conversation"},
 		{"", ""},
 		{"r", "reply (carries on the thread's draft, if there is one)"},
 		{"a", "reply to all"},

@@ -747,6 +747,9 @@ emlcal gc [--purge-deleted]                   remove blobs no row references
 emlcal export --mbox f | --maildir dir [--account A]
 emlcal service install [--timer] | uninstall
 emlcal skill                                  prints SKILL.md for agents
+
+AI (needs an [ai] model; not on the allow list — the model must not call itself)
+emlcal ai summarize <id> [--ask "…"] [--no-lookups]   summary or an answer, JSON when piped
 emlcal completion zsh|bash|fish
 ```
 
@@ -973,7 +976,8 @@ partial pages, and crashes mid-batch.
 | 7 | `tui`: unified mail list, thread, reader, agenda, event; archive/trash/mark/star with undo | the archive is usable by a person, not only an agent |
 | 8 | `tui` reply: `r` / `a` open a composer over the message in focus, send or save as a draft | a person can answer their mail without leaving the archive |
 | 9 | `internal/ai` + Ollama, `ctrl+g` in the composer drafts the reply from the thread; the read commands are its tools | a local model can read the archive and write for the person, through one layer the CLI can share later |
-| later | AI from the CLI (`ai draft`, `ai summarize`), summaries in the reader, cloud backends, forwarding and new mail from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
+| 10 | `ctrl+g` on a conversation summarizes it or answers a question, `r` replies from there; `ai summarize` on the CLI | a person can act on mail without reading it, and an agent can ask the local model the same |
+| later | `ai draft` on the CLI, persisted summaries for a list digest, cloud backends, forwarding and new mail from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
 
 Phase 1 is deliberately Fastmail-first: an API token, no consent screens, and
 push support make it the fastest path to a real archive you can query.
@@ -1308,6 +1312,27 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     with its `tool_calls`, results as `role: tool` with `tool_name`.
     `--limit` defaults to 20 for a model that did not say, not the
     command's 50: it has to read every row it is given.
+  - **`ctrl+g` is the AI key everywhere.** On a list row, a thread or a
+    message it pushes a summary screen that opens with the same prompt the
+    composer uses -- enter alone for the summary, anything typed is a
+    question about the conversation -- and streams the answer into a
+    viewport; `r` from there replies to the thread, which is the point of
+    the feature: read four lines, answer, never open the messages. `ctrl+g`
+    on the summary asks again. The summary has a fixed shape (About / Asked
+    of you / Facts / Open, at most twelve lines) so the eye lands in the
+    same place every time; a question is answered instead, with the message
+    it rests on. Answers are remembered per conversation as it stands --
+    keyed on the newest non-draft message and the question -- in an
+    in-memory cache on the root, so going back and forth is free and a new
+    message in the thread is a new conversation. Persisting them so the
+    list can show summaries is the later "digest" step. The composer's
+    draft and the summary share `Deps.runModel`: one Cmd that reads the
+    thread off disk, asks the model its window, builds the request, runs
+    `ai.Run` with the tools and streams `modelEvent`s back -- text, resets,
+    lookups, done. `emlcal ai summarize <id> [--ask]` is the same from the
+    command line; `ai` is deliberately not on the read allow list, because
+    that list is what the model gets as tools and a model that can call
+    the model is a loop.
   - The shared half lives in **`internal/compose`**: subject, recipients,
     threading headers, quoting, address parsing and the SMTP envelope. It was
     all in `internal/cli` while `mail reply` was the only composer; the TUI

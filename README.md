@@ -243,16 +243,21 @@ in the composer to finish and send — straight off the row in the drafts
 mailbox, so finishing one is `M` to drafts, `enter`, `ctrl+d`. Replying to a
 thread you have already half answered carries that draft on instead of starting
 a second one, and `ctrl+x` in the composer deletes the draft being edited.
-With a model configured (see below), `ctrl+g` in the composer drafts the reply
-for you: it asks for instructions on the status line — or just `enter` to have
-it read the thread and answer — and streams the draft in above the quote,
-where you edit and send it like anything you typed. Not yet: forwarding or new
-mail from the TUI, creating or editing events from the TUI, AI from the CLI,
-summaries, embeddings for semantic search, contacts.
+With a model configured (see below), `ctrl+g` is the AI key: on a
+conversation it summarizes it — or answers a question you type — on a screen
+of its own, from which `r` replies; in the composer it drafts the reply, with
+instructions or without. Either way the model reads the whole thread and can
+look other mail and the calendar up first. Not yet: forwarding or new mail
+from the TUI, creating or editing events from the TUI, embeddings for
+semantic search, contacts.
 
-## AI drafting
+## AI
 
-The TUI can hand a reply to a language model. Only a local Ollama is supported
+The TUI can hand a conversation to a language model: `ctrl+g` on a thread
+summarizes it in four fixed lines (About / Asked of you / Facts / Open) or
+answers a question you type at the prompt, and `r` from there replies; `ctrl+g`
+in the composer drafts the reply. `emlcal ai summarize <id> [--ask "…"]` is
+the same from the command line, JSON when piped. Only a local Ollama is supported
 so far; the layer behind it (`internal/ai`) is one small interface, so a
 cloud backend is a config block and one switch case away. Nothing is sent
 anywhere unless a model is configured, and then only to the server you name.

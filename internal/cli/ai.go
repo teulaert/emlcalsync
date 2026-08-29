@@ -15,6 +15,9 @@ import (
 // backend has to be added, the way Factory picks providers from an account's
 // blocks; Validate has already refused a backend it does not know.
 func (a *App) AI() (ai.Client, error) {
+	if a.AIClient != nil {
+		return a.AIClient, nil
+	}
 	cfg, err := a.Config()
 	if err != nil {
 		return nil, err

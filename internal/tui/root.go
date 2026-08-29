@@ -67,11 +67,15 @@ type root struct {
 	undo      *undoRecord
 	showHelp  bool
 	quitting  bool
+
+	// answers is what the model has said about conversations this session,
+	// so a summary looked at twice is asked for once.
+	answers *answerCache
 }
 
 func newRoot(d Deps) *root {
 	accounts := d.Accounts
-	r := &root{d: d, keys: defaultKeys(), threadExpanded: true}
+	r := &root{d: d, keys: defaultKeys(), threadExpanded: true, answers: newAnswerCache()}
 	r.mail = []screen{newMailList(d, accounts)}
 	r.cal = []screen{newAgenda(d)}
 	return r
@@ -156,8 +160,9 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case submitted:
 		return r, r.onSubmitted(msg)
 
-	case composeClosed:
-		if _, ok := r.top().(*composeView); ok {
+	case screenClosed:
+		switch r.top().(type) {
+		case *composeView, *summaryView:
 			r.pop()
 		}
 		return r, nil
@@ -298,6 +303,9 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, r.keys.ReplyAll):
 		return r, r.startReply(true)
+
+	case key.Matches(msg, r.keys.AI):
+		return r, r.startSummary()
 	}
 
 	// RSVP only means something on an event.
@@ -381,10 +389,48 @@ func (r *root) startReply(all bool) tea.Cmd {
 			return nil
 		}
 		req.account, req.remote, req.thread = s.msg.AccountID, s.msg.RemoteID, s.msg.ThreadID
+	case *summaryView:
+		// The point of the summary: read four lines, answer the thread.
+		req.account, req.thread = s.account, s.threadID
 	default:
 		return nil
 	}
 	return r.startCompose(req)
+}
+
+// startSummary is ctrl+g anywhere but the composer: it asks the model about
+// the conversation in focus -- a summary, or a question typed at the prompt
+// -- on a screen of its own. On the summary screen itself it opens the
+// prompt again.
+func (r *root) startSummary() tea.Cmd {
+	if s, ok := r.top().(*summaryView); ok {
+		s.ask()
+		return nil
+	}
+	if r.d.AI == nil {
+		r.note(errNoAI.Error())
+		return nil
+	}
+	var account, thread, subject string
+	switch s := r.top().(type) {
+	case *mailList:
+		t := s.selected()
+		if t == nil {
+			return nil
+		}
+		account, thread, subject = t.AccountID, t.ThreadID, t.Subject
+	case *threadView:
+		account, thread, subject = s.accountID, s.threadID, s.subject
+	case *reader:
+		if s.msg == nil {
+			return nil
+		}
+		account, thread, subject = s.msg.AccountID, s.msg.ThreadID, s.msg.Subject
+	default:
+		return nil
+	}
+	r.note("")
+	return r.push(newSummaryView(r.d, r.answers, account, thread, subject))
 }
 
 // startCompose loads the message and opens a composer on it.

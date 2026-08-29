@@ -73,12 +73,12 @@ type submitted struct {
 	err    error
 }
 
-// composeClosed asks the root to take the composer off the stack. A screen
-// cannot pop itself -- the stack belongs to the root -- so it says so in a
-// message.
-type composeClosed struct{}
+// screenClosed asks the root to take the screen on top off the stack. A
+// screen cannot pop itself -- the stack belongs to the root -- so it says so
+// in a message. The composer and the summary screen use it.
+type screenClosed struct{}
 
-func closeCompose() tea.Cmd { return func() tea.Msg { return composeClosed{} } }
+func closeScreen() tea.Cmd { return func() tea.Msg { return screenClosed{} } }
 
 // applied reports the outcome of one Engine.Apply.
 type applied struct {

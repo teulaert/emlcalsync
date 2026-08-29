@@ -268,7 +268,7 @@ func (c *composeView) capturingKeys() bool { return true }
 
 func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 	c.ensure(w, h)
-	if ev, ok := msg.(draftEvent); ok {
+	if ev, ok := msg.(modelEvent); ok {
 		return c, c.onDraft(ev)
 	}
 	press, isKey := msg.(tea.KeyPressMsg)
@@ -351,7 +351,7 @@ func (c *composeView) moveFocus(d int) {
 // stored draft is left exactly as it was: cancelling is not deleting.
 func (c *composeView) cancel() tea.Cmd {
 	if !c.edited() || c.pending == pendingDiscard {
-		return closeCompose()
+		return closeScreen()
 	}
 	c.pending = pendingDiscard
 	return nil

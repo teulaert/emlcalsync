@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/teulaert/emlcalsync/internal/ai"
 	"github.com/teulaert/emlcalsync/internal/blob"
 	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/model"
@@ -38,6 +39,9 @@ type App struct {
 	OpenBrowser func(url string) error
 	// Progress receives sync progress events (set by the sync command).
 	Progress func(sync.ProgressEvent)
+	// AIClient, when set, is the model; tests stand one in. Otherwise the
+	// [ai] table decides.
+	AIClient ai.Client
 
 	// Global flags, bound in root.go.
 	ConfigPath string

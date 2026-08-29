@@ -212,3 +212,14 @@ func moveOutOfInbox(t *testing.T, d Deps, account, remote string) {
 		t.Fatalf("UpsertMessage %s: %v", remote, err)
 	}
 }
+
+// cmdBatch runs a command expected to be a batch and returns its parts, so a
+// test can drive a streaming generation by hand.
+func cmdBatch(t *testing.T, cmd tea.Cmd) []tea.Cmd {
+	t.Helper()
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("not a batch: %T", cmd())
+	}
+	return batch
+}

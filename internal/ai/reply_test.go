@@ -101,7 +101,7 @@ func TestReplyPromptSkipsDraftsAndKeepsTheAnswered(t *testing.T) {
 	if strings.Contains(user, "half een antwoord") {
 		t.Errorf("a draft in the thread should not be shown as part of the exchange:\n%s", user)
 	}
-	if !strings.Contains(user, "The message being answered ---\nFrom: anna") {
+	if !strings.Contains(user, "The message being answered ---\nId: work:m1\nFrom: anna") {
 		t.Errorf("the message answered is not marked:\n%s", user)
 	}
 }
@@ -167,5 +167,17 @@ func TestCleanText(t *testing.T) {
 		if got := CleanText(in); got != want {
 			t.Errorf("CleanText(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The tools take ids, so the model has to be shown them.
+func TestRenderedMessagesCarryTheirIds(t *testing.T) {
+	req := ReplyPrompt(ReplyInput{Thread: []model.Message{msg("m1", "anna", "hoi", 0)}})
+	if !strings.Contains(req.Messages[1].Content, "Id: work:m1\n") {
+		t.Errorf("no id in:\n%s", req.Messages[1].Content)
+	}
+	req = SummaryPrompt(SummaryInput{Thread: []model.Message{msg("m1", "anna", "hoi", 0)}})
+	if !strings.Contains(req.Messages[1].Content, "Id: work:m1\n") {
+		t.Errorf("no id in:\n%s", req.Messages[1].Content)
 	}
 }

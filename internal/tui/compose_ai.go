@@ -8,12 +8,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/teulaert/emlcalsync/internal/ai"
 	"github.com/teulaert/emlcalsync/internal/mime"
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // The composer's AI draft: ctrl+g asks for instructions on the status line,
@@ -25,16 +27,20 @@ import (
 //
 // The model call runs where every other blocking call runs: in a tea.Cmd,
 // off the update loop. It is the one long-running one, so it is cancellable
-// (esc) and its output arrives piecemeal, each piece a draftEvent read off a
+// (esc) and its output arrives piecemeal, each piece a modelEvent read off a
 // channel by the next Cmd in the chain. The events carry the seq of the
 // generation they belong to, so a stopped generation's stragglers are
 // ignored, the same way stale loads are everywhere else.
 
-// draftEvent is one step of a generation: a piece of text, a lookup the
-// model asked for, or the end.
-type draftEvent struct {
+// modelEvent is one step of a generation: a piece of text, a lookup the
+// model asked for, or the end. The composer's draft and the summary screen
+// read the same events off the same kind of channel.
+type modelEvent struct {
 	seq  int
 	text string
+	// final is the whole answer, on the done event: what Run returned, which
+	// is what the text pieces added up to unless a lookup reset them.
+	final string
 	// reset says the text so far was a lead-in to a lookup, not the draft.
 	reset bool
 	// note is what the model is doing, for the status line; noteSet tells
@@ -49,7 +55,7 @@ type draftEvent struct {
 type assistState struct {
 	seq    int
 	cancel context.CancelFunc
-	events <-chan draftEvent
+	events <-chan modelEvent
 	// before is the body as it was, put back when the generation is stopped
 	// or fails: a draft that did not arrive must not have taken anything.
 	before string
@@ -127,7 +133,7 @@ func (c *composeView) startAssist(instructions string) tea.Cmd {
 	own, quoted := c.split()
 	ctx, cancel := context.WithCancel(context.Background())
 	c.assistSeq++
-	ch := make(chan draftEvent, 64)
+	ch := make(chan modelEvent, 64)
 	c.assist = &assistState{
 		seq:    c.assistSeq,
 		cancel: cancel,
@@ -146,7 +152,7 @@ func (c *composeView) startAssist(instructions string) tea.Cmd {
 		Written:      own,
 		Loc:          c.d.loc(),
 	}
-	return tea.Batch(c.d.draftReply(ctx, c.assist.seq, c.account, c.threadID, in, ch), nextDraft(ch))
+	return tea.Batch(c.d.draftReply(ctx, c.assist.seq, c.account, c.threadID, in, ch), nextEvent(ch))
 }
 
 // stopAssist is esc while a draft is arriving: the generation is cancelled
@@ -161,7 +167,7 @@ func (c *composeView) stopAssist() {
 }
 
 // onDraft folds one event into the body.
-func (c *composeView) onDraft(ev draftEvent) tea.Cmd {
+func (c *composeView) onDraft(ev modelEvent) tea.Cmd {
 	a := c.assist
 	if a == nil || ev.seq != a.seq {
 		return nil // a generation that was stopped, still winding down
@@ -193,12 +199,12 @@ func (c *composeView) onDraft(ev draftEvent) tea.Cmd {
 			a.text.WriteString(ev.text)
 			c.body.InsertString(ev.text)
 		}
-		return nextDraft(a.events)
+		return nextEvent(a.events)
 	}
 
 	c.assist = nil
 	a.cancel()
-	text := ai.CleanText(a.text.String())
+	text := ai.CleanText(ev.final)
 	if text == "" {
 		c.body.SetValue(a.before)
 		c.body.MoveToBegin()
@@ -249,9 +255,9 @@ func lookupNote(call ai.ToolCall) string {
 	return strings.Join(parts, " ")
 }
 
-// nextDraft waits for the next event of a generation. It returns nil once
+// nextEvent waits for the next event of a generation. It returns nil once
 // the channel is closed, which ends the chain.
-func nextDraft(ch <-chan draftEvent) tea.Cmd {
+func nextEvent(ch <-chan modelEvent) tea.Cmd {
 	return func() tea.Msg {
 		ev, ok := <-ch
 		if !ok {
@@ -261,53 +267,123 @@ func nextDraft(ch <-chan draftEvent) tea.Cmd {
 	}
 }
 
-// draftReply is the Cmd that runs a generation: it reads the thread, asks the
-// model its window, builds the prompt and streams the model's answer into ch
-// as draftEvents, then a final one saying it is done or why not, and closes
-// ch.
+// draftReply runs the reply draft: the thread comes off disk, the prompt is
+// built round it and the model's answer streams back as modelEvents.
 //
 // The thread comes off disk here rather than being carried by the composer,
 // which only ever held the one message it opened on; a stored draft being
 // finished holds none at all, only the thread id. When the thread cannot be
 // read the message in hand is what the model gets, which is still a reply.
-func (d Deps) draftReply(ctx context.Context, seq int, account, thread string, in ai.ReplyInput, ch chan<- draftEvent) tea.Cmd {
+func (d Deps) draftReply(ctx context.Context, seq int, account, thread string, in ai.ReplyInput, ch chan<- modelEvent) tea.Cmd {
+	return d.runModel(ctx, seq, modelJob{
+		what: "draft", account: account, thread: thread,
+		build: func(msgs []model.Message, window int, lookups bool) ai.Request {
+			if len(msgs) > 0 {
+				in.Thread = msgs
+			}
+			in.ContextWindow, in.Lookups = window, lookups
+			return ai.ReplyPrompt(in)
+		},
+	}, ch)
+}
+
+// modelJob is one thing to ask the model about a conversation.
+type modelJob struct {
+	what            string // for the log: "draft", "summary"
+	account, thread string
+	// build makes the request out of the thread as read off disk (empty when
+	// it could not be), the model's window and whether it has tools.
+	build func(msgs []model.Message, window int, lookups bool) ai.Request
+	// key and cache, when set, remember the answer for the thread as it is
+	// now: the same question about the same messages is not asked twice.
+	key   func(msgs []model.Message) string
+	cache *answerCache
+}
+
+// runModel is the Cmd behind every generation: it reads the thread, asks the
+// model its window, builds the request and streams the answer into ch as
+// modelEvents -- text, lookups, resets -- then a final one saying it is done
+// or why not, and closes ch. Everything blocking happens here, off the
+// update loop; the screen only ever reads events.
+func (d Deps) runModel(ctx context.Context, seq int, job modelJob, ch chan<- modelEvent) tea.Cmd {
 	return func() tea.Msg {
 		defer close(ch)
-		send := func(ev draftEvent) {
+		send := func(ev modelEvent) {
 			ev.seq = seq
 			select {
 			case ch <- ev:
 			case <-ctx.Done():
 			}
 		}
-		if d.Store != nil && thread != "" {
+		var msgs []model.Message
+		if d.Store != nil && job.thread != "" {
 			lctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			_, msgs, err := d.Store.GetThread(lctx, account, thread, false)
+			_, got, err := d.Store.GetThread(lctx, job.account, job.thread, false)
 			cancel()
 			if err != nil {
-				d.log().Warn("ai draft: read thread", "account", account, "thread", thread, "err", err)
+				d.log().Warn("ai "+job.what+": read thread", "account", job.account, "thread", job.thread, "err", err)
 			} else {
-				in.Thread = msgs
+				msgs = got
 			}
 		}
-		in.ContextWindow = d.AI.ContextWindow() // may go to the server; that is why it is here
-		in.Lookups = d.Tools != nil
-		req := ai.ReplyPrompt(in)
-		_, err := ai.Run(ctx, d.AI, req, d.Tools, ai.Observer{
-			Text:    func(s string) { send(draftEvent{text: s}) },
-			Discard: func() { send(draftEvent{reset: true}) },
+		var key string
+		if job.key != nil && job.cache != nil {
+			key = job.key(msgs)
+			if out, ok := job.cache.get(key); ok {
+				send(modelEvent{text: out})
+				send(modelEvent{done: true, final: out})
+				return nil
+			}
+		}
+		window := d.AI.ContextWindow() // may go to the server; that is why it is here
+		req := job.build(msgs, window, d.Tools != nil)
+		out, err := ai.Run(ctx, d.AI, req, d.Tools, ai.Observer{
+			Text:    func(s string) { send(modelEvent{text: s}) },
+			Discard: func() { send(modelEvent{reset: true}) },
 			Lookup: func(call ai.ToolCall) {
-				d.log().Info("ai draft: lookup", "tool", call.Name, "args", string(call.Arguments))
-				send(draftEvent{note: "· " + lookupNote(call), noteSet: true})
+				d.log().Info("ai "+job.what+": lookup", "tool", call.Name, "args", string(call.Arguments))
+				send(modelEvent{note: "· " + lookupNote(call), noteSet: true})
 			},
 			Result: func(call ai.ToolCall, out string, err error) {
 				if err != nil {
-					d.log().Warn("ai draft: lookup failed", "tool", call.Name, "err", err)
+					d.log().Warn("ai "+job.what+": lookup failed", "tool", call.Name, "err", err)
 				}
-				send(draftEvent{note: "· " + lookupNote(call) + " ✓ · thinking", noteSet: true})
+				send(modelEvent{note: "· " + lookupNote(call) + " ✓ · thinking", noteSet: true})
 			},
 		})
-		send(draftEvent{done: true, err: err})
+		if err == nil && key != "" {
+			job.cache.put(key, out)
+		}
+		send(modelEvent{done: true, final: out, err: err})
 		return nil
 	}
+}
+
+// answerCache remembers what the model said about a conversation as it was,
+// so going back and forth between the list and a summary does not ask
+// again. It is written from Cmd goroutines, hence the lock, and it is
+// bounded: a session is not that long.
+type answerCache struct {
+	mu sync.Mutex
+	m  map[string]string
+}
+
+const answerCacheMax = 200
+
+func newAnswerCache() *answerCache { return &answerCache{m: map[string]string{}} }
+
+func (c *answerCache) get(key string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, ok := c.m[key]
+	return v, ok
+}
+
+func (c *answerCache) put(key, v string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.m) >= answerCacheMax {
+		c.m = map[string]string{}
+	}
+	c.m[key] = v
 }
