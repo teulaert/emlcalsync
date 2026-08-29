@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	gomessage "github.com/emersion/go-message"
@@ -16,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/teulaert/emlcalsync/internal/blob"
+	"github.com/teulaert/emlcalsync/internal/doctext"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
@@ -535,6 +537,117 @@ func mailResolveThreadID(ctx context.Context, app *App, st *store.Store, id stri
 // ---------------------------------------------------------------------------
 // mail attachment
 
+// mailAttachmentBytes finds one attachment of a message by part path or file
+// name and returns its bytes: from the archive when the raw message is there,
+// from the provider when only the envelope was kept.
+func mailAttachmentBytes(ctx context.Context, app *App, id, which string) (*model.Message, *model.Attachment, []byte, error) {
+	_, msg, st, err := mailLoadMessage(ctx, app, id)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	atts, err := st.ListAttachments(ctx, msg.ID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var att *model.Attachment
+	for i := range atts {
+		if atts[i].PartPath == which || strings.EqualFold(atts[i].Filename, which) {
+			att = &atts[i]
+			break
+		}
+	}
+	if att == nil {
+		return nil, nil, nil, output.Errorf(output.ExitNotFound, "message %s has no attachment %q: %w",
+			id, which, model.ErrNotFound)
+	}
+	var data []byte
+	if msg.RawComplete {
+		raw, err := mailRawBytes(ctx, app, msg)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		data, _, _, err = mime.PartContent(raw, att.PartPath)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	} else {
+		eng, err := app.Engine()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		ref := att.RemoteRef
+		if ref == "" {
+			ref = att.PartPath
+		}
+		data, err = eng.FetchAttachment(ctx, msg.AccountID, msg.RemoteID, ref)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return msg, att, data, nil
+}
+
+// mailAttachmentTextOut is the JSON shape of `mail attachment text`.
+type mailAttachmentTextOut struct {
+	ID          string `json:"id"`
+	Part        string `json:"part"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"content_type"`
+	Chars       int    `json:"chars"`
+	Truncated   bool   `json:"truncated"`
+	Text        string `json:"text"`
+}
+
+func mailAttachmentTextCmd(app *App) *cobra.Command {
+	var maxChars int
+	cmd := &cobra.Command{
+		Use:   "text <id> <part|filename>",
+		Short: "Read one attachment as text",
+		Long: `Print the text of one attachment: a PDF's words, an HTML file's prose, a
+text file as it is. The second argument is the part path (as printed by
+` + "`mail attachment list`" + `) or the file name. A scanned PDF holds no text and
+says so; images and other binary types are not readable this way.
+
+This is how an invoice's amount, which lives in the PDF and not in the mail,
+is read -- by a person, an agent, or the model summarizing the thread.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			msg, att, data, err := mailAttachmentBytes(cmd.Context(), app, args[0], args[1])
+			if err != nil {
+				return err
+			}
+			text, err := doctext.Extract(cmd.Context(), att.ContentType, att.Filename, data)
+			if err != nil {
+				if errors.Is(err, doctext.ErrUnsupported) || errors.Is(err, doctext.ErrNoText) {
+					return output.Errorf(output.ExitUsage, "%v", err)
+				}
+				return err
+			}
+			out := mailAttachmentTextOut{
+				ID:          msg.PublicID(),
+				Part:        att.PartPath,
+				Filename:    att.Filename,
+				ContentType: att.ContentType,
+				Chars:       len([]rune(text)),
+			}
+			if maxChars > 0 {
+				if r := []rune(text); len(r) > maxChars {
+					text = string(r[:maxChars]) + "\n[cut: " + strconv.Itoa(len(r)-maxChars) + " more characters]"
+					out.Truncated = true
+				}
+			}
+			out.Text = text
+			if app.Printer().Format == output.JSON || app.Printer().Format == output.Auto {
+				return app.Printer().Print(out)
+			}
+			_, err = io.WriteString(app.Stdout, strings.TrimRight(text, "\n")+"\n")
+			return err
+		},
+	}
+	cmd.Flags().IntVar(&maxChars, "max-chars", 40000, "cut the text after this many characters (0 = no cut)")
+	return cmd
+}
+
 func mailAttachmentCmd(app *App) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "attachment",
@@ -542,7 +655,7 @@ func mailAttachmentCmd(app *App) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE:  func(c *cobra.Command, _ []string) error { return c.Help() },
 	}
-	cmd.AddCommand(mailAttachmentListCmd(app), mailAttachmentGetCmd(app))
+	cmd.AddCommand(mailAttachmentListCmd(app), mailAttachmentGetCmd(app), mailAttachmentTextCmd(app))
 	return cmd
 }
 
@@ -581,49 +694,9 @@ to stdout. Messages whose raw bytes were not archived are fetched from the
 provider, which needs the network.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, msg, st, err := mailLoadMessage(cmd.Context(), app, args[0])
+			msg, att, data, err := mailAttachmentBytes(cmd.Context(), app, args[0], args[1])
 			if err != nil {
 				return err
-			}
-			atts, err := st.ListAttachments(cmd.Context(), msg.ID)
-			if err != nil {
-				return err
-			}
-			var att *model.Attachment
-			for i := range atts {
-				if atts[i].PartPath == args[1] || strings.EqualFold(atts[i].Filename, args[1]) {
-					att = &atts[i]
-					break
-				}
-			}
-			if att == nil {
-				return output.Errorf(output.ExitNotFound, "message %s has no attachment %q: %w",
-					args[0], args[1], model.ErrNotFound)
-			}
-
-			var data []byte
-			if msg.RawComplete {
-				raw, err := mailRawBytes(cmd.Context(), app, msg)
-				if err != nil {
-					return err
-				}
-				data, _, _, err = mime.PartContent(raw, att.PartPath)
-				if err != nil {
-					return err
-				}
-			} else {
-				eng, err := app.Engine()
-				if err != nil {
-					return err
-				}
-				ref := att.RemoteRef
-				if ref == "" {
-					ref = att.PartPath
-				}
-				data, err = eng.FetchAttachment(cmd.Context(), msg.AccountID, msg.RemoteID, ref)
-				if err != nil {
-					return err
-				}
 			}
 
 			dest := outPath

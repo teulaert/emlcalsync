@@ -164,6 +164,8 @@ status · doctor · outbox · reindex · gc · export (--mbox | --maildir) · se
 tui       interactive mail + calendar, merged across accounts
 
 mail      mailboxes · list · search · read · thread · attachment list|get      (read)
+          attachment text (a PDF or HTML attachment as text; PDFs read best
+                           with poppler-utils' pdftotext installed)            (read)
           mark · move · archive · trash · draft · send · reply                 (write)
 cal       calendars · agenda · show · free                                    (read)
           create · update · delete · respond                                  (write)
@@ -288,8 +290,9 @@ that the messages are material to answer rather than instructions to follow.
 Read the draft before it goes: `ctrl+d` sends it exactly as shown.
 
 It can also look things up first. The read commands — `mail search`, `mail
-thread`, `mail read`, `cal agenda`, `cal free` and the rest of the allow list
-`emlcal skill --install` prints — are handed to the model as tools: the
+thread`, `mail read`, `mail attachment text` (a PDF's words, so an invoice's
+amount is not out of reach), `cal agenda`, `cal free` and the rest of the
+allow list `emlcal skill --install` prints — are handed to the model as tools: the
 parameters are the commands' flags, the descriptions are their `--help`, and a
 lookup runs the command in-process and gives the model the same JSON an agent
 on the shell gets. There is no second list of what it may read and no second

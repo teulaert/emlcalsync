@@ -10,6 +10,8 @@ import (
 
 	"github.com/teulaert/emlcalsync/internal/ai"
 	"github.com/teulaert/emlcalsync/internal/ai/ollama"
+	"github.com/teulaert/emlcalsync/internal/doctext"
+	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/provider/fake"
 )
@@ -252,5 +254,46 @@ func TestLiveAgentDraft(t *testing.T) {
 	}
 	if !strings.Contains(out, "12,50") && !strings.Contains(out, "12.50") {
 		t.Logf("NOTE: the draft does not name the Q3 price; the model did not find or use it")
+	}
+}
+
+// A PDF attachment is readable as text, and so through the tool: the whole
+// reason the command exists.
+func TestAIToolsReadAnAttachment(t *testing.T) {
+	env := newTestEnv(t)
+	raw, err := mime.Build(&mime.Draft{
+		From: model.Address{Email: "info@oostwatering.example"}, To: []model.Address{{Email: "me@example.com"}},
+		Subject: "FACTUUR 360954", TextBody: "Bijgaand de factuur.", Date: env.Now.Add(-time.Hour), MessageID: "inv@example.test",
+		Attachments: []mime.DraftAttachment{{Filename: "360954.pdf", ContentType: "application/pdf", Data: doctext.TinyPDF("Totaal EUR 1.234,56 vervaldatum 25-09-2026")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.Seed("work", fake.NewMsg("inv", raw).WithReceived(env.Now.Add(-time.Hour)).WithThread("t-inv"))
+	app, _, _ := env.App()
+	defer app.Close()
+	ts := app.AITools()
+	toolNamed(t, ts, "mail_attachment_text")
+
+	out, err := ts.Call(context.Background(), ai.ToolCall{Name: "mail_attachment_text", Arguments: json.RawMessage(`{"id":"work:inv","part":"360954.pdf"}`)})
+	if err != nil {
+		t.Fatalf("mail_attachment_text: %v", err)
+	}
+	var got mailAttachmentTextOut
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	if !strings.Contains(got.Text, "1.234,56") || got.Filename != "360954.pdf" || got.Truncated {
+		t.Errorf("out = %+v", got)
+	}
+
+	// The command itself, plain: just the text.
+	if plain := env.MustRun("mail", "attachment", "text", "work:inv", "360954.pdf", "-o", "plain"); !strings.Contains(plain, "vervaldatum 25-09-2026") {
+		t.Errorf("plain = %q", plain)
+	}
+	// A cut is said.
+	cut := env.MustRun("mail", "attachment", "text", "work:inv", "360954.pdf", "--max-chars", "10", "-o", "json")
+	if !strings.Contains(cut, `"truncated":true`) || !strings.Contains(cut, "[cut:") {
+		t.Errorf("cut = %s", cut)
 	}
 }

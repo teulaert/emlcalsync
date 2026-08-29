@@ -48,7 +48,7 @@ func TestSummaryPromptAsksTheQuestionInstead(t *testing.T) {
 	if strings.Contains(user, "No question was asked") {
 		t.Error("a question was asked")
 	}
-	if !strings.Contains(req.Messages[0].Content, "before answering") {
+	if !strings.Contains(req.Messages[0].Content, "before answering") || !strings.Contains(req.Messages[0].Content, "An attachment can be read") {
 		t.Errorf("lookups guidance should be worded for answering:\n%s", req.Messages[0].Content)
 	}
 }

@@ -55,6 +55,7 @@ emlcal mail read <id> [--full] [--html] [--raw] [--headers]
 emlcal mail thread <id>                          # whole conversation, oldest first
 emlcal mail attachment list <id>
 emlcal mail attachment get <id> <part|filename> [-O path]   # -O - writes to stdout
+emlcal mail attachment text <id> <part|filename>          # a PDF / HTML / text attachment as text
 emlcal cal calendars [--account A]
 emlcal cal agenda [--days 7 | --from .. --to ..] [--calendar C]
 emlcal cal show <id>

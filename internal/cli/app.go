@@ -17,6 +17,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/ai"
 	"github.com/teulaert/emlcalsync/internal/blob"
 	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/doctext"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/store"
@@ -70,6 +71,11 @@ func NewApp() *App {
 		Now:    time.Now,
 	}
 	a.Factory = &Factory{app: a}
+	// PDFs are read by this binary re-running itself, so a document the
+	// pure-Go reader loops on can be killed rather than hang the program.
+	if exe, err := os.Executable(); err == nil {
+		doctext.SelfCommand = []string{exe, "__pdf-text"}
+	}
 	return a
 }
 

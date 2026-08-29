@@ -35,7 +35,7 @@ var (
 	// gets.
 	readCommands = []string{
 		"mail list", "mail search", "mail read", "mail thread",
-		"mail mailboxes", "mail attachment list",
+		"mail mailboxes", "mail attachment list", "mail attachment text",
 		"cal agenda", "cal show", "cal free", "cal calendars",
 		"status",
 	}

@@ -716,6 +716,7 @@ emlcal mail read <id> [--full] [--html] [--raw] [--headers]
 emlcal mail thread <id>                              all messages, oldest first, stripped bodies
 emlcal mail attachment list <id>
 emlcal mail attachment get <id> <part|filename> [-O path]   (fetches remote if raw_complete=0; -o is the format flag)
+emlcal mail attachment text <id> <part|filename> [--max-chars N]   a PDF / HTML / text attachment as text
 
 MAIL — write (gate behind confirmation)
 emlcal mail mark <id>... --read|--unread|--flag|--unflag
@@ -1333,6 +1334,21 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     command line; `ai` is deliberately not on the read allow list, because
     that list is what the model gets as tools and a model that can call
     the model is a loop.
+  - **`mail attachment text` reads a PDF, an HTML or a text attachment as
+    text** (`internal/doctext`, pure Go so the binary stays static), and
+    because it is a read command it is a tool the model has: the first live
+    summary of an invoice ended with "amount and due date are in the PDF,
+    which I cannot open", which was true and useless. The model is told
+    that an attachment can be read and when to bother -- amounts, terms,
+    dates -- and to say what the document holds, not that it read it. A
+    scanned PDF holds no text and says so; images are not readable this
+    way. The pure-Go reader (rsc.io/pdf's lineage) handles simple documents
+    and loops forever on some real ones -- the first real invoice tried
+    spun at 100% CPU in `buffer.readToken` -- so it never runs in the
+    process that asked: `pdftotext` (poppler) is used when it is on PATH,
+    which reads everything, and otherwise the binary re-runs itself with a
+    hidden `__pdf-text` command under a 30-second deadline that kills it.
+    `apt install poppler-utils` is the recommendation when a PDF times out.
   - The shared half lives in **`internal/compose`**: subject, recipients,
     threading headers, quoting, address parsing and the SMTP envelope. It was
     all in `internal/cli` while `mail reply` was the only composer; the TUI
