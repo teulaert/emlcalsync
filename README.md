@@ -49,6 +49,16 @@ so `sudo make install PREFIX=/usr/local` works too. `make install-completions`
 adds bash, zsh and fish completions; `make check` runs what CI runs (gofmt,
 vet, race tests).
 
+One optional system package: **poppler-utils** (`pdftotext`) is what reads
+PDF attachments as text — `mail attachment text`, and the AI reading an
+invoice's amount. Everything else works without it; `emlcal doctor` says
+whether it is there.
+
+```bash
+sudo apt install poppler-utils      # Debian / Ubuntu
+brew install poppler                 # macOS
+```
+
 ## Set up accounts
 
 ### Fastmail
