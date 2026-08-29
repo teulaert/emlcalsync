@@ -574,13 +574,15 @@ func (c *composeView) filesView(w int) string {
 		names = append(names, f.Filename+" "+output.HumanSize(int64(len(f.Data))))
 	}
 	line := strings.Join(names, ", ")
-	if c.filesNote != "" {
-		if line != "" {
-			line += " · "
-		}
-		line += c.filesNote
+	if c.filesNote == "" {
+		return padCells(line, max(w-labelW, 0))
 	}
-	return padCells(line, max(w-labelW, 0))
+	if line != "" {
+		line += " · "
+	}
+	// The whole row is marked once something is missing from it: the point is
+	// that the eye stops here before ctrl+d, not that each name is graded.
+	return styleErr.Render(padCells(line+c.filesNote, max(w-labelW, 0)))
 }
 
 // ensure lays the fields out for the window the root is handing down.

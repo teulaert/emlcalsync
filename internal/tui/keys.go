@@ -123,7 +123,7 @@ func (k keymap) helpLines() [][2]string {
 		{"", ""},
 		{"r", "reply (carries on the thread's draft, if there is one)"},
 		{"a", "reply to all"},
-		{"f", "forward it on — the words, not the attachments"},
+		{"f", "forward it on, attachments and all"},
 		{"c", "a new message, from the account the list is filtered to"},
 		{"  ctrl+d", "send it"},
 		{"  ctrl+s", "save it as a draft on the server"},

@@ -255,9 +255,10 @@ in the composer to finish and send — straight off the row in the drafts
 mailbox, so finishing one is `M` to drafts, `enter`, `ctrl+d`. Replying to a
 thread you have already half answered carries that draft on instead of starting
 a second one, and `ctrl+x` in the composer deletes the draft being edited.
-`f` forwards the message in focus — the words, not the attachments — and `c`
-writes a new one from the account the list is filtered to; both open with the
-cursor in To. The keys are Gmail's over vim's (`e` archive, `s` star, `d`
+`f` forwards the message in focus, attachments and all — they are fetched
+with it, shown in the composer, and any that could not be got are named there
+rather than quietly left off — and `c` writes a new one from the account the
+list is filtered to; both open with the cursor in To. The keys are Gmail's over vim's (`e` archive, `s` star, `d`
 trash, `j`/`k`/`g`/`G` to move, `z` undo, `/` search), with `⌫` trashing beside
 `d` and `u` going back beside `esc` and `q` for hands trained on a GUI client.
 With a model configured (see below), `ctrl+g` is the AI key: on a

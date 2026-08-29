@@ -161,6 +161,21 @@ func TestForwardedLeavesOutEmptyHeaders(t *testing.T) {
 	}
 }
 
+// The logo in a signature is part of how the message looked, not something
+// anybody meant to pass on -- and the text a forward is built from does not
+// refer to it any more anyway. A file merely marked inline, with nothing
+// pointing at it, is an ordinary attachment.
+func TestForwardAttachmentsLeavesOutTheInlineImages(t *testing.T) {
+	got := ForwardAttachments([]model.Attachment{
+		{PartPath: "2", Filename: "offerte.pdf"},
+		{PartPath: "3", Filename: "logo.png", Inline: true, ContentID: "logo@x"},
+		{PartPath: "4", Filename: "scan.pdf", Inline: true},
+	})
+	if len(got) != 2 || got[0].Filename != "offerte.pdf" || got[1].Filename != "scan.pdf" {
+		t.Errorf("carried %v", got)
+	}
+}
+
 func TestForwardSubjectDoesNotStackPrefixes(t *testing.T) {
 	for in, want := range map[string]string{
 		"offerte Q4":      "Fwd: offerte Q4",

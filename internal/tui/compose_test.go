@@ -1060,6 +1060,49 @@ func TestTheComposerOffersDeleteOnlyForAStoredDraft(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Forwarding, and a message with nothing behind it
 
+// addWithAttachment indexes a message with a file on it and gives the fake
+// provider the same one, so the fetch a forward does has somewhere to go. The
+// raw message is not archived (RawComplete stays false), which is the path
+// where the bytes have to come off the provider.
+func addWithAttachment(t *testing.T, d Deps, mail *fake.Mail, remote, filename string) {
+	t.Helper()
+	raw := []byte("From: Anna de Vries <anna@example.com>\r\n" +
+		"To: work@example.com\r\n" +
+		"Message-ID: <orig@example.com>\r\n" +
+		"Subject: offerte Q4\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=b1\r\n\r\n" +
+		"--b1\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" +
+		"Kun je dit bevestigen?\r\n" +
+		"--b1\r\nContent-Type: application/pdf\r\n" +
+		"Content-Disposition: attachment; filename=\"" + filename + "\"\r\n\r\n" +
+		"%PDF-1.4 pretend\r\n--b1--\r\n")
+	mail.Add(fake.NewMsg(remote, raw).WithMailboxes("INBOX"))
+
+	parsed, err := mime.Parse(raw)
+	if err != nil {
+		t.Fatalf("mime.Parse: %v", err)
+	}
+	when := testNow.Add(-time.Hour)
+	m := &model.Message{
+		AccountID:       "work",
+		RemoteID:        remote,
+		ThreadID:        "t-" + remote,
+		MessageIDHeader: "orig@example.com",
+		Subject:         "offerte Q4",
+		From:            model.Address{Name: "Anna de Vries", Email: "anna@example.com"},
+		To:              []model.Address{{Email: "work@example.com"}},
+		Date:            when,
+		Received:        when,
+		HasAttachments:  true,
+		MailboxRemotes:  []string{"INBOX"},
+		IndexedAt:       testNow,
+	}
+	if _, err := d.Store.UpsertMessage(context.Background(), m, parsed); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+}
+
 func TestForwardOpensAddressedToNobody(t *testing.T) {
 	d := newTestDeps(t, "work")
 	addConversation(t, d, "work", "w1", "t1")
@@ -1135,26 +1178,105 @@ func TestForwardIgnoresTheThreadsDraft(t *testing.T) {
 	}
 }
 
-// The attachments stay behind: the archive holds a reference to them, not the
-// bytes. Saying so on the status line is the difference between a limit and a
-// surprise.
-func TestForwardSaysTheAttachmentsDoNotGo(t *testing.T) {
-	d := newTestDeps(t, "work")
-	addConversation(t, d, "work", "w1", "t1")
-	ctx := context.Background()
-	m, err := d.Store.GetMessage(ctx, "work", "w1")
-	if err != nil {
-		t.Fatalf("GetMessage: %v", err)
-	}
-	m.HasAttachments = true
-	if _, err := d.Store.UpsertMessage(ctx, m, nil); err != nil {
-		t.Fatalf("UpsertMessage: %v", err)
-	}
+// Forwarding is mostly done for the attachment, so the attachment goes. The
+// bytes come through the engine -- out of the archived raw message when there
+// is one, off the provider when there is not.
+func TestForwardCarriesTheAttachments(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addWithAttachment(t, d, mail, "m1", "offerte.pdf")
 
 	r := newTestRoot(t, d)
 	send(t, r, "f")
-	if got := r.render(); !strings.Contains(got, "attachments do not go with it") {
-		t.Errorf("nothing said the attachments stay behind:\n%s", got)
+
+	c := composerOn(t, r)
+	if len(c.files) != 1 {
+		t.Fatalf("the forward carries %d files, want the one on the message", len(c.files))
+	}
+	if c.files[0].Filename != "offerte.pdf" {
+		t.Errorf("file = %q", c.files[0].Filename)
+	}
+	if string(c.files[0].Data) != "attachment:m1:2" {
+		t.Errorf("file content = %q, want what the provider handed back", c.files[0].Data)
+	}
+	if c.files[0].ContentType != "application/pdf" {
+		t.Errorf("content type = %q", c.files[0].ContentType)
+	}
+	// And it is on screen: what goes out is what the composer shows.
+	if got := r.render(); !strings.Contains(got, "offerte.pdf") {
+		t.Errorf("the composer does not show the file it is sending:\n%s", got)
+	}
+}
+
+func TestForwardSendsTheAttachments(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addWithAttachment(t, d, mail, "m1", "offerte.pdf")
+
+	r := newTestRoot(t, d)
+	send(t, r, "f")
+	typeInto(t, r, "bob@example.com")
+	send(t, r, "ctrl+d")
+
+	sent := mail.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("the provider was handed %d messages, want 1", len(sent))
+	}
+	parsed, err := mime.Parse(sent[0])
+	if err != nil {
+		t.Fatalf("what went out does not parse: %v", err)
+	}
+	if len(parsed.Attachments) != 1 {
+		t.Fatalf("what went out has %d attachments, want 1:\n%s", len(parsed.Attachments), sent[0])
+	}
+	att := parsed.Attachments[0]
+	if att.Filename != "offerte.pdf" {
+		t.Errorf("attachment = %q", att.Filename)
+	}
+	data, _, _, err := mime.PartContent(sent[0], att.Path)
+	if err != nil {
+		t.Fatalf("PartContent: %v", err)
+	}
+	if string(data) != "attachment:m1:2" {
+		t.Errorf("what went out carries %q", data)
+	}
+	if !strings.Contains(parsed.TextBody, "---------- Forwarded message ----------") {
+		t.Errorf("the text went missing under the attachment:\n%s", parsed.TextBody)
+	}
+}
+
+// A file that will not come is named, not dropped. Forwarding without the
+// attachment is the one outcome nobody may find out about at the other end.
+func TestForwardNamesTheFilesItCouldNotGet(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addWithAttachment(t, d, mail, "m1", "offerte.pdf")
+	mail.FailNext(1) // the fetch
+
+	r := newTestRoot(t, d)
+	send(t, r, "f")
+
+	c := composerOn(t, r)
+	if len(c.files) != 0 {
+		t.Errorf("a failed fetch still produced %d files", len(c.files))
+	}
+	if !strings.Contains(c.filesNote, "offerte.pdf") {
+		t.Errorf("filesNote = %q, want the file it could not get", c.filesNote)
+	}
+	// On the screen, not in a status line the next keystroke clears.
+	send(t, r, "b")
+	if got := r.render(); !strings.Contains(got, "not carried: offerte.pdf") {
+		t.Errorf("the composer stopped saying what it could not carry:\n%s", got)
+	}
+}
+
+// A reply quotes; it does not re-send the files the other person already has.
+func TestReplyCarriesNoAttachments(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addWithAttachment(t, d, mail, "m1", "offerte.pdf")
+
+	r := newTestRoot(t, d)
+	send(t, r, "r")
+
+	if c := composerOn(t, r); len(c.files) != 0 {
+		t.Errorf("a reply carries %d files back to the sender", len(c.files))
 	}
 }
 

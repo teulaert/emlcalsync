@@ -1219,9 +1219,27 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     forward by somebody who has seen none of it. It carries no threading
     headers, because `In-Reply-To` would file it at the far end under a
     conversation the recipient was never in, and it does not mark the
-    original answered, because it does not answer it. The attachments stay
-    behind — the index holds a reference, not the bytes — and the status
-    line says so rather than letting it be found out later.
+    original answered, because it does not answer it.
+  - **The files go with it**, which is mostly why anyone forwards anything.
+    They are fetched when the composer opens rather than at send time — what
+    is on screen has to be what goes out, and a row of attachments nobody can
+    see until afterwards is the same as not having them — so `f` is the one
+    composer whose load may be a download, and it gets a download's budget
+    (90 s) rather than a row lookup's 15. The bytes come through
+    `Engine.FetchAttachment`, which reads them out of the archived raw message
+    when there is one and asks the provider when there is not: the same path
+    `mail attachment` takes, rather than a second one that could disagree with
+    it. `compose.ForwardAttachments` says which parts count — everything
+    except the inline ones a body refers to by Content-ID, because a signature
+    logo is part of how a message looked and the text a forward is built from
+    does not refer to it any more. A file that will not come is **named in the
+    Files row, not dropped**: forwarding is done for the attachment, so "it
+    went without them" is the one outcome nobody may discover at the far end.
+    That row is part of the header block rather than a status line, which the
+    next keystroke would clear. 25 MB is the ceiling on what will be held in
+    memory and handed to a provider — both of them refuse a message that size
+    anyway — so one keystroke on a mailbox with a 400 MB video in it cannot
+    pull it into the process.
   - **`c` is the one composer with no message behind it**, which makes the
     account a question nobody on screen has answered. The mail list's own
     filter decides — it is the only place the person has said which account
