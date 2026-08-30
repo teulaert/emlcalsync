@@ -235,6 +235,33 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return r, cmd
 	}
 
+	// RSVP only means something on an event, or on the mail that invites to
+	// one -- and its keys are taken elsewhere (y copies an id, t switches the
+	// thread's mode), so it is matched ahead of everything below. The
+	// invitation is answered on the calendar's copy of the event, which is
+	// what tells the organizer.
+	switch s := r.top().(type) {
+	case *eventView:
+		if s.ev != nil {
+			if p, ok := s.rsvp(msg.String()); ok {
+				r.note("sending RSVP…")
+				return r, r.d.apply(string(p), respondOp(s.accountID, s.calRemote, s.remote, p), nil)
+			}
+		}
+	case *reader:
+		if p, ok := s.rsvp(msg.String()); ok {
+			ev := s.invite.local
+			r.note("sending RSVP…")
+			return r, r.d.apply(string(p), respondOp(ev.AccountID, ev.CalendarRemote, ev.RemoteID, p), nil)
+		}
+	case *threadView:
+		if p, ok := s.rsvp(msg.String()); ok {
+			ev := s.invite().local
+			r.note("sending RSVP…")
+			return r, r.d.apply(string(p), respondOp(ev.AccountID, ev.CalendarRemote, ev.RemoteID, p), nil)
+		}
+	}
+
 	switch {
 	case key.Matches(msg, r.keys.Help):
 		r.showHelp = true
@@ -314,14 +341,6 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return r, r.startSummary()
 	}
 
-	// RSVP only means something on an event -- and y is one of its keys, so
-	// it is matched ahead of the copy below.
-	if ev, ok := r.top().(*eventView); ok && ev.ev != nil {
-		if p, ok := ev.rsvp(msg.String()); ok {
-			r.note("sending RSVP…")
-			return r, r.d.apply(string(p), respondOp(ev.accountID, ev.calRemote, ev.remote, p), nil)
-		}
-	}
 	if key.Matches(msg, r.keys.Copy) {
 		return r, r.copyID()
 	}
@@ -365,6 +384,14 @@ func (r *root) open() tea.Cmd {
 		}
 		// Opening a message marks it read, the way every mail client does.
 		return tea.Batch(r.push(newReader(r.d, m.AccountID, m.RemoteID)), r.markRead(m))
+	case *reader:
+		// The one thing a reader opens onto is the event its invitation is
+		// for, when the calendar has it.
+		if ri := s.invite; ri != nil && ri.local != nil {
+			ev := ri.local
+			return r.push(newEventView(r.d, ev.AccountID, ev.CalendarRemote, ri.calName, ev.RemoteID))
+		}
+		return nil
 	case *agenda:
 		o := s.selectedOcc()
 		if o == nil {
@@ -758,6 +785,14 @@ func (r *root) onApplied(a applied) tea.Cmd {
 	if t := r.triageScreen(); t != nil {
 		t.commit()
 	}
+	// An answered invitation is re-read so the screen says what the calendar
+	// now says: the event view's RSVP line, the reader's card. The engine
+	// patched the row before returning, so the reload sees the new answer.
+	var reload tea.Cmd
+	switch model.Participation(a.action) {
+	case model.PartAccepted, model.PartDeclined, model.PartTentative:
+		reload = r.top().reload()
+	}
 	switch {
 	case a.queued:
 		r.note(a.action + " queued — offline, it will go out on the next sync")
@@ -770,7 +805,7 @@ func (r *root) onApplied(a applied) tea.Cmd {
 	default:
 		r.note(a.action)
 	}
-	return nil
+	return reload
 }
 
 func (r *root) note(s string) {

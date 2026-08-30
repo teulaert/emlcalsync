@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	gomessage "github.com/emersion/go-message"
 	gotextproto "github.com/emersion/go-message/textproto"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/teulaert/emlcalsync/internal/blob"
 	"github.com/teulaert/emlcalsync/internal/doctext"
+	"github.com/teulaert/emlcalsync/internal/itip"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
@@ -232,6 +234,7 @@ type mailReadOut struct {
 	Answered       bool                `json:"answered"`
 	HasAttachments bool                `json:"has_attachments"`
 	Attachments    []mailAttachmentRow `json:"attachments,omitempty"`
+	Invite         *mailInviteOut      `json:"invite,omitempty"`
 	Headers        []mailHeader        `json:"headers,omitempty"`
 	Body           string              `json:"body"`
 	MessageID      string              `json:"message_id,omitempty"`
@@ -245,7 +248,14 @@ func mailReadCmd(app *App) *cobra.Command {
 		Short: "Show one message",
 		Long: `Show one message. By default the text body is printed with quoted
 replies and signatures stripped; --full keeps them, --html renders the HTML
-alternative and --raw writes the archived RFC 822 bytes verbatim.`,
+alternative and --raw writes the archived RFC 822 bytes verbatim.
+
+A message carrying a calendar invitation, update, cancellation or RSVP (a
+text/calendar part) is shown with its card: what, when, where, who, and
+whether you have answered. In JSON that is "invite"; its "event_id" names the
+calendar's own copy of the event, which is what ` + "`cal respond`" + ` answers.
+No event_id means the calendar has not synced the event yet, or the account
+has no calendar.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			account, remote, err := app.ParseMessageID(args[0])
@@ -335,9 +345,132 @@ func mailReadOutOf(ctx context.Context, app *App, st *store.Store, msg *model.Me
 	if msg.HasAttachments {
 		if atts, err := st.ListAttachments(ctx, msg.ID); err == nil {
 			out.Attachments = mailAttachmentRows(atts)
+			out.Invite = mailInviteOf(ctx, app, st, msg, atts)
 		}
 	}
 	return out
+}
+
+// mailInviteOut is the calendar card of a message that carries one: the
+// invitation, update, cancellation or RSVP in its text/calendar part.
+//
+// EventID is the copy the calendar already holds of the invited event, when
+// the index has one, and is the id `cal respond` takes: Google and Fastmail
+// file an incoming invitation on the calendar as it arrives, and answering
+// there is what tells the organizer. Without it the calendar has not synced
+// the event yet, or the account has no calendar at all.
+type mailInviteOut struct {
+	Kind        string           `json:"kind"` // invitation | cancellation | reply | event
+	Method      string           `json:"method,omitempty"`
+	UID         string           `json:"uid,omitempty"`
+	Title       string           `json:"title"`
+	Start       output.Time      `json:"start"`
+	StartUTC    int64            `json:"start_utc"`
+	End         output.Time      `json:"end"`
+	EndUTC      int64            `json:"end_utc"`
+	AllDay      bool             `json:"all_day"`
+	Timezone    string           `json:"timezone,omitempty"`
+	Location    string           `json:"location,omitempty"`
+	RRule       string           `json:"rrule,omitempty"`
+	Status      string           `json:"status,omitempty"`
+	Organizer   *model.Address   `json:"organizer,omitempty"`
+	Attendees   []calAttendeeOut `json:"attendees,omitempty"`
+	MyResponse  string           `json:"my_response,omitempty"`
+	NeedsAnswer bool             `json:"needs_answer"`
+	EventID     string           `json:"event_id,omitempty"`
+	// fields is the human card, built alongside for mailPrintReadable.
+	fields []itip.Field
+}
+
+// mailInviteOf reads the invitation out of a message that the index says
+// carries one, and matches it to the calendar. It is best effort: a message
+// whose bytes cannot be had right now -- an envelope-only stub, offline --
+// simply shows no card, and says why in the log.
+func mailInviteOf(ctx context.Context, app *App, st *store.Store, msg *model.Message, atts []model.Attachment) *mailInviteOut {
+	carries := false
+	for _, a := range atts {
+		if itip.IsCalendarAttachment(a) {
+			carries = true
+			break
+		}
+	}
+	if !carries {
+		return nil
+	}
+	raw, err := mailRawBytes(ctx, app, msg)
+	if err != nil {
+		app.Logger().Warn("invite: read message", "id", msg.PublicID(), "err", err)
+		return nil
+	}
+	inv, err := itip.FromMessage(raw, mailSelfEmail(ctx, app, st, msg.AccountID))
+	if err != nil {
+		if !errors.Is(err, itip.ErrNoInvite) {
+			app.Logger().Warn("invite: parse", "id", msg.PublicID(), "err", err)
+		}
+		return nil
+	}
+	var local *model.Event
+	if evs, err := st.FindEventsByUID(ctx, nil, inv.Event.UID); err == nil {
+		local = itip.Match(evs, msg.AccountID)
+	}
+	return mailInviteRow(inv, local, app.Location())
+}
+
+// mailInviteRow builds the card. The calendar's copy, when there is one,
+// knows the answer better than the mail does: an invitation accepted last
+// week still says needs-action in the message.
+func mailInviteRow(inv *itip.Invite, local *model.Event, loc *time.Location) *mailInviteOut {
+	ev := &inv.Event
+	if local != nil && local.MyResponse != "" {
+		ev.MyResponse = local.MyResponse
+	}
+	out := &mailInviteOut{
+		Kind:        inv.Kind(),
+		Method:      inv.Method,
+		UID:         ev.UID,
+		Title:       ev.Title,
+		Start:       output.T(ev.Start),
+		StartUTC:    ev.Start.Unix(),
+		End:         output.T(ev.End),
+		EndUTC:      ev.End.Unix(),
+		AllDay:      ev.AllDay,
+		Timezone:    ev.Timezone,
+		Location:    ev.Location,
+		RRule:       ev.RRule,
+		Status:      string(ev.Status),
+		MyResponse:  string(ev.MyResponse),
+		NeedsAnswer: inv.NeedsAnswer(),
+		fields:      inv.Fields(loc),
+	}
+	if ev.Organizer.Email != "" || ev.Organizer.Name != "" {
+		org := ev.Organizer
+		out.Organizer = &org
+	}
+	for _, a := range ev.Attendees {
+		out.Attendees = append(out.Attendees, calAttendeeOut{
+			Name: a.Name, Email: a.Email, Response: string(a.Response),
+			Optional: a.Optional, Self: a.Self,
+		})
+	}
+	if local != nil {
+		out.EventID = local.PublicID()
+	}
+	return out
+}
+
+// mailSelfEmail is the address the account receives as, which is how the
+// recipient's own ATTENDEE line is told from the others. Config first, the
+// index second, for a store opened without one.
+func mailSelfEmail(ctx context.Context, app *App, st *store.Store, account string) string {
+	if cfg, err := app.Config(); err == nil {
+		if a, ok := cfg.Account(account); ok && strings.TrimSpace(a.Email) != "" {
+			return a.Email
+		}
+	}
+	if a, err := st.GetAccount(ctx, account); err == nil && a != nil {
+		return a.Email
+	}
+	return ""
 }
 
 func mailAttachmentRows(atts []model.Attachment) []mailAttachmentRow {
@@ -376,6 +509,22 @@ func mailPrintReadable(w io.Writer, out mailReadOut) error {
 	}
 	for _, h := range out.Headers {
 		fmt.Fprintf(&b, "%s: %s\n", h.Name, h.Value)
+	}
+	if inv := out.Invite; inv != nil {
+		// The card sits between the headers and the text, where a mail
+		// client puts it, and ends on what to do about it.
+		b.WriteString("\n")
+		for _, f := range inv.fields {
+			fmt.Fprintf(&b, "%-11s %s\n", f.Key+":", f.Value)
+		}
+		switch {
+		case inv.EventID != "" && inv.NeedsAnswer:
+			fmt.Fprintf(&b, "%-11s emlcal cal respond %s --accept|--decline|--tentative\n", "Answer:", inv.EventID)
+		case inv.EventID != "":
+			fmt.Fprintf(&b, "%-11s %s\n", "Event:", inv.EventID)
+		case inv.Kind == "invitation":
+			fmt.Fprintf(&b, "%-11s not on a synced calendar yet\n", "Event:")
+		}
 	}
 	b.WriteString("\n")
 	b.WriteString(strings.TrimRight(out.Body, "\n"))

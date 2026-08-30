@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/provider/fake"
@@ -911,5 +912,169 @@ func TestMailReplyOfflineDoesNotAnswer(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMailReadInvite reads a mailed invitation: the card comes out of the
+// text/calendar part Exchange hides in the alternative, the .ics is listed as
+// an attachment, and the calendar's copy of the event is named so `cal
+// respond` has something to answer on.
+func TestMailReadInvite(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	raw, err := os.ReadFile(filepath.Join("..", "mime", "testdata", "invite.eml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const uid = "040000008200E00074C5B7101A82E00800000000BB3DDF993738DD01000000000000000010000000D9B5581854DF3640B533A07A2B4B5089"
+	start := time.Date(2026, 9, 2, 8, 0, 0, 0, time.UTC)
+	env.Cal["work"].Put("primary", model.Event{
+		RemoteID: "ev-momentum", UID: uid, Title: "Momentum FO",
+		Start: start, End: start.Add(45 * time.Minute), Status: model.StatusConfirmed,
+		Organizer:  model.Address{Name: "Martijn Organiser", Email: "martijn@example.org"},
+		Attendees:  []model.Attendee{{Email: "lennert@example.com", Response: model.PartNeedsAction, Self: true}},
+		MyResponse: model.PartNeedsAction,
+	})
+	env.Seed("work", fake.NewMsg("m-invite", raw).WithReceived(env.Now.Add(-time.Hour)))
+
+	var msg struct {
+		HasAttachments bool `json:"has_attachments"`
+		Attachments    []struct {
+			Part        string `json:"part"`
+			Filename    string `json:"filename"`
+			ContentType string `json:"content_type"`
+		} `json:"attachments"`
+		Invite *struct {
+			Kind        string `json:"kind"`
+			Method      string `json:"method"`
+			UID         string `json:"uid"`
+			Title       string `json:"title"`
+			Start       string `json:"start"`
+			Timezone    string `json:"timezone"`
+			Location    string `json:"location"`
+			MyResponse  string `json:"my_response"`
+			NeedsAnswer bool   `json:"needs_answer"`
+			EventID     string `json:"event_id"`
+			Organizer   *struct {
+				Email string `json:"email"`
+			} `json:"organizer"`
+			Attendees []struct {
+				Email string `json:"email"`
+				Self  bool   `json:"self"`
+			} `json:"attendees"`
+		} `json:"invite"`
+		Body string `json:"body"`
+	}
+	decode := func(out string) {
+		t.Helper()
+		if err := json.Unmarshal([]byte(out), &msg); err != nil {
+			t.Fatalf("decode: %v\n%s", err, out)
+		}
+	}
+	decode(env.MustRun("mail", "read", "work:m-invite"))
+
+	if !msg.HasAttachments || len(msg.Attachments) != 1 ||
+		msg.Attachments[0].Filename != "invite.ics" || msg.Attachments[0].ContentType != "text/calendar" {
+		t.Errorf("attachments = %+v (has=%v), want the .ics", msg.Attachments, msg.HasAttachments)
+	}
+	if !strings.Contains(msg.Body, "Microsoft Teams meeting") || strings.Contains(msg.Body, "BEGIN:VCALENDAR") {
+		t.Errorf("body = %q", msg.Body)
+	}
+	inv := msg.Invite
+	if inv == nil {
+		t.Fatal("no invite in the read output")
+	}
+	if inv.Kind != "invitation" || inv.Method != "REQUEST" || inv.UID != uid || inv.Title != "Momentum FO" {
+		t.Errorf("invite = %+v", *inv)
+	}
+	if inv.Start != "2026-09-02T08:00:00Z" || inv.Timezone != "Europe/Berlin" {
+		t.Errorf("start = %s tz = %s (Exchange's zone name must resolve)", inv.Start, inv.Timezone)
+	}
+	if inv.Location != "Microsoft Teams-vergadering" || inv.Organizer == nil || inv.Organizer.Email != "martijn@example.org" {
+		t.Errorf("where/organizer = %q / %+v", inv.Location, inv.Organizer)
+	}
+	if len(inv.Attendees) != 1 || !inv.Attendees[0].Self {
+		t.Errorf("attendees = %+v, want the recipient marked self", inv.Attendees)
+	}
+	if inv.MyResponse != "needs-action" || !inv.NeedsAnswer {
+		t.Errorf("my_response = %q needs_answer = %v", inv.MyResponse, inv.NeedsAnswer)
+	}
+	if inv.EventID != "work:c:primary:ev-momentum" {
+		t.Errorf("event_id = %q, want the calendar's copy", inv.EventID)
+	}
+
+	// The human form: a card between the headers and the text, ending on the
+	// command that answers it.
+	human := env.MustRun("mail", "read", "work:m-invite", "-o", "table")
+	for _, want := range []string{
+		"Attachment: invite.ics  text/calendar",
+		"Invitation: Momentum FO",
+		"When:       Wed 2 Sep 08:00–08:45",
+		"Where:      Microsoft Teams-vergadering",
+		"Organizer:  Martijn Organiser <martijn@example.org>",
+		"You:        not answered",
+		"Answer:     emlcal cal respond work:c:primary:ev-momentum --accept|--decline|--tentative",
+		"Microsoft Teams meeting",
+	} {
+		if !strings.Contains(human, want) {
+			t.Errorf("human output misses %q:\n%s", want, human)
+		}
+	}
+
+	// Answering on the calendar is what the card then reports: the
+	// calendar's copy outranks the mail's stale needs-action.
+	env.MustRun("cal", "respond", inv.EventID, "--accept")
+	decode(env.MustRun("mail", "read", "work:m-invite"))
+	if msg.Invite == nil || msg.Invite.MyResponse != "accepted" || msg.Invite.NeedsAnswer {
+		t.Errorf("after accepting: %+v", msg.Invite)
+	}
+	if !strings.Contains(env.MustRun("mail", "read", "work:m-invite", "-o", "table"), "You:        yes") {
+		t.Error("human output does not show the answer")
+	}
+
+	// The same card in the thread.
+	var thread struct {
+		Messages []struct {
+			Invite *struct {
+				Title string `json:"title"`
+			} `json:"invite"`
+		} `json:"messages"`
+	}
+	out := env.MustRun("mail", "thread", "work:m-invite")
+	if err := json.Unmarshal([]byte(out), &thread); err != nil {
+		t.Fatalf("decode thread: %v\n%s", err, out)
+	}
+	if len(thread.Messages) != 1 || thread.Messages[0].Invite == nil || thread.Messages[0].Invite.Title != "Momentum FO" {
+		t.Errorf("thread = %+v", thread)
+	}
+}
+
+// TestMailReadInviteWithoutCalendarCopy is the invitation the calendar has
+// not synced (or an account with no calendar): the card still shows, and
+// says there is nothing to answer on yet.
+func TestMailReadInviteWithoutCalendarCopy(t *testing.T) {
+	env := newTestEnv(t)
+	raw, err := os.ReadFile(filepath.Join("..", "mime", "testdata", "invite.eml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.Seed("work", fake.NewMsg("m-invite", raw).WithReceived(env.Now.Add(-time.Hour)))
+
+	var msg struct {
+		Invite *struct {
+			Kind    string `json:"kind"`
+			EventID string `json:"event_id"`
+		} `json:"invite"`
+	}
+	out := env.MustRun("mail", "read", "work:m-invite")
+	if err := json.Unmarshal([]byte(out), &msg); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out)
+	}
+	if msg.Invite == nil || msg.Invite.Kind != "invitation" || msg.Invite.EventID != "" {
+		t.Errorf("invite = %+v", msg.Invite)
+	}
+	human := env.MustRun("mail", "read", "work:m-invite", "-o", "table")
+	if !strings.Contains(human, "Event:      not on a synced calendar yet") {
+		t.Errorf("human output:\n%s", human)
 	}
 }

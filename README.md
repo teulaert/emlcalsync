@@ -193,6 +193,15 @@ cal       calendars · agenda · show · free                                   
   `--dry-run` on every write.
 - Exit codes: 0 ok · 1 error · 2 usage · 3 not found · 4 offline ·
   5 provider rejected · 6 queued in outbox.
+- A mailed invitation — the `text/calendar` part Outlook, Google Calendar and
+  Fastmail send, which Exchange hides inside the alternative with no name —
+  comes out of `mail read` and `mail thread` as a card: what, when, where,
+  who, and whether you have answered. In JSON that is `invite`, whose
+  `event_id` names the calendar's own copy of the event, which is what
+  `cal respond` answers (Google and Fastmail file an incoming invite on the
+  calendar as it arrives). The `.ics` is listed as an attachment,
+  `invite.ics`. Messages archived before this was recorded need one
+  `emlcal reindex` to list theirs.
 
 ## Using it from an agent
 
@@ -247,7 +256,11 @@ first, with `t` for the one-row-per-message index; `M` cycles the mailbox
 (inbox, all, flagged, drafts, sent, archive, trash, spam), so unsent drafts are
 a view of their own and are marked `D` wherever they turn up in a thread;
 `enter` on an
-event opens it, where `y` / `n` / `t` answer the invitation. `r` replies to the
+event opens it, where `y` / `n` / `t` answer the invitation. A mailed
+invitation shows its card above its text, in the thread and in the reader —
+what, when, where, who, and whether you have answered — and `y` / `n` / `t`
+answer it right there, through the calendar's copy of the event; in the
+reader `enter` opens that event. `r` replies to the
 message in focus and `a` replies to everyone: the composer opens with the
 recipients, the subject and the quoted original filled in, `ctrl+d` sends it
 and `ctrl+s` saves it as a draft on the server. `enter` on a draft reopens it

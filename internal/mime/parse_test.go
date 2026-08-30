@@ -546,3 +546,63 @@ func TestParseBeyondMaxDepthKeepsText(t *testing.T) {
 		t.Errorf("MIME scaffolding indexed as body text: %q", p.TextBody)
 	}
 }
+
+func TestParseInvite(t *testing.T) {
+	p := mustParse(t, "invite.eml")
+
+	if p.Calendar == nil {
+		t.Fatal("Calendar = nil, want the text/calendar part")
+	}
+	if p.Calendar.Path != "3" || p.Calendar.Method != "REQUEST" {
+		t.Errorf("Calendar = %+v", *p.Calendar)
+	}
+	// The card is not the body: the text alternative still is.
+	if !strings.Contains(p.TextBody, "Microsoft Teams meeting") || strings.Contains(p.TextBody, "BEGIN:VCALENDAR") {
+		t.Errorf("TextBody = %q", p.TextBody)
+	}
+	// Exchange gives the part no name and no disposition; it is listed all the
+	// same, under the name Google would have given it.
+	if len(p.Attachments) != 1 {
+		t.Fatalf("attachments = %+v, want the .ics alone", p.Attachments)
+	}
+	a := p.Attachments[0]
+	if a.Path != "3" || a.Filename != "invite.ics" || a.ContentType != "text/calendar" {
+		t.Errorf("attachment = %+v", a)
+	}
+
+	data, ct, name, err := PartContent(load(t, "invite.eml"), p.Calendar.Path)
+	if err != nil {
+		t.Fatalf("PartContent: %v", err)
+	}
+	if ct != "text/calendar" || name != "invite.ics" {
+		t.Errorf("PartContent type = %q name = %q", ct, name)
+	}
+	if !strings.HasPrefix(string(data), "BEGIN:VCALENDAR") || !strings.Contains(string(data), "SUMMARY;LANGUAGE=nl-NL:Momentum FO") {
+		t.Errorf("PartContent data = %q", data)
+	}
+}
+
+func TestParseInviteNamedAttachment(t *testing.T) {
+	// Google Calendar mails the same object twice: inline as text/calendar and
+	// again as an application/ics attachment called invite.ics. The inline one
+	// is the card; the named one keeps its own name.
+	raw := "From: a@example.org\r\nTo: me@example.com\r\nSubject: x\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain\r\n\r\nhello\r\n" +
+		"--b\r\nContent-Type: text/calendar; charset=UTF-8; method=REQUEST\r\n\r\nBEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n" +
+		"--b\r\nContent-Type: application/ics; name=\"invite.ics\"\r\nContent-Disposition: attachment; filename=\"invite.ics\"\r\nContent-Transfer-Encoding: base64\r\n\r\nQkVHSU46VkNBTEVOREFSCg==\r\n" +
+		"--b--\r\n"
+	p, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if p.Calendar == nil || p.Calendar.Path != "2" {
+		t.Fatalf("Calendar = %+v, want part 2 (the text/calendar one)", p.Calendar)
+	}
+	if len(p.Attachments) != 2 {
+		t.Fatalf("attachments = %+v", p.Attachments)
+	}
+	if p.TextBody != "hello" {
+		t.Errorf("TextBody = %q", p.TextBody)
+	}
+}

@@ -33,6 +33,7 @@ type threadView struct {
 	subject   string
 
 	messages []model.Message
+	invites  map[string]*readerInvite // calendar cards, by remote id
 	cursor   int
 	top      int // compact: first visible row
 
@@ -108,6 +109,32 @@ func (t *threadView) targets() []target {
 		return nil
 	}
 	return []target{targetOf(m)}
+}
+
+// invite is the calendar card of the message under the cursor, or nil.
+func (t *threadView) invite() *readerInvite {
+	m := t.selected()
+	if m == nil || t.invites == nil {
+		return nil
+	}
+	return t.invites[m.RemoteID]
+}
+
+// rsvp is the RSVP the user just pressed on the message under the cursor,
+// if any -- the same keys as the event view and the reader.
+func (t *threadView) rsvp(k string) (model.Participation, bool) {
+	if !t.invite().answerable() {
+		return "", false
+	}
+	switch k {
+	case "y":
+		return model.PartAccepted, true
+	case "n":
+		return model.PartDeclined, true
+	case "t":
+		return model.PartTentative, true
+	}
+	return "", false
 }
 
 // setExpanded switches mode, keeping the message being read under the cursor.
@@ -197,6 +224,7 @@ func (t *threadView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 			anchor, delta = m.RemoteID, t.off-t.startOf(t.cursor)
 		}
 		t.messages = t.keep(msg.messages)
+		t.invites = msg.invites
 		slices.Reverse(t.messages)
 		if msg.thread != nil {
 			t.subject = msg.thread.Subject
@@ -411,6 +439,9 @@ func (t *threadView) layout(w int) {
 			t.lines = append(t.lines, threadLine{msg: i})
 		}
 		t.lines = append(t.lines, threadLine{msg: i, head: true, text: t.headerText(m, w)})
+		for _, l := range inviteCard(t.invites[m.RemoteID], t.d.loc(), w-2) {
+			t.lines = append(t.lines, threadLine{msg: i, text: "  " + l})
+		}
 		for _, l := range wrapCells(threadBody(m), w-2) {
 			if l != "" {
 				l = "  " + l
@@ -545,6 +576,12 @@ func (t *threadView) viewCompact(w, rows int) string {
 }
 
 func (t *threadView) footer(w int) string {
+	// An invitation under the cursor takes t for tentative, so the mode
+	// switch is not offered on it; it still works on any other message.
+	if t.invite().answerable() {
+		return fmt.Sprintf("y accept · n decline · t tentative · message %d of %d",
+			min(t.cursor+1, len(t.messages)), len(t.messages))
+	}
 	if t.expanded {
 		return fmt.Sprintf("message %d of %d · j/k moves · t collapses",
 			min(t.cursor+1, len(t.messages)), len(t.messages))

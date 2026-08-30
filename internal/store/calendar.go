@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/teulaert/emlcalsync/internal/model"
@@ -420,6 +421,30 @@ func (s *Store) ListEventsUpdatedSince(ctx context.Context, accountIDs []string,
 		args = append(args, anySlice(accountIDs)...)
 	}
 	q += ` ORDER BY e.updated_utc`
+	return s.queryEvents(ctx, q, args...)
+}
+
+// FindEventsByUID returns the live master events carrying an iCalendar UID,
+// across the given accounts (all of them when empty). It is how a mailed
+// invitation is matched to the copy the calendar already holds -- Google and
+// Fastmail both file an incoming invite on the calendar before the mail is
+// read -- so the RSVP can go through the calendar, which is what tells the
+// organizer. Instances (rows with a recurrence id) are left out: an
+// invitation names the series.
+func (s *Store) FindEventsByUID(ctx context.Context, accountIDs []string, uid string) ([]model.Event, error) {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return nil, nil
+	}
+	q := `SELECT ` + eventCols + eventFrom +
+		` WHERE e.uid = ? AND e.deleted_at IS NULL
+		    AND (e.recurrence_id IS NULL OR e.recurrence_id = '')`
+	args := []any{uid}
+	if len(accountIDs) > 0 {
+		q += ` AND c.account_id IN (` + placeholders(len(accountIDs)) + `)`
+		args = append(args, anySlice(accountIDs)...)
+	}
+	q += ` ORDER BY c.account_id, c.is_primary DESC, e.id`
 	return s.queryEvents(ctx, q, args...)
 }
 

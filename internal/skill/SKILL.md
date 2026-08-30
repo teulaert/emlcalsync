@@ -125,6 +125,23 @@ emlcal cal respond home:c:primary:abc123 --accept
  "attachments":[{"part":"2","filename":"invoice.pdf","content_type":"application/pdf","size":48213}]}
 ```
 
+A message that carries a calendar invitation (a `text/calendar` part, listed
+under `attachments` as `invite.ics`) also has `invite`:
+
+```json
+{"invite":{"kind":"invitation","method":"REQUEST","title":"Design review",
+ "start":"2026-09-02T10:00:00+02:00","end":"2026-09-02T10:45:00+02:00","all_day":false,
+ "location":"Teams","organizer":{"name":"Alice","email":"alice@example.com"},
+ "attendees":[{"email":"me@example.com","response":"needs-action","self":true}],
+ "my_response":"needs-action","needs_answer":true,
+ "event_id":"work:c:primary:abc123"}}
+```
+
+`kind` is `invitation`, `cancellation`, `reply` or `event`. `event_id` is the
+calendar's own copy of the event and is what `cal respond` takes; when it is
+missing the calendar has not synced the event yet (run `emlcal sync`) or the
+account has no calendar, and the invite cannot be answered from here.
+
 `cal agenda` — an array of:
 
 ```json
@@ -144,6 +161,9 @@ emlcal cal respond home:c:primary:abc123 --accept
 - Never `trash`, `delete` or `move` anything unless the user asked for it.
   Archiving is not deleting, but it still needs their say-so.
 - Quote the message id when you report a finding, so the user can jump to it.
+- An invitation is answered on the calendar, not by mail: read the message,
+  then `cal respond <invite.event_id> --accept|--decline|--tentative`. Do not
+  reply to the organizer's mail instead.
 - If results look stale or a message the user mentions is missing, run
   `emlcal status` to see the last sync and whether the daemon runs, then
   `emlcal sync` once.

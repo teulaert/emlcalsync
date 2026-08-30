@@ -340,9 +340,10 @@ func propTime(p *ical.Prop, zones map[string]string, log *slog.Logger) (t time.T
 	return t, false, tz, nil
 }
 
-// loadLocation resolves a TZID, first as an IANA name and then through the
+// loadLocation resolves a TZID: as an IANA name, then through the
 // X-LIC-LOCATION of the VTIMEZONE that defines it (which is how a client that
-// invented its own TZID still lands in the right zone).
+// invented its own TZID still lands in the right zone), then as the Windows
+// name Exchange writes.
 func loadLocation(tzid string, zones map[string]string) (*time.Location, bool) {
 	if tzid == "" {
 		return nil, false
@@ -352,6 +353,11 @@ func loadLocation(tzid string, zones map[string]string) (*time.Location, bool) {
 	}
 	if alias, ok := zones[tzid]; ok && alias != tzid {
 		if loc, err := time.LoadLocation(alias); err == nil {
+			return loc, true
+		}
+	}
+	if iana, ok := windowsZones[tzid]; ok {
+		if loc, err := time.LoadLocation(iana); err == nil {
 			return loc, true
 		}
 	}

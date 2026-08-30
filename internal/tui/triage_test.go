@@ -17,15 +17,18 @@ import (
 	"github.com/teulaert/emlcalsync/internal/sync"
 )
 
-// fakeFactory hands the engine one in-memory mail provider.
-type fakeFactory struct{ mail *fake.Mail }
+// fakeFactory hands the engine one in-memory mail provider and one calendar.
+type fakeFactory struct {
+	mail *fake.Mail
+	cal  *fake.Calendar
+}
 
 func (f *fakeFactory) Mail(context.Context, config.Account) (provider.MailProvider, error) {
 	return f.mail, nil
 }
 
 func (f *fakeFactory) Calendar(context.Context, config.Account) (provider.CalendarProvider, error) {
-	return fake.NewCalendar(), nil
+	return f.cal, nil
 }
 
 func (f *fakeFactory) Pusher(context.Context, config.Account) (provider.Pusher, bool, error) {
@@ -36,6 +39,14 @@ func (f *fakeFactory) Pusher(context.Context, config.Account) (provider.Pusher, 
 // so an action taken in the TUI goes down exactly the path `emlcal mail
 // archive` takes.
 func newTriageDeps(t *testing.T) (Deps, *fake.Mail) {
+	t.Helper()
+	d, mail, _ := newTriageDepsWithCalendar(t)
+	return d, mail
+}
+
+// newTriageDepsWithCalendar is newTriageDeps with the fake calendar the
+// engine writes to as well, for the actions that land there.
+func newTriageDepsWithCalendar(t *testing.T) (Deps, *fake.Mail, *fake.Calendar) {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "index.db"))
@@ -71,11 +82,12 @@ func newTriageDeps(t *testing.T) (Deps, *fake.Mail) {
 	}
 
 	mail := fake.NewMail()
+	cal := fake.NewCalendar()
 	eng, err := sync.New(sync.Options{
 		Store:     st,
 		Blobs:     blobs,
 		Config:    cfg,
-		Providers: &fakeFactory{mail: mail},
+		Providers: &fakeFactory{mail: mail, cal: cal},
 		Logger:    slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
@@ -90,7 +102,7 @@ func newTriageDeps(t *testing.T) (Deps, *fake.Mail) {
 		Loc:      time.UTC,
 		Now:      func() time.Time { return testNow },
 		Logger:   slog.New(slog.DiscardHandler),
-	}, mail
+	}, mail, cal
 }
 
 // addTriageMessage indexes one message and gives the fake provider the same

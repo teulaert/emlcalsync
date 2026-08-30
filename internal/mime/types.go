@@ -58,6 +58,22 @@ type Parsed struct {
 	Attachments []Part
 	// AllParts lists every leaf part in tree order (for debugging / --headers).
 	AllParts []Part
+
+	// Calendar is the text/calendar part an invitation, update, cancellation
+	// or RSVP travels in, or nil. Its iCalendar text is read with PartContent
+	// and understood by package itip; the part is also listed under
+	// Attachments (as invite.ics when it had no name) so the index records
+	// that the message carries one.
+	Calendar *CalendarPart
+}
+
+// CalendarPart locates the iTIP payload of a message.
+type CalendarPart struct {
+	Path string // part path, as for PartContent
+	// Method is the Content-Type method parameter, upper-cased: REQUEST for
+	// an invitation, CANCEL, REPLY. "" when the sender left it off, in which
+	// case the METHOD line inside the payload is the one to trust.
+	Method string
 }
 
 // Part describes a MIME leaf.

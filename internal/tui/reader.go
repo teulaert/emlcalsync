@@ -3,10 +3,12 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/teulaert/emlcalsync/internal/itip"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
 )
@@ -21,6 +23,8 @@ type reader struct {
 
 	msg  *model.Message
 	body string
+	// invite is the calendar card, when the message carries one.
+	invite *readerInvite
 
 	vp      viewport.Model
 	ready   bool
@@ -57,7 +61,7 @@ func (r *reader) reload() tea.Cmd {
 // changes what an open reader shows; everything else pushes a new one.
 func (r *reader) show(accountID, remote string) tea.Cmd {
 	r.accountID, r.remote = accountID, remote
-	r.msg, r.body, r.loadErr = nil, "", nil
+	r.msg, r.body, r.invite, r.loadErr = nil, "", nil, nil
 	if r.ready {
 		r.vp.SetContent("")
 		r.vp.GotoTop()
@@ -83,6 +87,7 @@ func (r *reader) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 		if msg.err == nil {
 			r.msg = msg.msg
 			r.body = msg.body
+			r.invite = msg.invite
 			r.setContent(w, h)
 		}
 		return r, nil
@@ -150,7 +155,52 @@ func (r *reader) headerLines(w int) []string {
 	for i, l := range lines {
 		lines[i] = styleFaint.Render(l)
 	}
+	if r.invite != nil {
+		lines = append(lines, "")
+		lines = append(lines, inviteCard(r.invite, r.d.loc(), w)...)
+	}
 	return lines
+}
+
+// inviteCard lays out an invitation the way a mail client shows one: between
+// the headers and the text, what and when and who, and last what to do about
+// it. It is the part of the message that matters, so it is not faint; the
+// closing line is. Nil yields nothing, so callers need not check.
+func inviteCard(ri *readerInvite, loc *time.Location, w int) []string {
+	if ri == nil {
+		return nil
+	}
+	var lines []string
+	for _, f := range ri.inv.Fields(loc) {
+		lines = append(lines, truncCells(padCells(f.Key+":", 12)+f.Value, w))
+	}
+	switch {
+	case ri.answerable() && ri.inv.NeedsAnswer():
+		lines = append(lines, styleFaint.Render(truncCells(padCells("Answer:", 12)+"y accept · n decline · t tentative", w)))
+	case ri.local != nil:
+		lines = append(lines, styleFaint.Render(truncCells(padCells("Calendar:", 12)+ri.calName+" · y/n/t changes the answer", w)))
+	case ri.inv.Method == itip.MethodRequest:
+		lines = append(lines, styleFaint.Render(truncCells(padCells("Calendar:", 12)+"not on a synced calendar yet", w)))
+	}
+	lines = append(lines, "")
+	return lines
+}
+
+// rsvp is the RSVP the user just pressed, if any -- the event view's keys,
+// so an invitation is answered the same way wherever it is met.
+func (r *reader) rsvp(k string) (model.Participation, bool) {
+	if !r.invite.answerable() {
+		return "", false
+	}
+	switch k {
+	case "y":
+		return model.PartAccepted, true
+	case "n":
+		return model.PartDeclined, true
+	case "t":
+		return model.PartTentative, true
+	}
+	return "", false
 }
 
 func (r *reader) View(w, h int) string {
@@ -181,6 +231,9 @@ func (r *reader) footer(w int) string {
 	f := output.MailFlags(r.msg.Flags, r.msg.HasAttachments)
 	if f == "" {
 		f = "-"
+	}
+	if r.invite.answerable() {
+		return fmt.Sprintf("y accept · n decline · t tentative · %s · %d%%", f, int(r.vp.ScrollPercent()*100))
 	}
 	return fmt.Sprintf("%s · %s · %d%%", r.msg.PublicID(), f, int(r.vp.ScrollPercent()*100))
 }

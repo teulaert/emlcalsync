@@ -119,6 +119,8 @@ func (k keymap) helpLines() [][2]string {
 		{"z", "undo the last action"},
 		{"ctrl+g", "ask the AI about the conversation: a summary, or a question typed at the prompt"},
 		{"y", "copy the id to the clipboard: the thread's on a row, the message's in a thread or the reader"},
+		{"y / n / t", "on an event, or the mail inviting to one: accept / decline / tentative"},
+		{"enter", "on an invitation: open the event on the calendar"},
 		{"  r", "on the summary: reply to the conversation"},
 		{"", ""},
 		{"r", "reply (carries on the thread's draft, if there is one)"},

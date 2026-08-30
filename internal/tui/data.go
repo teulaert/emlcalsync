@@ -3,12 +3,14 @@ package tui
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/teulaert/emlcalsync/internal/compose"
+	"github.com/teulaert/emlcalsync/internal/itip"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/store"
@@ -33,7 +35,10 @@ type threadOpened struct {
 	seq      int
 	thread   *model.Thread
 	messages []model.Message
-	err      error
+	// invites are the calendar cards of the messages that carry one, by
+	// remote id.
+	invites map[string]*readerInvite
+	err     error
 }
 
 type bodyLoaded struct {
@@ -41,7 +46,24 @@ type bodyLoaded struct {
 	id   string // public message id the body belongs to
 	msg  *model.Message
 	body string
-	err  error
+	// invite is the calendar card of a message that carries one, or nil.
+	invite *readerInvite
+	err    error
+}
+
+// readerInvite is an invitation as the reader shows it: what the mail says,
+// and the calendar's own copy of the event when the index has one -- which
+// is what an answer goes through, and what enter opens.
+type readerInvite struct {
+	inv     *itip.Invite
+	local   *model.Event
+	calName string
+}
+
+// answerable reports whether y/n/t mean anything here: an invitation, with a
+// synced calendar copy to answer on.
+func (ri *readerInvite) answerable() bool {
+	return ri != nil && ri.local != nil && ri.inv.Method == itip.MethodRequest
 }
 
 type agendaLoaded struct {
@@ -150,7 +172,16 @@ func (d Deps) openThread(seq int, accountID, threadID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		t, msgs, err := d.Store.GetThread(ctx, accountID, threadID, false)
-		return threadOpened{seq: seq, thread: t, messages: msgs, err: err}
+		out := threadOpened{seq: seq, thread: t, messages: msgs, err: err}
+		for i := range msgs {
+			if ri := d.loadInvite(ctx, &msgs[i]); ri != nil {
+				if out.invites == nil {
+					out.invites = map[string]*readerInvite{}
+				}
+				out.invites[msgs[i].RemoteID] = ri
+			}
+		}
+		return out
 	}
 }
 
@@ -163,12 +194,67 @@ func (d Deps) loadBody(seq int, accountID, remote string) tea.Cmd {
 			return bodyLoaded{seq: seq, id: model.MessagePublicID(accountID, remote), err: err}
 		}
 		return bodyLoaded{
-			seq:  seq,
-			id:   m.PublicID(),
-			msg:  m,
-			body: readableBody(ctx, d, m),
+			seq:    seq,
+			id:     m.PublicID(),
+			msg:    m,
+			body:   readableBody(ctx, d, m),
+			invite: d.loadInvite(ctx, m),
 		}
 	}
+}
+
+// loadInvite reads the calendar card of a message the index says carries
+// one, and matches it to the calendar. The bytes come through the engine,
+// which reads the archive and only fetches for an envelope-only stub; a
+// message whose bytes cannot be had shows no card, and the log says why.
+// Screens drawn without an engine -- tests, mostly -- show none either.
+func (d Deps) loadInvite(ctx context.Context, m *model.Message) *readerInvite {
+	if !m.HasAttachments || d.Store == nil || d.Engine == nil {
+		return nil
+	}
+	atts, err := d.Store.ListAttachments(ctx, m.ID)
+	if err != nil {
+		return nil
+	}
+	carries := false
+	for _, a := range atts {
+		if itip.IsCalendarAttachment(a) {
+			carries = true
+			break
+		}
+	}
+	if !carries {
+		return nil
+	}
+	raw, err := d.Engine.EnsureRaw(ctx, m.AccountID, m.RemoteID)
+	if err != nil {
+		d.log().Warn("invite: read message", "id", m.PublicID(), "err", err)
+		return nil
+	}
+	inv, err := itip.FromMessage(raw, d.sendFrom(m.AccountID).Email)
+	if err != nil {
+		if !errors.Is(err, itip.ErrNoInvite) {
+			d.log().Warn("invite: parse", "id", m.PublicID(), "err", err)
+		}
+		return nil
+	}
+	out := &readerInvite{inv: inv}
+	if evs, err := d.Store.FindEventsByUID(ctx, d.Accounts, inv.Event.UID); err == nil {
+		out.local = itip.Match(evs, m.AccountID)
+	}
+	if out.local != nil {
+		// The calendar knows the answer better than the mail does: an
+		// invitation accepted last week still says needs-action in the
+		// message.
+		if out.local.MyResponse != "" {
+			inv.Event.MyResponse = out.local.MyResponse
+		}
+		out.calName = out.local.CalendarRemote
+		if c, err := d.Store.GetCalendarByRemote(ctx, out.local.AccountID, out.local.CalendarRemote); err == nil && c.Name != "" {
+			out.calName = c.Name
+		}
+	}
+	return out
 }
 
 func (d Deps) loadAgenda(seq int, from, to time.Time) tea.Cmd {

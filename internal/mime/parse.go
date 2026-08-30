@@ -37,6 +37,7 @@ var ErrEmpty = errors.New("mime: empty message")
 type leaf struct {
 	part      Part
 	mediaType string
+	method    string // the Content-Type method parameter of a calendar part
 	text      []byte // retained for text/* leaves only
 }
 
@@ -81,9 +82,20 @@ func Parse(raw []byte) (p *Parsed, err error) {
 		if isAttachmentPart(l) {
 			out.Attachments = append(out.Attachments, l.part)
 		}
+		if out.Calendar == nil && isCalendarPart(l.mediaType) {
+			out.Calendar = &CalendarPart{Path: l.part.Path, Method: l.method}
+		}
 	}
 	selectBody(out, w.leaves)
 	return out, nil
+}
+
+// isCalendarPart reports whether a media type carries iCalendar text.
+// text/calendar is what RFC 6047 says an iTIP message travels as;
+// application/ics is the copy Google Calendar attaches beside it, and the
+// only form some senders use.
+func isCalendarPart(mt string) bool {
+	return mt == "text/calendar" || mt == "application/ics"
 }
 
 // fallbackParse treats raw as a bare text body with no headers.
@@ -169,6 +181,13 @@ func isAttachmentPart(l leaf) bool {
 		// what Apple Mail and several webmail clients send: no disposition and
 		// no filename, but an attachment all the same.
 		return true
+	case isCalendarPart(l.mediaType):
+		// The .ics of an invitation. Outlook and Exchange put it in the
+		// multipart/alternative next to the text, with no name and no
+		// disposition, and it is the whole point of the message: listing it
+		// is what lets the index say "this one carries an invite" and lets
+		// `mail attachment get` hand the file to another calendar.
+		return true
 	}
 	return false
 }
@@ -233,11 +252,16 @@ func (w *walker) walk(e *message.Entity, path string, depth int) {
 	if path == "" {
 		path = "1"
 	}
-	w.addLeaf(e, path, mt)
+	w.addLeaf(e, path, mt, params)
 }
 
-func (w *walker) addLeaf(e *message.Entity, path, mt string) {
+func (w *walker) addLeaf(e *message.Entity, path, mt string, params map[string]string) {
 	disp, cid, inline, filename := dispositionOf(&e.Header, mt)
+	if filename == "" && isCalendarPart(mt) {
+		// Named the way Google Calendar names the copy it attaches, so the
+		// file reads as what it is wherever it ends up.
+		filename = "invite.ics"
+	}
 
 	l := leaf{
 		part: Part{
@@ -249,6 +273,7 @@ func (w *walker) addLeaf(e *message.Entity, path, mt string) {
 			Disposition: disp,
 		},
 		mediaType: mt,
+		method:    strings.ToUpper(strings.TrimSpace(params["method"])),
 	}
 
 	// A multipart leaf is a container this walker could not descend into (past

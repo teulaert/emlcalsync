@@ -429,3 +429,61 @@ func TestEventExceptionsAndUpdatedSince(t *testing.T) {
 		t.Fatalf("ListEventsUpdatedSince(all) = %d %v", len(all), err)
 	}
 }
+
+func TestFindEventsByUID(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+	seedCalendars(t, s, "work")
+	seedAccount(t, s, "home")
+	if err := s.ReplaceCalendars(ctx, "home", []model.Calendar{
+		{RemoteID: "primary", Name: "Home", Primary: true, AccessRole: "owner"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 9, 2, 8, 0, 0, 0, time.UTC)
+	put := func(account, cal, remote, uid, rid string, deleted bool) {
+		t.Helper()
+		ev := &model.Event{AccountID: account, CalendarRemote: cal, RemoteID: remote, UID: uid,
+			Title: "Momentum FO", Start: base, End: base.Add(45 * time.Minute), RecurrenceID: rid,
+			RawJSON: []byte(`{}`)}
+		if deleted {
+			d := base
+			ev.DeletedAt = &d
+		}
+		if _, err := s.UpsertEvent(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The same invitation filed on two accounts, plus an instance of it, a
+	// deleted copy, and an unrelated event.
+	put("home", "primary", "h1", "uid-1", "", false)
+	put("work", "primary", "w1", "uid-1", "", false)
+	put("work", "primary", "w1;20260909T080000", "uid-1", "2026-09-09T08:00:00Z", false)
+	put("work", "team@group.calendar", "gone", "uid-1", "", true)
+	put("work", "primary", "w2", "uid-2", "", false)
+
+	evs, err := s.FindEventsByUID(ctx, nil, "uid-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range evs {
+		got = append(got, e.PublicID())
+	}
+	want := []string{"home:c:primary:h1", "work:c:primary:w1"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("all accounts: %v, want %v", got, want)
+	}
+
+	evs, err = s.FindEventsByUID(ctx, []string{"work"}, "uid-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 || evs[0].RemoteID != "w1" {
+		t.Errorf("work only: %+v", evs)
+	}
+	if evs, _ := s.FindEventsByUID(ctx, nil, ""); len(evs) != 0 {
+		t.Errorf("an empty uid matched %d events", len(evs))
+	}
+}
