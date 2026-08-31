@@ -352,7 +352,10 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return r, r.startSummary()
 
 	case key.Matches(msg, r.keys.Browser):
-		return r, r.openInBrowser()
+		return r, r.openInBrowser(r.d.remoteContent())
+
+	case key.Matches(msg, r.keys.BrowserFlip):
+		return r, r.openInBrowser(!r.d.remoteContent())
 	}
 
 	if key.Matches(msg, r.keys.Copy) {
@@ -554,13 +557,15 @@ func (r *root) copyID() tea.Cmd {
 // It is the way out of a message the text extractor mangled. HTML mail is
 // nested tables rather than prose, and any pass over it is a heuristic that
 // will sometimes drop the one line that was the point of the mail -- a
-// one-time login code, most memorably. Nothing on the page reaches the
-// network: `mail open` blocks remote content, so opening one does not tell
-// its sender that it was opened.
+// one-time login code, most memorably. The page itself reaches the network
+// for nothing; pictures says whether emlcal fetched the ones the sender hosts
+// elsewhere before writing it, which is the one thing that tells the sender
+// the message was opened. O is o with that answer reversed, for the marketing
+// mail that is all pictures and the message one would rather read unnoticed.
 //
 // A list row is a conversation rather than a message, so it opens the newest
 // message in it -- the one the row is showing.
-func (r *root) openInBrowser() tea.Cmd {
+func (r *root) openInBrowser(pictures bool) tea.Cmd {
 	req, ok := r.focused()
 	if !ok {
 		return nil
@@ -569,8 +574,12 @@ func (r *root) openInBrowser() tea.Cmd {
 		r.note("no archive to read the message from")
 		return nil
 	}
-	r.note("opening in the browser…")
-	return r.d.openInBrowser(req.account, req.remote, req.thread)
+	if pictures {
+		r.note("opening in the browser, fetching pictures…")
+	} else {
+		r.note("opening in the browser…")
+	}
+	return r.d.openInBrowser(req.account, req.remote, req.thread, pictures)
 }
 
 // startSummary is ctrl+g anywhere but the composer: it asks the model about

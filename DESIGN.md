@@ -684,10 +684,30 @@ the sender's own markup, its `cid:` parts folded in as `data:` URIs, the
 readable, and a short header block above it.
 
 The page declares a content security policy that lets it load nothing —
-`default-src 'none'; img-src data:`. An archive whose reads never touch the
-network must not start doing so because the text extractor gave up, and HTML
-mail is full of tracking pixels that would otherwise tell the sender that the
-message was opened. `--remote` lifts the policy, and the page says so.
+`default-src 'none'; img-src data:` — and the policy is unconditional. There
+is no mode in which the browser fetches for the message: it cannot reach the
+network, run a script, or post a form, whatever the sender wrote.
+
+That leaves the pictures a message hosts elsewhere, which are most of what a
+marketing mail is. Left out, the tables that were sized by them collapse and
+the page is not worth having opened a browser for. So emlcal fetches them
+itself (`internal/webasset`) and folds them in as `data:` URIs. Doing the
+fetch here rather than in the browser is the point: a browser asking a
+tracking host for a pixel sends the cookies it holds for that host, which
+names an *account* rather than an IP, and it warms a cache shared with
+ordinary browsing. This client has no cookie jar, sends no referrer, caps the
+size, follows five redirects, refuses anything that is not a picture or a
+font, and will not dial a loopback or private address — a message aiming an
+`<img>` at the router's admin page is an old trick.
+
+What that cannot hide is the fetch itself. The URL is minted per recipient, so
+asking for it tells the sender the message was opened; only fetching every
+message's pictures ahead of any read would not, and that is a bigger machine
+than this one. So it is a setting rather than a law: `general.remote_content`
+(default `true`), `--remote` / `--no-remote` per message, `O` in the TUI for
+the message that should go the other way. When pictures are left out the
+references stay in the page, so a broken image says "there was one here", and
+the header block says which way the page was rendered.
 
 ---
 
@@ -738,8 +758,10 @@ emlcal mail list [--mailbox inbox] [--unread] [--flagged] [--from X] [--to X]
                  [--since 2d] [--no-bulk] [--thread] [--limit N]
 emlcal mail search "<fts query>" [same filters]     FTS5 syntax: AND OR NOT "phrase" col:term
 emlcal mail read <id> [--full] [--html] [--raw] [--headers]
-emlcal mail open <id> [-O path] [--remote]           render it and open it in the browser;
-                                                     remote content blocked unless --remote (§8)
+emlcal mail open <id> [-O path] [--remote|--no-remote]  render it and open it in the browser;
+                                                     the page loads nothing itself; emlcal fetches
+                                                     the pictures hosted elsewhere unless
+                                                     --no-remote / remote_content = false (§8)
 emlcal mail thread <id>                              all messages, oldest first, stripped bodies
 emlcal mail attachment list <id>
 emlcal mail attachment get <id> <part|filename> [-O path]   (fetches remote if raw_complete=0; -o is the format flag)
@@ -963,6 +985,7 @@ internal/
   store/          SQLite open/migrate, typed queries (sqlc-generated), FTS helpers
   blob/           content-addressed zstd store
   browser/        hand a URL to the desktop; write the pages `mail open` renders
+  webasset/       fetch the pictures a message hosts elsewhere, carefully (§8)
   mime/           parse, text extraction, quote/signature stripping, RFC822 builder
   compose/        reply headers, quoting, address parsing, SMTP envelope (cli + tui)
   doctext/        attachment -> text: pdftotext for PDFs, html2text, plain text

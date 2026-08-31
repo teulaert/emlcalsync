@@ -184,6 +184,14 @@ type General struct {
 	DefaultAccount string `toml:"default_account"`
 	// RawMaxSize caps the size of messages archived in full; 0 = unlimited.
 	RawMaxSize Size `toml:"raw_max_size"`
+	// RemoteContent lets `mail open` fetch the pictures a message hosts
+	// elsewhere and fold them into the page it renders. On by default,
+	// because a message whose pictures are missing is usually not worth
+	// opening a browser for. The fetch is emlcal's own — no cookies, no
+	// referrer, and the page still loads nothing itself — but the request
+	// does tell the sender the message was opened. Set it false to keep that
+	// quiet; --remote and --no-remote decide one message at a time.
+	RemoteContent bool `toml:"remote_content"`
 
 	// Directory layout, always absolute after Load.
 	ConfigDir string `toml:"config_dir"`

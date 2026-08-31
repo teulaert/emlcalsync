@@ -17,6 +17,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/store"
+	"github.com/teulaert/emlcalsync/internal/webasset"
 )
 
 // Every store call is blocking I/O, so each one is a tea.Cmd returning one of
@@ -585,11 +586,13 @@ type browserOpened struct {
 // openInBrowser renders one message as a standalone HTML page and hands it to
 // the desktop's browser. remote names the message; when it is empty the
 // newest message in the thread is taken, which is what a list row shows.
+// pictures says whether the ones the sender hosts elsewhere are fetched and
+// folded in -- o takes it from the configuration, O reverses it.
 //
 // The fetch budget is the download one rather than the row-lookup one: a
 // message archived envelope-only has to come off the provider before there is
 // anything to render.
-func (d Deps) openInBrowser(accountID, remote, thread string) tea.Cmd {
+func (d Deps) openInBrowser(accountID, remote, thread string, pictures bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
@@ -608,7 +611,7 @@ func (d Deps) openInBrowser(accountID, remote, thread string) tea.Cmd {
 		if err != nil {
 			return browserOpened{id: m.PublicID(), err: err}
 		}
-		doc, err := mime.HTMLDocument(raw, mime.HTMLDocOptions{})
+		doc, err := mime.HTMLDocument(ctx, raw, mime.HTMLDocOptions{Fetch: d.assetFetcher(pictures)})
 		if err != nil {
 			return browserOpened{id: m.PublicID(), err: err}
 		}
@@ -629,6 +632,26 @@ func (d Deps) openInBrowser(accountID, remote, thread string) tea.Cmd {
 		}
 		return browserOpened{id: m.PublicID()}
 	}
+}
+
+// remoteContent is whether o fetches the pictures a message hosts elsewhere.
+// No configuration means no: nothing has said the archive may reach out, and
+// a default that talks to the network unasked is the wrong way round.
+func (d Deps) remoteContent() bool {
+	return d.Config != nil && d.Config.General.RemoteContent
+}
+
+// assetFetcher is what renders the pictures hosted elsewhere, or nil to leave
+// them out. A test stands one in through Deps.Fetch so that pressing o asks
+// nobody for anything.
+func (d Deps) assetFetcher(want bool) mime.FetchFunc {
+	switch {
+	case !want:
+		return nil
+	case d.Fetch != nil:
+		return d.Fetch
+	}
+	return webasset.New().Fetch
 }
 
 func (d Deps) viewDir() string {

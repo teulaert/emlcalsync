@@ -196,10 +196,15 @@ cal       calendars · agenda · show · free                                   
 - `mail open <id>` renders a message as a standalone HTML page and opens it
   in your browser — the escape hatch for mail no text extraction does justice
   to, when the one-time code or the amount lives in the markup and nowhere
-  else. `o` does the same on the message in focus in the TUI. The page loads
-  nothing from the network: inline images travel inside it, and the tracking
-  pixels do not fire, so opening a message does not tell its sender that you
-  did. `--remote` lifts that; `-O path` writes the page instead of opening it.
+  else. `o` does the same on the message in focus in the TUI. The page itself
+  loads nothing: it cannot reach the network, run a script or post a form.
+  The pictures the sender hosts elsewhere are fetched by emlcal and folded
+  into the page — without cookies, without a referrer, never from a private
+  address — so the sender learns that somebody opened the message and not
+  which account did. `--no-remote` leaves them out and nothing about the
+  message leaves your machine; `remote_content = false` under `[general]`
+  makes that the default, and `O` in the TUI goes the other way for one
+  message. `-O path` writes the page instead of opening it.
 - A mailed invitation — the `text/calendar` part Outlook, Google Calendar and
   Fastmail send, which Exchange hides inside the alternative with no name —
   comes out of `mail read` and `mail thread` as a card: what, when, where,

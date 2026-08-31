@@ -1,6 +1,7 @@
 package mime
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -17,7 +18,7 @@ func TestHTMLDocumentKeepsWhatTextExtractionLost(t *testing.T) {
 		t.Skip("html2text no longer loses this body; the fixture needs a new one")
 	}
 
-	doc, err := HTMLDocument(raw, HTMLDocOptions{})
+	doc, err := HTMLDocument(t.Context(), raw, HTMLDocOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +38,7 @@ func TestHTMLDocumentKeepsWhatTextExtractionLost(t *testing.T) {
 func TestHTMLDocumentBlocksRemoteContent(t *testing.T) {
 	raw := load(t, "html_only.eml")
 
-	doc, err := HTMLDocument(raw, HTMLDocOptions{})
+	doc, err := HTMLDocument(t.Context(), raw, HTMLDocOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,19 +54,25 @@ func TestHTMLDocumentBlocksRemoteContent(t *testing.T) {
 		t.Errorf("policy at %d comes after <body> at %d", i, j)
 	}
 
-	remote, err := HTMLDocument(raw, HTMLDocOptions{AllowRemote: true})
+	// The policy is unconditional: fetching the pictures is emlcal's job, so
+	// there is no longer a mode in which the browser is let off the leash.
+	withPictures, err := HTMLDocument(t.Context(), raw, HTMLDocOptions{
+		Fetch: func(context.Context, string) ([]byte, string, error) {
+			return []byte("\x89PNG\r\n\x1a\n"), "image/png", nil
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(remote), "Content-Security-Policy") {
-		t.Error("--remote still blocks remote content")
+	if !strings.Contains(string(withPictures), "default-src 'none'") {
+		t.Error("fetching the pictures dropped the policy off the page")
 	}
 }
 
 func TestHTMLDocumentInlinesCIDImages(t *testing.T) {
 	raw := load(t, "related_inline.eml")
 
-	doc, err := HTMLDocument(raw, HTMLDocOptions{})
+	doc, err := HTMLDocument(t.Context(), raw, HTMLDocOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +92,7 @@ func TestHTMLDocumentLeavesUnknownCID(t *testing.T) {
 		`<img src="cid:photo1@example.net">`,
 		`<img src="cid:photo1@example.net"><img src="cid:gone@example.net">`)
 
-	doc, err := HTMLDocument([]byte(raw), HTMLDocOptions{})
+	doc, err := HTMLDocument(t.Context(), []byte(raw), HTMLDocOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +104,7 @@ func TestHTMLDocumentLeavesUnknownCID(t *testing.T) {
 func TestHTMLDocumentCapsInlineBytes(t *testing.T) {
 	raw := load(t, "related_inline.eml")
 
-	doc, err := HTMLDocument(raw, HTMLDocOptions{MaxInlineBytes: 1})
+	doc, err := HTMLDocument(t.Context(), raw, HTMLDocOptions{MaxInlineBytes: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +121,7 @@ func TestHTMLDocumentCapsInlineBytes(t *testing.T) {
 func TestHTMLDocumentLiftsBodyAttributes(t *testing.T) {
 	raw := load(t, "html_style_selectors.eml")
 
-	doc, err := HTMLDocument(raw, HTMLDocOptions{})
+	doc, err := HTMLDocument(t.Context(), raw, HTMLDocOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +142,7 @@ func TestHTMLDocumentFallsBackToText(t *testing.T) {
 	raw := []byte("From: a@example.com\r\nTo: b@example.org\r\n" +
 		"Subject: Plain\r\n\r\nline one\r\nline <two>\r\n")
 
-	doc, err := HTMLDocument(raw, HTMLDocOptions{})
+	doc, err := HTMLDocument(t.Context(), raw, HTMLDocOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +175,7 @@ func TestHTMLDocumentIgnoresCIDInsideALongerWord(t *testing.T) {
 		`<span id="x_cid:photo1@example.net">&lt;pixel.png&gt;</span>`+
 			`<img src="cid:photo1@example.net">`)
 
-	doc, err := HTMLDocument([]byte(raw), HTMLDocOptions{})
+	doc, err := HTMLDocument(t.Context(), []byte(raw), HTMLDocOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +196,7 @@ func TestHTMLDocumentStopsCIDAtMarkup(t *testing.T) {
 			`<img src="cid:photo1@example.net">`,
 			`<span>cid:photo1@example.net`+tail)
 
-		doc, err := HTMLDocument([]byte(raw), HTMLDocOptions{})
+		doc, err := HTMLDocument(t.Context(), []byte(raw), HTMLDocOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}

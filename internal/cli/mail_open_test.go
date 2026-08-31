@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ type openOut struct {
 	Path   string `json:"path"`
 	URL    string `json:"url"`
 	Size   int64  `json:"size"`
-	Remote bool   `json:"remote_content_allowed"`
+	Remote bool   `json:"remote_content"`
 }
 
 func TestMailOpen(t *testing.T) {
@@ -85,7 +86,10 @@ func TestMailOpen(t *testing.T) {
 	}
 }
 
-func TestMailOpenRemote(t *testing.T) {
+// The pictures a message hosts elsewhere are fetched by emlcal and travel
+// inside the page. The browser is never the one asking: the policy stays on
+// the page whichever way this goes.
+func TestMailOpenFoldsInRemotePictures(t *testing.T) {
 	env := openSeed(t)
 
 	var got openOut
@@ -96,13 +100,87 @@ func TestMailOpenRemote(t *testing.T) {
 	if !got.Remote {
 		t.Error("--remote is not reported in the output")
 	}
-	page, err := os.ReadFile(got.Path)
+	if want := []string{"https://tracker.example.com/pixel.gif"}; !slices.Equal(env.Fetched, want) {
+		t.Errorf("fetched %q, want %q", env.Fetched, want)
+	}
+	page := readPage(t, got.Path)
+	if strings.Contains(page, "https://tracker.example.com/pixel.gif") {
+		t.Error("the remote reference is still in the page; the browser would have to fetch it")
+	}
+	if !strings.Contains(page, "src=\"data:image/gif;base64,") {
+		t.Error("the picture did not arrive as a data: URI")
+	}
+	if !strings.Contains(page, "Content-Security-Policy") {
+		t.Error("fetching the pictures dropped the policy: the page is off the leash")
+	}
+}
+
+// --no-remote is the other half of the promise: nothing about the message
+// leaves the machine, and the reference is left alone so the reader can see
+// there was a picture there.
+func TestMailOpenNoRemoteAsksNobody(t *testing.T) {
+	env := openSeed(t)
+
+	var got openOut
+	out := env.MustRun("mail", "open", "work:m-otp", "--no-remote")
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out)
+	}
+	if got.Remote {
+		t.Error("--no-remote is reported as having fetched")
+	}
+	if len(env.Fetched) != 0 {
+		t.Errorf("--no-remote fetched %q", env.Fetched)
+	}
+	page := readPage(t, got.Path)
+	if !strings.Contains(page, "https://tracker.example.com/pixel.gif") {
+		t.Error("the reference was rewritten even though nothing was fetched")
+	}
+	if !strings.Contains(page, "left out") {
+		t.Error("the page does not say the pictures were left out")
+	}
+}
+
+// --remote and --no-remote together is a contradiction, not a precedence
+// puzzle to be solved quietly in one direction.
+func TestMailOpenRefusesBothFlags(t *testing.T) {
+	env := openSeed(t)
+	_, errs, code := env.Run("mail", "open", "work:m-otp", "--remote", "--no-remote")
+	if code == 0 {
+		t.Fatal("both flags were accepted")
+	}
+	if !strings.Contains(errs, "cannot both be given") {
+		t.Errorf("stderr = %q", errs)
+	}
+}
+
+// With no flag, config.toml decides.
+func TestMailOpenFollowsConfig(t *testing.T) {
+	env := openSeed(t)
+	env.SetRemoteContent(false)
+
+	var got openOut
+	out := env.MustRun("mail", "open", "work:m-otp")
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out)
+	}
+	if got.Remote || len(env.Fetched) != 0 {
+		t.Errorf("remote_content = false still fetched %q", env.Fetched)
+	}
+	// ...and --remote overrides it the other way.
+	env.MustRun("mail", "open", "work:m-otp", "--remote")
+	if len(env.Fetched) == 0 {
+		t.Error("--remote did not override remote_content = false")
+	}
+}
+
+func readPage(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(page), "Content-Security-Policy") {
-		t.Error("--remote still blocked remote content")
-	}
+	return string(b)
 }
 
 // -O is "write it, I will open it myself": no browser, no cache directory.

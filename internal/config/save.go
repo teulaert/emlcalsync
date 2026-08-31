@@ -51,6 +51,11 @@ func render(c *Config) []byte {
 	}
 	b.WriteString("# Messages larger than this are indexed without their attachments. 0 = unlimited.\n")
 	fmt.Fprintf(&b, "raw_max_size   = %s\n", quote(c.General.RawMaxSize.String()))
+	b.WriteString("# `mail open` fetches the pictures a message hosts elsewhere and folds them\n")
+	b.WriteString("# into the page it renders. The fetch is emlcal's own — no cookies, no\n")
+	b.WriteString("# referrer — and the page itself still loads nothing, but asking does tell\n")
+	b.WriteString("# the sender the message was opened. false leaves those pictures out.\n")
+	fmt.Fprintf(&b, "remote_content = %v\n", c.General.RemoteContent)
 	b.WriteString("# Where OAuth and API tokens live: file | libsecret.\n")
 	fmt.Fprintf(&b, "secret_backend = %s\n", quote(orDefault(c.General.SecretBackend, DefaultSecretBackend)))
 

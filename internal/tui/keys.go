@@ -38,6 +38,7 @@ type keymap struct {
 	AI          key.Binding
 	Copy        key.Binding
 	Browser     key.Binding
+	BrowserFlip key.Binding
 	Help        key.Binding
 
 	// The composer's own keys. They live here with the rest rather than as
@@ -90,7 +91,9 @@ func defaultKeys() keymap {
 		AI:         key.NewBinding(key.WithKeys("ctrl+g"), key.WithHelp("ctrl+g", "ask the AI")),
 		Copy:       key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy the id")),
 		Browser:    key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in the browser")),
-		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		BrowserFlip: key.NewBinding(key.WithKeys("O"),
+			key.WithHelp("O", "open in the browser, the other way on pictures")),
+		Help: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 
 		Send:        key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "send")),
 		SaveDraft:   key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save as a draft")),
@@ -124,7 +127,8 @@ func (k keymap) helpLines() [][2]string {
 		{"z", "undo the last action"},
 		{"ctrl+g", "ask the AI about the conversation: a summary, or a question typed at the prompt"},
 		{"y", "copy the id to the clipboard: the thread's on a row, the message's in a thread or the reader"},
-		{"o", "open the message in the browser, as the sender wrote it (remote content blocked)"},
+		{"o", "open the message in the browser, as the sender wrote it"},
+		{"O", "the same, reversing whether the pictures the sender hosts elsewhere are fetched"},
 		{"y / n / t", "on an event, or the mail inviting to one: accept / decline / tentative"},
 		{"enter", "on an invitation: open the event on the calendar"},
 		{"  r", "on the summary: reply to the conversation"},

@@ -28,7 +28,8 @@ includes replying: r and a open a composer on the message in focus, and what
 it sends is what ` + "`emlcal mail reply`" + ` would have sent. f forwards that
 message on and c starts a new one. o opens the message in focus in the
 browser, as the sender wrote it, for the mail no text extraction does justice
-to; nothing on that page reaches the network. With a model
+to; the page itself loads nothing, and O reverses whether the pictures the
+sender hosts elsewhere were fetched for it. With a model
 configured under [ai] in config.toml, ctrl+g in the composer drafts the reply
 from the thread, with or without instructions; the model can look other mail
 and the calendar up first, through the same read commands.

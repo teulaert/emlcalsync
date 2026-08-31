@@ -164,7 +164,8 @@ account has no calendar, and the invite cannot be answered from here.
   code, a total, a button's label — these live in the markup and nowhere else.
   Tell the user they can see the page itself with `emlcal mail open <id>`
   (or `o` in the TUI); do not run that yourself, it opens a browser on their
-  desktop.
+  desktop and fetches the pictures the sender hosts elsewhere, which tells
+  that sender the message was opened.
 - Run write commands with `--dry-run` first and show the user the result, unless
   they have already told you to just send it.
 - Never `trash`, `delete` or `move` anything unless the user asked for it.

@@ -17,6 +17,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/ai"
 	"github.com/teulaert/emlcalsync/internal/blob"
 	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/store"
@@ -37,6 +38,10 @@ type App struct {
 	Factory sync.ProviderFactory
 	// OpenBrowser is used by `account add gmail`; nil prints the URL only.
 	OpenBrowser func(url string) error
+	// Fetch pulls the pictures `mail open` folds into the page it renders.
+	// Nil means webasset's own; a test stands one in so that opening a
+	// message asks nobody for anything.
+	Fetch mime.FetchFunc
 	// Progress receives sync progress events (set by the sync command).
 	Progress func(sync.ProgressEvent)
 	// AIClient, when set, is the model; tests stand one in. Otherwise the

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	stdsync "sync"
 	"testing"
 	"time"
 
@@ -54,9 +55,19 @@ type testEnv struct {
 	Now    time.Time
 	// Opened collects the URLs a command would have handed the desktop, so a
 	// test can press the escape hatch without a browser appearing.
-	Opened  []string
+	Opened []string
+	// Fetched collects the URLs a rendered page asked emlcal to pull in, so
+	// a test can tell "the pictures were folded in" from "nothing about this
+	// message left the machine". Guarded: the fetches run in parallel.
+	Fetched []string
+	fetchMu stdsync.Mutex
 	factory *fakeFactory
 }
+
+// onePixelGIF is what the stub fetcher answers with: a real GIF, small
+// enough to read in a failure message.
+var onePixelGIF = []byte("GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!" +
+	"\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;")
 
 // newTestEnv writes a config.toml with the given accounts into a temp dir and
 // returns the environment. Accounts default to one fastmail account "work"
@@ -120,6 +131,15 @@ func (e *testEnv) App() (*App, *bytes.Buffer, *bytes.Buffer) {
 			e.Opened = append(e.Opened, url)
 			return nil
 		},
+		// Nothing in the suite is allowed near the network. Standing a
+		// fetcher in also makes "what did opening this message ask for?" a
+		// thing a test can assert on.
+		Fetch: func(_ context.Context, url string) ([]byte, string, error) {
+			e.fetchMu.Lock()
+			defer e.fetchMu.Unlock()
+			e.Fetched = append(e.Fetched, url)
+			return onePixelGIF, "image/gif", nil
+		},
 	}
 	return app, &out, &errb
 }
@@ -157,6 +177,21 @@ func (e *testEnv) Sync(account string) {
 }
 
 // Seed adds messages to an account's fake provider and syncs.
+// SetRemoteContent rewrites general.remote_content in the config the
+// environment's commands read, so a test can see what the file decides when
+// no flag is given.
+func (e *testEnv) SetRemoteContent(v bool) {
+	e.T.Helper()
+	cfg, err := config.Load(e.Config)
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	cfg.General.RemoteContent = v
+	if err := config.Save(e.Config, cfg); err != nil {
+		e.T.Fatal(err)
+	}
+}
+
 func (e *testEnv) Seed(account string, msgs ...*fake.Msg) {
 	e.T.Helper()
 	for _, m := range msgs {

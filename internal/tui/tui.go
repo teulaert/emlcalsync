@@ -19,6 +19,7 @@ import (
 
 	"github.com/teulaert/emlcalsync/internal/ai"
 	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/store"
 	"github.com/teulaert/emlcalsync/internal/sync"
 )
@@ -51,6 +52,9 @@ type Deps struct {
 	// Browser opens a URL on the desktop. Nil means browser.Open; a test sets
 	// it so that pressing o launches nothing.
 	Browser func(url string) error
+	// Fetch pulls the pictures o folds into the page, when the configuration
+	// asks for them. Nil means webasset's own.
+	Fetch mime.FetchFunc
 
 	// input and output are set by tests to drive the program headlessly.
 	input  ioReader
