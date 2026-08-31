@@ -82,6 +82,35 @@ func TestTrashUndoReplaysTheWholeMailboxSet(t *testing.T) {
 	}
 }
 
+// restoreOps' forward op does not know (or need to know) whether the message
+// came from the archive or the trash -- OpRestore resolves that server-side,
+// the same way OpArchive does. The undo is per-target and exact, the same way
+// trashOps' is.
+func TestRestoreUndoPutsItBackWhereItWas(t *testing.T) {
+	d := newTestDeps(t, "work")
+	ctx := context.Background()
+
+	ts := []target{{account: "work", remote: "w1", mailboxes: []string{"trash"}}}
+	fwd, undo := restoreOps(ctx, d.Store, ts)
+
+	if len(fwd) != 1 || fwd[0].op.Kind != sync.OpRestore {
+		t.Fatalf("forward op = %+v, want one OpRestore", fwd)
+	}
+	if undo == nil || len(undo.ops) != 1 {
+		t.Fatal("restore produced no undo")
+	}
+	u := undo.ops[0].op
+	if u.Kind != sync.OpMailboxes {
+		t.Errorf("undo kind = %v, want OpMailboxes", u.Kind)
+	}
+	if len(u.AddMailboxes) != 1 || u.AddMailboxes[0] != "trash" {
+		t.Errorf("undo adds %v, want [trash]", u.AddMailboxes)
+	}
+	if len(u.RemoveMailboxes) != 1 || u.RemoveMailboxes[0] != "inbox" {
+		t.Errorf("undo removes %v, want [inbox]", u.RemoveMailboxes)
+	}
+}
+
 func TestFlagUndoIsTheOppositeFlag(t *testing.T) {
 	ts := []target{{account: "work", remote: "w1"}}
 

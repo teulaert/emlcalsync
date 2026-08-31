@@ -327,6 +327,9 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, r.keys.Trash):
 		return r, r.triage("trash")
 
+	case key.Matches(msg, r.keys.Restore):
+		return r, r.triage("restore")
+
 	case key.Matches(msg, r.keys.ToggleRead):
 		return r, r.toggleFlag("unread")
 
@@ -676,7 +679,7 @@ func (r *root) onSubmitted(s submitted) tea.Cmd {
 	return r.top().reload()
 }
 
-// triage archives or trashes what the top screen has selected.
+// triage archives, trashes or restores what the top screen has selected.
 func (r *root) triage(what string) tea.Cmd {
 	ts := r.top().targets()
 	if len(ts) == 0 {
@@ -691,6 +694,8 @@ func (r *root) triage(what string) tea.Cmd {
 		ops, undo = archiveOps(ctx, r.d.Store, ts)
 	case "trash":
 		ops, undo = trashOps(ctx, r.d.Store, ts)
+	case "restore":
+		ops, undo = restoreOps(ctx, r.d.Store, ts)
 	}
 	// The reader is the one screen with no rows of its own: the drop belongs
 	// to the thread underneath, which then says what to read next.

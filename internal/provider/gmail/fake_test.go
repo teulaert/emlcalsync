@@ -50,6 +50,7 @@ type fakeGmail struct {
 	draftCalls  int
 	lastModify  *gmailapi.BatchModifyMessagesRequest
 	trashed     []string
+	untrashed   []string
 	sentRaw     []string
 	sentThread  string
 	draftedRaw  string
@@ -79,6 +80,7 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	mux.HandleFunc("POST /gmail/v1/users/{user}/messages/batchModify", f.handleBatchModify)
 	mux.HandleFunc("POST /gmail/v1/users/{user}/messages/send", f.handleSend)
 	mux.HandleFunc("POST /gmail/v1/users/{user}/messages/{id}/trash", f.handleTrash)
+	mux.HandleFunc("POST /gmail/v1/users/{user}/messages/{id}/untrash", f.handleUntrash)
 	mux.HandleFunc("POST /gmail/v1/users/{user}/drafts", f.handleDraftCreate)
 	mux.HandleFunc("POST /batch/gmail/v1", f.handleBatch)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +309,19 @@ func (f *fakeGmail) handleTrash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.trashed = append(f.trashed, id)
+	f.writeJSON(w, msg)
+}
+
+func (f *fakeGmail) handleUntrash(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	msg, ok := f.messages[id]
+	if !ok {
+		apiError(w, http.StatusNotFound, "notFound", "message not found")
+		return
+	}
+	f.untrashed = append(f.untrashed, id)
 	f.writeJSON(w, msg)
 }
 

@@ -196,3 +196,26 @@ func TestTrashClearsOtherMailboxesLocally(t *testing.T) {
 		t.Fatalf("mailboxes = %v, want [TRASH]", got)
 	}
 }
+
+// Restore is the inverse of archive/trash: unlike OpTrash it does not clear
+// every other membership, so a mailbox the message picked up along the way
+// (WORK here) survives the round trip.
+func TestRestorePutsItBackInTheInboxWithoutClearingOtherMailboxes(t *testing.T) {
+	h := newHarness(t)
+	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one"), mailboxes: []string{"TRASH", "WORK"}})
+	h.sync(SyncOptions{Mail: true})
+
+	if _, err := h.eng.Apply(context.Background(), "work", Op{Kind: OpRestore, IDs: []string{"m1"}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	got := h.message("m1").MailboxRemotes
+	if !contains(got, "INBOX") {
+		t.Errorf("mailboxes = %v, want INBOX", got)
+	}
+	if contains(got, "TRASH") {
+		t.Errorf("mailboxes = %v, want TRASH gone", got)
+	}
+	if !contains(got, "WORK") {
+		t.Errorf("mailboxes = %v, want WORK kept", got)
+	}
+}

@@ -110,9 +110,16 @@ func newTriageDepsWithCalendar(t *testing.T) (Deps, *fake.Mail, *fake.Calendar) 
 // added in.
 func addTriageMessage(t *testing.T, d Deps, mail *fake.Mail, remote, subject string, ago time.Duration) {
 	t.Helper()
+	addTriageMessageIn(t, d, mail, "INBOX", remote, subject, ago)
+}
+
+// addTriageMessageIn is addTriageMessage into a mailbox other than the inbox,
+// for the triage actions that start from the archive or the trash.
+func addTriageMessageIn(t *testing.T, d Deps, mail *fake.Mail, mailbox, remote, subject string, ago time.Duration) {
+	t.Helper()
 	when := testNow.Add(-ago)
 	raw := []byte("From: anna@example.com\r\nSubject: " + subject + "\r\n\r\n" + subject + " body\r\n")
-	mail.Add(fake.NewMsg(remote, raw).WithMailboxes("INBOX"))
+	mail.Add(fake.NewMsg(remote, raw).WithMailboxes(mailbox))
 	m := &model.Message{
 		AccountID:      "work",
 		RemoteID:       remote,
@@ -122,7 +129,7 @@ func addTriageMessage(t *testing.T, d Deps, mail *fake.Mail, remote, subject str
 		Date:           when,
 		Received:       when,
 		TextBody:       subject + " body",
-		MailboxRemotes: []string{"INBOX"},
+		MailboxRemotes: []string{mailbox},
 		IndexedAt:      testNow,
 	}
 	if _, err := d.Store.UpsertMessage(context.Background(), m, nil); err != nil {
@@ -202,6 +209,33 @@ func TestTrashFromTheListReachesTheProvider(t *testing.T) {
 	}
 	if r.undo == nil {
 		t.Error("trash offered no undo")
+	}
+}
+
+func TestRestoreFromTheListReachesTheProvider(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessageIn(t, d, mail, "TRASH", "m1", "Rescue me", time.Hour)
+
+	r := newTestRoot(t, d)
+	send(t, r, "M") // inbox -> all, which shows trashed mail too
+	if got := len(r.mail[0].(*mailList).threads); got != 1 {
+		t.Fatalf("all view has %d threads, want 1", got)
+	}
+
+	send(t, r, "i")
+
+	_, boxes, ok := mail.Lookup("m1")
+	if !ok {
+		t.Fatal("message vanished from the provider")
+	}
+	if contains(boxes, "TRASH") {
+		t.Errorf("after restore the provider still has TRASH: %v", boxes)
+	}
+	if !contains(boxes, "INBOX") {
+		t.Errorf("after restore the provider lacks INBOX: %v", boxes)
+	}
+	if r.undo == nil {
+		t.Error("restore offered no undo")
 	}
 }
 

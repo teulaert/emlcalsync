@@ -24,6 +24,7 @@ type keymap struct {
 	Search      key.Binding
 	Archive     key.Binding
 	Trash       key.Binding
+	Restore     key.Binding
 	ToggleRead  key.Binding
 	Star        key.Binding
 	Reply       key.Binding
@@ -75,6 +76,7 @@ func defaultKeys() keymap {
 		// deletes with. d is the one that is typed; these are the one that is
 		// reached for.
 		Trash:      key.NewBinding(key.WithKeys("d", "delete", "backspace"), key.WithHelp("d", "trash")),
+		Restore:    key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "back to the inbox")),
 		ToggleRead: key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "read / unread")),
 		Star:       key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "star")),
 		Reply:      key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reply")),
@@ -116,6 +118,7 @@ func (k keymap) helpLines() [][2]string {
 		{"", ""},
 		{"e", "archive"},
 		{"d  ⌫ / delete", "trash"},
+		{"i", "back to the inbox (out of the archive or trash)"},
 		{"m", "toggle read / unread"},
 		{"s", "toggle star"},
 		{"z", "undo the last action"},

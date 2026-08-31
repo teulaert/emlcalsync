@@ -458,6 +458,11 @@ func TestMailMoveArchiveTrash(t *testing.T) {
 		t.Errorf("after trash mailboxes = %v, want TRASH", boxes)
 	}
 
+	env.MustRun("mail", "restore", "work:m-work")
+	if _, boxes, _ := env.Mail["work"].Lookup("m-work"); mailContains(boxes, "TRASH") || !mailContains(boxes, "INBOX") {
+		t.Errorf("after restore mailboxes = %v, want INBOX and no TRASH", boxes)
+	}
+
 	if _, _, code := env.Run("mail", "move", "work:m-old", "--to", "nope"); code != 3 {
 		t.Errorf("move to unknown mailbox exit = %d, want 3", code)
 	}

@@ -537,6 +537,15 @@ func TestWrites(t *testing.T) {
 	}
 	f.mu.Unlock()
 
+	if err := m.Restore(ctx, []string{"m1", "already-gone"}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	f.mu.Lock()
+	if !reflect.DeepEqual(f.untrashed, []string{"m1"}) {
+		t.Errorf("untrashed = %v, want [m1] (a missing id is not an error)", f.untrashed)
+	}
+	f.mu.Unlock()
+
 	id, err := m.CreateDraft(ctx, []byte("Subject: hi\r\n\r\nbody"))
 	if err != nil {
 		t.Fatalf("CreateDraft: %v", err)

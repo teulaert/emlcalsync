@@ -173,6 +173,19 @@ func mailTrashCmd(app *App) *cobra.Command {
 	}
 }
 
+func mailRestoreCmd(app *App) *cobra.Command {
+	return &cobra.Command{
+		Use:   "restore <id>...",
+		Short: "Move messages back to the inbox, out of the archive or trash",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return mailApply(cmd, app, args, func(IDGroup) (sync.Op, error) {
+				return sync.Op{Kind: sync.OpRestore}, nil
+			})
+		},
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Compose: draft / send / reply
 

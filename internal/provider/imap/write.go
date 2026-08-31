@@ -125,6 +125,25 @@ func (m *Mail) TrashRemap(ctx context.Context, ids []string) ([]provider.Rename,
 	return m.moveTo(ctx, ids, trash)
 }
 
+// Restore moves messages back to the inbox, out of whatever folder they are
+// in now.
+func (m *Mail) Restore(ctx context.Context, ids []string) error {
+	_, err := m.RestoreRemap(ctx, ids)
+	return err
+}
+
+// RestoreRemap implements provider.Remapper.
+func (m *Mail) RestoreRemap(ctx context.Context, ids []string) ([]provider.Rename, error) {
+	inbox, err := m.roleRemote(ctx, model.RoleInbox)
+	if err != nil {
+		return nil, err
+	}
+	if inbox == "" {
+		return nil, fmt.Errorf("imap: this account has no Inbox folder")
+	}
+	return m.moveTo(ctx, ids, inbox)
+}
+
 // moveTo moves every id into dest and reports the ids they now have.
 func (m *Mail) moveTo(ctx context.Context, ids []string, dest string) ([]provider.Rename, error) {
 	byMailbox, bad := groupRefs(ids)

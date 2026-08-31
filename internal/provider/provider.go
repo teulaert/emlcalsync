@@ -109,6 +109,8 @@ type MailProvider interface {
 	SetMailboxes(ctx context.Context, ids []string, add, remove []string) error
 	// Trash moves messages to the trash mailbox (not permanent delete).
 	Trash(ctx context.Context, ids []string) error
+	// Restore moves messages back to the inbox, out of the archive or trash.
+	Restore(ctx context.Context, ids []string) error
 	// CreateDraft stores raw as a draft and returns its remote id.
 	CreateDraft(ctx context.Context, raw []byte) (remoteID string, err error)
 	// Send submits raw. threadID (may be "") lets Gmail attach it to a thread.
@@ -156,6 +158,7 @@ type CalendarProvider interface {
 type Remapper interface {
 	SetMailboxesRemap(ctx context.Context, ids []string, add, remove []string) ([]Rename, error)
 	TrashRemap(ctx context.Context, ids []string) ([]Rename, error)
+	RestoreRemap(ctx context.Context, ids []string) ([]Rename, error)
 }
 
 // SubmitEnvelope carries the recipients a raw message deliberately does not.

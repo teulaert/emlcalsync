@@ -23,6 +23,7 @@ const (
 	OpMailboxes    OpKind = "mailboxes"
 	OpArchive      OpKind = "archive"
 	OpTrash        OpKind = "trash"
+	OpRestore      OpKind = "restore"
 	OpDraft        OpKind = "draft"
 	OpSend         OpKind = "send"
 	OpEventCreate  OpKind = "event.create"
@@ -222,7 +223,7 @@ func (e *Engine) failPermanently(ctx context.Context, id int64, cause error) {
 
 func (op *Op) validate() error {
 	switch op.Kind {
-	case OpFlags, OpMailboxes, OpArchive, OpTrash:
+	case OpFlags, OpMailboxes, OpArchive, OpTrash, OpRestore:
 		if len(op.IDs) == 0 {
 			return fmt.Errorf("sync: %s: no message ids", op.Kind)
 		}
@@ -314,7 +315,7 @@ func (e *Engine) patchLocal(ctx context.Context, tx *store.Tx, acct config.Accou
 		}
 		return rb, nil
 
-	case OpMailboxes, OpArchive, OpTrash:
+	case OpMailboxes, OpArchive, OpTrash, OpRestore:
 		add, remove, clearOthers, err := e.mailboxPatch(ctx, tx, acct, op)
 		if err != nil {
 			return rb, err
@@ -467,6 +468,26 @@ func (e *Engine) mailboxPatch(ctx context.Context, tx *store.Tx, acct config.Acc
 			add = append(add, trash)
 		}
 		return add, nil, true, nil
+
+	case OpRestore:
+		inbox, err := roleRemote(ctx, tx, acct.Name, model.RoleInbox)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if inbox != "" {
+			add = append(add, inbox)
+		}
+		if archive, err := roleRemote(ctx, tx, acct.Name, model.RoleArchive); err != nil {
+			return nil, nil, false, err
+		} else if archive != "" {
+			remove = append(remove, archive)
+		}
+		if trash, err := roleRemote(ctx, tx, acct.Name, model.RoleTrash); err != nil {
+			return nil, nil, false, err
+		} else if trash != "" {
+			remove = append(remove, trash)
+		}
+		return add, remove, false, nil
 	}
 	return nil, nil, false, nil
 }
@@ -632,7 +653,7 @@ func preRequest(err error) error {
 // the provider created.
 func (e *Engine) execute(ctx context.Context, acct config.Account, op Op) (string, []provider.Rename, error) {
 	switch op.Kind {
-	case OpFlags, OpMailboxes, OpArchive, OpTrash, OpDraft, OpSend:
+	case OpFlags, OpMailboxes, OpArchive, OpTrash, OpRestore, OpDraft, OpSend:
 		mp, err := e.mailProvider(ctx, acct)
 		if err != nil {
 			return "", nil, preRequest(err)
@@ -678,6 +699,12 @@ func (e *Engine) executeMail(ctx context.Context, acct config.Account, mp provid
 			return "", renames, err
 		}
 		return "", nil, mp.Trash(ctx, op.IDs)
+	case OpRestore:
+		if rm != nil {
+			renames, err := rm.RestoreRemap(ctx, op.IDs)
+			return "", renames, err
+		}
+		return "", nil, mp.Restore(ctx, op.IDs)
 	case OpDraft:
 		remote, err := mp.CreateDraft(ctx, op.Raw)
 		return remote, nil, err

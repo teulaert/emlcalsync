@@ -150,6 +150,33 @@ func trashOps(ctx context.Context, st *store.Store, ts []target) ([]accountOp, *
 	return fwd, &undoRecord{label: "trash", ops: back}
 }
 
+// restoreOps builds the return to inbox, plus the inverse that puts each
+// message back wherever it was archived or trashed from.
+//
+// Undo replays the exact prior membership from what targetOf captured before
+// the restore ran -- the same per-target shape trashOps' back uses, because a
+// message coming out of the archive or the trash can only ever have had the
+// one mailbox it is being taken out of.
+func restoreOps(ctx context.Context, st *store.Store, ts []target) ([]accountOp, *undoRecord) {
+	var fwd, back []accountOp
+	inboxOf := map[string]string{}
+	for _, g := range group(ts) {
+		inbox := roleRemote(ctx, st, g.account, model.RoleInbox)
+		inboxOf[g.account] = inbox
+		op := sync.Op{Kind: sync.OpRestore, IDs: g.remotes}
+		fwd = append(fwd, accountOp{g.account, op})
+	}
+	for _, t := range ts {
+		op := sync.Op{Kind: sync.OpMailboxes, IDs: []string{t.remote}}
+		op.AddMailboxes = append([]string(nil), t.mailboxes...)
+		if inbox := inboxOf[t.account]; inbox != "" {
+			op.RemoveMailboxes = []string{inbox}
+		}
+		back = append(back, accountOp{t.account, op})
+	}
+	return fwd, &undoRecord{label: "restore", ops: back}
+}
+
 // flagOps toggles a flag and builds the inverse.
 func flagOps(ts []target, flag string, set bool) ([]accountOp, *undoRecord) {
 	mk := func(on bool) []accountOp {

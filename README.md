@@ -176,7 +176,7 @@ tui       interactive mail + calendar, merged across accounts
 mail      mailboxes · list · search · read · open · thread · attachment list|get (read)
           attachment text (a PDF or HTML attachment as text; PDFs need
                            poppler-utils' pdftotext -- `doctor` checks)         (read)
-          mark · move · archive · trash · draft · send · reply · forward       (write)
+          mark · move · archive · trash · restore · draft · send · reply · forward (write)
 cal       calendars · agenda · show · free                                    (read)
           create · update · delete · respond                                  (write)
 ```
@@ -187,7 +187,7 @@ cal       calendars · agenda · show · free                                   
 - Ids are stable and opaque: `fm:MTQ3` (message), `fm:t:…` (thread),
   `gm:c:<calendar>:<event>` (event). Every list prints them; every command
   accepts them. On IMAP a message is identified by its folder and uid, so
-  moving one (archive, trash) renumbers it — the write reports the new id as
+  moving one (archive, trash, restore) renumbers it — the write reports the new id as
   `new_id`, and the old one stops resolving.
 - `--since 2d`, `--until`, `--account` (repeatable) on every list;
   `--dry-run` on every write.
@@ -281,9 +281,9 @@ with it, shown in the composer, and any that could not be got are named there
 rather than quietly left off — and `c` writes a new one from the account the
 list is filtered to; both open with the cursor in To. `emlcal mail forward <id>
 --to ..` is the same thing from the shell, files and all. The keys are Gmail's
-over vim's (`e` archive, `s` star, `d` trash, `j`/`k`/`g`/`G` to move, `z`
-undo, `/` search), with `⌫` trashing beside `d` and `u` going back beside `esc`
-and `q` for hands trained on a GUI client.
+over vim's (`e` archive, `s` star, `d` trash, `i` back to the inbox,
+`j`/`k`/`g`/`G` to move, `z` undo, `/` search), with `⌫` trashing beside `d`
+and `u` going back beside `esc` and `q` for hands trained on a GUI client.
 With a model configured (see below), `ctrl+g` is the AI key: on a
 conversation it summarizes it — or answers a question you type — on a screen
 of its own, from which `r` replies; in the composer it drafts the reply, with

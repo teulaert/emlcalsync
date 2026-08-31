@@ -19,8 +19,9 @@ type remappingMail struct {
 	// deltaRenames is reported by the next Changes call.
 	deltaRenames []provider.Rename
 
-	remapCalls int
-	trashCalls int
+	remapCalls   int
+	trashCalls   int
+	restoreCalls int
 	// plainCalls counts falls through to the non-remapping methods, which must
 	// stay at zero: the engine has to prefer Remapper when it is available.
 	plainCalls int
@@ -44,6 +45,14 @@ func (r *remappingMail) TrashRemap(ctx context.Context, ids []string) ([]provide
 	return r.takeWriteRenames(), nil
 }
 
+func (r *remappingMail) RestoreRemap(ctx context.Context, ids []string) ([]provider.Rename, error) {
+	r.restoreCalls++
+	if err := r.fakeMail.Restore(ctx, ids); err != nil {
+		return nil, err
+	}
+	return r.takeWriteRenames(), nil
+}
+
 func (r *remappingMail) SetMailboxes(ctx context.Context, ids, add, remove []string) error {
 	r.plainCalls++
 	return r.fakeMail.SetMailboxes(ctx, ids, add, remove)
@@ -52,6 +61,11 @@ func (r *remappingMail) SetMailboxes(ctx context.Context, ids, add, remove []str
 func (r *remappingMail) Trash(ctx context.Context, ids []string) error {
 	r.plainCalls++
 	return r.fakeMail.Trash(ctx, ids)
+}
+
+func (r *remappingMail) Restore(ctx context.Context, ids []string) error {
+	r.plainCalls++
+	return r.fakeMail.Restore(ctx, ids)
 }
 
 func (r *remappingMail) takeWriteRenames() []provider.Rename {
@@ -163,6 +177,33 @@ func TestTrashThroughRemapperRenamesTheRow(t *testing.T) {
 		t.Errorf("ApplyResult.Renames = %+v, want the new id reported back", res.Renames)
 	}
 	if ids := h.remoteIDs(t); ids["INBOX.1.7"] {
+		t.Error("the old id is still live in the index")
+	}
+}
+
+// Same for a restore out of the trash: on IMAP the move back to the inbox
+// mints a new uid too, so RestoreRemap has to win over the plain Restore.
+func TestRestoreThroughRemapperRenamesTheRow(t *testing.T) {
+	h, rm := remapHarness(t)
+	h.mail.Add(&fakeMsg{id: "Trash.1.2", raw: mailRaw(t, "rescued", "body")})
+	h.sync(SyncOptions{Mail: true})
+
+	rm.writeRenames = []provider.Rename{{Old: "Trash.1.2", New: "INBOX.1.9"}}
+	res, err := h.eng.Apply(context.Background(), "work", Op{Kind: OpRestore, IDs: []string{"Trash.1.2"}})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if rm.restoreCalls != 1 {
+		t.Errorf("RestoreRemap called %d times, want 1", rm.restoreCalls)
+	}
+	if rm.plainCalls != 0 {
+		t.Errorf("the engine fell through to plain Restore %d times; Remapper must win", rm.plainCalls)
+	}
+	if len(res.Renames) != 1 || res.Renames[0].New != "INBOX.1.9" {
+		t.Errorf("ApplyResult.Renames = %+v, want the new id reported back", res.Renames)
+	}
+	if ids := h.remoteIDs(t); ids["Trash.1.2"] {
 		t.Error("the old id is still live in the index")
 	}
 }

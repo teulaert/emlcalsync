@@ -1034,6 +1034,25 @@ func (m *Mail) Trash(ctx context.Context, ids []string) error {
 	return m.setEmails(ctx, ids, patch, "Trash")
 }
 
+// Restore adds messages back to the inbox and drops any archive or trash
+// membership, leaving every other mailbox (a label the message also carries)
+// alone — unlike Trash, which replaces the set outright, this is the ordinary
+// additive/subtractive SetMailboxes.
+func (m *Mail) Restore(ctx context.Context, ids []string) error {
+	inbox, err := m.mailboxByRole(ctx, model.RoleInbox)
+	if err != nil {
+		return err
+	}
+	var remove []string
+	if archive, err := m.mailboxByRole(ctx, model.RoleArchive); err == nil {
+		remove = append(remove, archive)
+	}
+	if trash, err := m.mailboxByRole(ctx, model.RoleTrash); err == nil {
+		remove = append(remove, trash)
+	}
+	return m.SetMailboxes(ctx, ids, []string{inbox}, remove)
+}
+
 type importedEmail struct {
 	ID       string `json:"id"`
 	BlobID   string `json:"blobId"`

@@ -94,6 +94,32 @@ func (m *Mail) Trash(ctx context.Context, ids []string) error {
 	return g.Wait()
 }
 
+// Restore moves messages back to the inbox. It uses messages.untrash rather
+// than a label edit even for a merely archived message: Trash below strips
+// every label, not just INBOX, and untrash is the one call that puts them
+// back — it is a no-op label-wise for a message that only lost INBOX.
+func (m *Mail) Restore(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(m.conc)
+	for _, id := range ids {
+		g.Go(func() error {
+			err := m.do(gctx, "messages.untrash", unitsMessagesTrash, func() error {
+				_, err := m.svc.Users.Messages.Untrash(me, id).Context(gctx).Do()
+				return err
+			})
+			if err != nil && isNotFound(err) {
+				m.log.Debug("gmail message already gone, not restoring", "id", id)
+				return nil
+			}
+			return err
+		})
+	}
+	return g.Wait()
+}
+
 // CreateDraft stores raw as a draft.
 //
 // It returns the id of the draft's *message*, so the id is comparable with

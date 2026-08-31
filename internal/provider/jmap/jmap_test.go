@@ -1059,6 +1059,29 @@ func TestTrashReplacesMailboxes(t *testing.T) {
 	}
 }
 
+// Restore is the ordinary additive/subtractive SetMailboxes, unlike Trash: a
+// mailbox picked up along the way (mb-proj here) survives the round trip.
+func TestRestoreAddsInboxAndDropsArchiveAndTrash(t *testing.T) {
+	f := newFakeServer(t)
+	seedEmails(f, 1)
+	f.email("e000").MailboxIDs = map[string]bool{"mb-trash": true, "mb-proj": true}
+	m := f.client(t).Mail()
+
+	if err := m.Restore(testCtx(t), []string{"e000"}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	mb := f.email("e000").MailboxIDs
+	if !mb["mb-inbox"] {
+		t.Errorf("mailboxIds after restore = %v, want mb-inbox", mb)
+	}
+	if mb["mb-trash"] {
+		t.Errorf("mailboxIds after restore = %v, want mb-trash gone", mb)
+	}
+	if !mb["mb-proj"] {
+		t.Errorf("mailboxIds after restore = %v, want mb-proj kept", mb)
+	}
+}
+
 func TestCreateDraft(t *testing.T) {
 	f := newFakeServer(t)
 	m := f.client(t).Mail()

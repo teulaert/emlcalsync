@@ -19,14 +19,15 @@ func init() {
 }
 
 // mailCmd is the `mail` command group: read commands are safe to allowlist,
-// write commands (mark/move/archive/trash/draft/send/reply) change the server.
+// write commands (mark/move/archive/trash/restore/draft/send/reply) change
+// the server.
 func mailCmd(app *App) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mail",
 		Short: "Read, search and act on archived mail",
 		Long: `Read and write commands are split so an agent policy can allowlist the
 read half (mailboxes, list, search, read, open, thread, attachment list) and gate
-the write half (mark, move, archive, trash, draft, send, reply).
+the write half (mark, move, archive, trash, restore, draft, send, reply).
 
 All read commands work offline from the local index. The list-shaped commands
 (list, search) share these filters — see 'emlcal mail list --help':
@@ -59,6 +60,7 @@ Examples:
 		mailMoveCmd(app),
 		mailArchiveCmd(app),
 		mailTrashCmd(app),
+		mailRestoreCmd(app),
 		mailDraftCmd(app),
 		mailSendCmd(app),
 		mailReplyCmd(app),

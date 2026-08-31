@@ -484,6 +484,10 @@ func (f *fakeMail) Trash(ctx context.Context, ids []string) error {
 	return f.SetMailboxes(ctx, ids, []string{"TRASH"}, []string{"INBOX", "ARCHIVE", "WORK"})
 }
 
+func (f *fakeMail) Restore(ctx context.Context, ids []string) error {
+	return f.SetMailboxes(ctx, ids, []string{"INBOX"}, []string{"ARCHIVE", "TRASH"})
+}
+
 func (f *fakeMail) CreateDraft(ctx context.Context, raw []byte) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -554,6 +558,9 @@ func (b bareMail) SetMailboxes(ctx context.Context, ids []string, add, remove []
 	return b.f.SetMailboxes(ctx, ids, add, remove)
 }
 func (b bareMail) Trash(ctx context.Context, ids []string) error { return b.f.Trash(ctx, ids) }
+func (b bareMail) Restore(ctx context.Context, ids []string) error {
+	return b.f.Restore(ctx, ids)
+}
 func (b bareMail) CreateDraft(ctx context.Context, raw []byte) (string, error) {
 	return b.f.CreateDraft(ctx, raw)
 }

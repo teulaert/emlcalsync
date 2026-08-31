@@ -59,6 +59,24 @@ func TestTrashMovesToTheTrashFolder(t *testing.T) {
 	}
 }
 
+func TestRestoreMovesBackToTheInbox(t *testing.T) {
+	m, srv := dial(t)
+	srv.Mail("Trash", "leftover", "hello")
+
+	id := enumerateAll(t, m, 10)[0].RemoteID
+	renames, err := m.RestoreRemap(testCtx(t), []string{id})
+	if err != nil {
+		t.Fatalf("RestoreRemap: %v", err)
+	}
+	if len(renames) != 1 {
+		t.Fatalf("renames = %+v, want one", renames)
+	}
+	if srv.Count("INBOX") != 1 || srv.Count("Trash") != 0 {
+		t.Errorf("server has inbox=%d trash=%d, want 1 and 0",
+			srv.Count("INBOX"), srv.Count("Trash"))
+	}
+}
+
 // \Seen is inverted against the model: the model records unread, IMAP records
 // read. Getting this backwards would mark the archive read on first contact.
 func TestSetFlagsInvertsSeen(t *testing.T) {
