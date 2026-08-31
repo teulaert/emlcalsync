@@ -167,6 +167,45 @@ func TestReplyAllAlsoContinuesTheDraft(t *testing.T) {
 	}
 }
 
+// A draft in the trash is one that was thrown away, and the server leaves the
+// flag on it. Continuing that instead of opening a reply is how r came to show
+// a blank screen months later, with somebody's discarded answer behind it.
+func TestReplyIgnoresADiscardedDraft(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+	addMessage(t, d, "work", "w2", "t1", "Re: offerte Q4", "bob", time.Minute, false)
+	addDraftIn(t, d, "trash", "work", "w3", "t1", "Re: offerte Q4", 0)
+
+	r := newTestRoot(t, d)
+	send(t, r, "r")
+
+	c := composerOn(t, r)
+	if c.draftRemote != "" {
+		t.Errorf("opened the discarded draft %q instead of a reply", c.draftRemote)
+	}
+	if c.orig == nil || c.orig.RemoteID != "w2" {
+		t.Fatalf("replying to %+v, want the newest sent message w2", c.orig)
+	}
+	// The whole point: the mail being answered is on screen to be read.
+	if !strings.Contains(c.body.Value(), "Re: offerte Q4 body") {
+		t.Errorf("the quoted original is missing from the composer:\n%s", c.body.Value())
+	}
+}
+
+// The same for a draft the server filed away in the archive.
+func TestReplyIgnoresAnArchivedDraft(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+	addDraftIn(t, d, "archive", "work", "w3", "t1", "Re: offerte Q4", 0)
+
+	r := newTestRoot(t, d)
+	send(t, r, "r")
+
+	if got := composerOn(t, r).draftRemote; got != "" {
+		t.Errorf("opened the archived draft %q instead of a reply", got)
+	}
+}
+
 func TestReplyFromTheThreadAnswersTheSelectedMessage(t *testing.T) {
 	d := newTestDeps(t, "work")
 	addConversation(t, d, "work", "w1", "t1")

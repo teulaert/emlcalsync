@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -459,13 +460,35 @@ func newestDraft(ctx context.Context, d Deps, accountID, threadID string) (*mode
 	if err != nil {
 		return nil, err
 	}
+	drafts := roleRemote(ctx, d.Store, accountID, model.RoleDrafts)
 	// GetThread hands them back oldest first.
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Flags.Draft {
+		if liveDraft(&msgs[i], drafts) {
 			return &msgs[i], nil
 		}
 	}
 	return nil, model.ErrNotFound
+}
+
+// liveDraft reports whether m is an unfinished message still sitting in the
+// drafts mailbox.
+//
+// The draft flag on its own does not say that. Servers leave it set on the
+// copy they file away when a draft is abandoned, so a thread that was answered
+// or thrown away months ago still holds a message flagged draft -- in the
+// trash, or in the archive. resolveCompose continues the draft in a thread
+// rather than starting a second answer beside it, so without this rule `r` on
+// such a conversation reopens somebody's discarded draft: usually an empty
+// one, which is a blank screen where the quoted mail should have been.
+//
+// An account whose mailboxes have not been synced has no drafts mailbox to
+// check against, and then nothing counts: opening a fresh reply is the safe
+// end of that, since the words in a real draft are still on the server.
+func liveDraft(m *model.Message, draftsRemote string) bool {
+	if !m.Flags.Draft || draftsRemote == "" {
+		return false
+	}
+	return slices.Contains(m.MailboxRemotes, draftsRemote)
 }
 
 // sendFrom is the address a reply from this account goes out as. There is no

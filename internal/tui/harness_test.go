@@ -88,6 +88,14 @@ func addMessageIn(t *testing.T, d Deps, mailbox, account, remote, thread, subjec
 // itself, addressed to someone else, the way a provider hands a draft over.
 func addDraft(t *testing.T, d Deps, account, remote, thread, subject string, ago time.Duration) {
 	t.Helper()
+	addDraftIn(t, d, "drafts", account, remote, thread, subject, ago)
+}
+
+// addDraftIn is addDraft into a named mailbox, for the drafts that are not in
+// the drafts mailbox: the copy a server keeps, with the flag still on it,
+// after the draft was sent or thrown away.
+func addDraftIn(t *testing.T, d Deps, mailbox, account, remote, thread, subject string, ago time.Duration) {
+	t.Helper()
 	when := testNow.Add(-ago)
 	m := &model.Message{
 		AccountID:      account,
@@ -101,7 +109,7 @@ func addDraft(t *testing.T, d Deps, account, remote, thread, subject string, ago
 		Snippet:        subject + " body",
 		TextBody:       subject + " body",
 		Flags:          model.Flags{Draft: true},
-		MailboxRemotes: []string{"drafts"},
+		MailboxRemotes: []string{mailbox},
 		IndexedAt:      testNow,
 	}
 	if _, err := d.Store.UpsertMessage(context.Background(), m, nil); err != nil {

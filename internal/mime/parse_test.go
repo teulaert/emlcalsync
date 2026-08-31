@@ -606,3 +606,63 @@ func TestParseInviteNamedAttachment(t *testing.T) {
 		t.Errorf("TextBody = %q", p.TextBody)
 	}
 }
+
+// TestParseEmptyPlainAlternative: a multipart/alternative whose text/plain
+// half is empty must fall through to the HTML. Mailspring and several webmail
+// clients send exactly this, and taking the blank part at face value archived
+// the message with no body at all -- nothing to read, nothing for a reply to
+// quote, and nothing for search to match.
+func TestParseEmptyPlainAlternative(t *testing.T) {
+	raw := "From: a@example.org\r\nTo: me@example.com\r\nSubject: x\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/alternative; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n\r\n" +
+		"--b\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>the actual words</p>\r\n" +
+		"--b--\r\n"
+	p, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !strings.Contains(p.TextBody, "the actual words") {
+		t.Errorf("TextBody = %q, want the HTML half", p.TextBody)
+	}
+}
+
+// TestParseEmptyPlainBeforeInlineImage: Apple Mail opens a message with a
+// blank text/plain, puts the inline image next and the words in a second
+// text/plain after it. The body is the part that has something in it.
+func TestParseEmptyPlainBeforeInlineImage(t *testing.T) {
+	raw := "From: a@example.org\r\nTo: me@example.com\r\nSubject: x\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n   \r\n" +
+		"--b\r\nContent-Type: image/jpeg; name=\"IMG_1.JPG\"\r\nContent-Disposition: inline; filename=\"IMG_1.JPG\"\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\nQUJD\r\n" +
+		"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSent from my mainframe\r\n" +
+		"--b--\r\n"
+	p, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if p.TextBody != "Sent from my mainframe" {
+		t.Errorf("TextBody = %q", p.TextBody)
+	}
+}
+
+// TestParsePlainWinsOverHTML is the ordinary case the rule above must not
+// disturb: a text/plain with words in it beats the HTML alternative.
+func TestParsePlainWinsOverHTML(t *testing.T) {
+	raw := "From: a@example.org\r\nTo: me@example.com\r\nSubject: x\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/alternative; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nplain words\r\n" +
+		"--b\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>html words</p>\r\n" +
+		"--b--\r\n"
+	p, err := Parse([]byte(raw))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if p.TextBody != "plain words" {
+		t.Errorf("TextBody = %q", p.TextBody)
+	}
+	if !p.HasHTML || p.HTMLPart != "2" {
+		t.Errorf("hasHTML=%v htmlPart=%q", p.HasHTML, p.HTMLPart)
+	}
+}

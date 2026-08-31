@@ -108,9 +108,19 @@ func fallbackParse(raw []byte) *Parsed {
 }
 
 // selectBody picks the display body: the first text/plain leaf that is not an
-// attachment, else the first text/html leaf converted to text.
+// attachment and has something in it, else the first text/html leaf converted
+// to text.
+//
+// "Has something in it" is the whole of the rule, and it is there because an
+// empty text/plain part is common. Apple Mail opens a message with a blank one
+// before the first inline image and puts the words in a second part after it;
+// Mailspring and several webmail clients send a multipart/alternative whose
+// plain half is left empty and write the message only in the HTML. Taking
+// either at face value archives the mail with no body at all -- nothing in the
+// reader, nothing to quote in a reply, and nothing for search to match.
 func selectBody(out *Parsed, leaves []leaf) {
-	var plain, html, container *leaf
+	var plain string
+	var html, container *leaf
 	for i := range leaves {
 		l := &leaves[i]
 		if isAttachmentPart(*l) {
@@ -118,8 +128,10 @@ func selectBody(out *Parsed, leaves []leaf) {
 		}
 		switch {
 		case l.mediaType == "text/plain":
-			if plain == nil {
-				plain = l
+			if plain == "" {
+				if s := normalizeText(decodeBytes(l.text)); strings.TrimSpace(s) != "" {
+					plain = s
+				}
 			}
 		case l.mediaType == "text/html":
 			if html == nil {
@@ -136,8 +148,8 @@ func selectBody(out *Parsed, leaves []leaf) {
 		out.HTMLPart = html.part.Path
 	}
 	switch {
-	case plain != nil:
-		out.TextBody = normalizeText(decodeBytes(plain.text))
+	case plain != "":
+		out.TextBody = plain
 	case html != nil:
 		out.TextBody = HTMLToText(decodeBytes(html.text))
 	case container != nil:
