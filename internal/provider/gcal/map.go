@@ -1,6 +1,9 @@
 package gcal
 
 import (
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -32,6 +35,7 @@ func mapEvent(calendarRemote string, in *calendarapi.Event, calTZ, selfEmail str
 		Title:          in.Summary,
 		Description:    in.Description,
 		Location:       in.Location,
+		ConferenceURL:  conferenceURL(in),
 		Status:         mapStatus(in.Status),
 	}
 
@@ -246,7 +250,46 @@ func toAPIEvent(ev *model.Event) *calendarapi.Event {
 			ResponseStatus: responseString(a.Response),
 		})
 	}
+	if ev.CreateConference {
+		out.ConferenceData = newConferenceRequest()
+	}
 	return out
+}
+
+// conferenceURL extracts the video-call link Google attached to an event: the
+// hangoutLink when it is set, else the video entry point of the conference
+// data (add-on conferencing sets only the latter).
+func conferenceURL(in *calendarapi.Event) string {
+	if in.HangoutLink != "" {
+		return in.HangoutLink
+	}
+	if in.ConferenceData == nil {
+		return ""
+	}
+	for _, ep := range in.ConferenceData.EntryPoints {
+		if ep != nil && ep.EntryPointType == "video" && ep.Uri != "" {
+			return ep.Uri
+		}
+	}
+	return ""
+}
+
+// newConferenceRequest asks the server to mint a Google Meet room for the
+// event. The request id only has to be unique per request — the server
+// ignores a repeat of an id it has already honoured.
+func newConferenceRequest() *calendarapi.ConferenceData {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		// crypto/rand failing means a broken platform; a clock-based id is
+		// still unique enough per request to mint the room.
+		binary.BigEndian.PutUint64(buf[:8], uint64(time.Now().UnixNano()))
+	}
+	return &calendarapi.ConferenceData{
+		CreateRequest: &calendarapi.CreateConferenceRequest{
+			RequestId:             "emlcal-" + hex.EncodeToString(buf[:]),
+			ConferenceSolutionKey: &calendarapi.ConferenceSolutionKey{Type: "hangoutsMeet"},
+		},
+	}
 }
 
 // toAPIPatch builds a minimal patch: only the fields that are actually set on
@@ -283,6 +326,9 @@ func toAPIPatch(ev *model.Event) *calendarapi.Event {
 				ResponseStatus: responseString(a.Response),
 			})
 		}
+	}
+	if ev.CreateConference {
+		patch.ConferenceData = newConferenceRequest()
 	}
 	return patch
 }

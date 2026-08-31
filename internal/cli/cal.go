@@ -331,6 +331,7 @@ type calEventOut struct {
 	Title       string           `json:"title"                 table:"Title"`
 	Description string           `json:"description,omitempty" table:"Description"`
 	Location    string           `json:"location,omitempty"    table:"Location"`
+	Meet        string           `json:"conference_url,omitempty" table:"Meet"`
 	Start       output.Time      `json:"start"                 table:"-"`
 	StartUTC    int64            `json:"start_utc"`
 	End         output.Time      `json:"end"                   table:"-"`
@@ -358,6 +359,7 @@ func calEventDetail(ev *model.Event, loc *time.Location) calEventOut {
 		Title:       ev.Title,
 		Description: ev.Description,
 		Location:    ev.Location,
+		Meet:        ev.ConferenceURL,
 		Start:       output.T(ev.Start),
 		StartUTC:    ev.Start.Unix(),
 		End:         output.T(ev.End),

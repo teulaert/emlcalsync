@@ -179,7 +179,7 @@ func (s *Store) FindCalendar(ctx context.Context, accountID, nameOrRemote string
 // Events
 
 const eventCols = `e.id, e.calendar_id, c.account_id, c.remote_id, e.remote_id, e.uid,
-	e.title, e.description, e.location, e.start_utc, e.end_utc, e.all_day, e.timezone,
+	e.title, e.description, e.location, e.conference_url, e.start_utc, e.end_utc, e.all_day, e.timezone,
 	e.rrule, e.recurrence_id, e.status, e.organizer, e.attendees_json, e.my_response,
 	e.raw_json, e.updated_utc, e.deleted_at`
 
@@ -189,12 +189,12 @@ const eventFrom = ` FROM events e JOIN calendars c ON c.id = e.calendar_id`
 
 func scanEvent(sc scanner) (model.Event, error) {
 	var e model.Event
-	var uid, title, desc, loc, tz, rrule, recurrenceID, status sql.NullString
+	var uid, title, desc, loc, conf, tz, rrule, recurrenceID, status sql.NullString
 	var organizer, attendees, myResp, rawJSON sql.NullString
 	var start, end, updated, deletedAt sql.NullInt64
 	var allDay int64
 	if err := sc.Scan(&e.ID, &e.CalendarID, &e.AccountID, &e.CalendarRemote, &e.RemoteID, &uid,
-		&title, &desc, &loc, &start, &end, &allDay, &tz,
+		&title, &desc, &loc, &conf, &start, &end, &allDay, &tz,
 		&rrule, &recurrenceID, &status, &organizer, &attendees, &myResp,
 		&rawJSON, &updated, &deletedAt); err != nil {
 		return e, err
@@ -203,6 +203,7 @@ func scanEvent(sc scanner) (model.Event, error) {
 	e.Title = title.String
 	e.Description = desc.String
 	e.Location = loc.String
+	e.ConferenceURL = conf.String
 	e.Start = nullTime(start)
 	e.End = nullTime(end)
 	e.AllDay = allDay != 0
@@ -274,12 +275,13 @@ func (tx *Tx) UpsertEvent(ctx context.Context, ev *model.Event) (int64, error) {
 	var id int64
 	err = tx.q.QueryRowContext(ctx, `
 		INSERT INTO events (calendar_id, remote_id, uid, title, description, location,
-			start_utc, end_utc, all_day, timezone, rrule, recurrence_id, status,
+			conference_url, start_utc, end_utc, all_day, timezone, rrule, recurrence_id, status,
 			organizer, attendees_json, my_response, raw_json, updated_utc, deleted_at)
-		VALUES (?,?,?,?,?,?, ?,?,?,?,?,?,?, ?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?, ?,?,?,?,?,?,?,?, ?,?,?,?,?,?)
 		ON CONFLICT(calendar_id, remote_id) DO UPDATE SET
 		  uid = excluded.uid, title = excluded.title, description = excluded.description,
-		  location = excluded.location, start_utc = excluded.start_utc, end_utc = excluded.end_utc,
+		  location = excluded.location, conference_url = excluded.conference_url,
+		  start_utc = excluded.start_utc, end_utc = excluded.end_utc,
 		  all_day = excluded.all_day, timezone = excluded.timezone, rrule = excluded.rrule,
 		  recurrence_id = excluded.recurrence_id, status = excluded.status,
 		  organizer = excluded.organizer, attendees_json = excluded.attendees_json,
@@ -287,7 +289,7 @@ func (tx *Tx) UpsertEvent(ctx context.Context, ev *model.Event) (int64, error) {
 		  updated_utc = excluded.updated_utc, deleted_at = excluded.deleted_at
 		RETURNING id`,
 		calID, ev.RemoteID, nullStr(ev.UID), nullStr(ev.Title), nullStr(ev.Description),
-		nullStr(ev.Location), unixOf(ev.Start), unixOf(ev.End), boolInt(ev.AllDay),
+		nullStr(ev.Location), nullStr(ev.ConferenceURL), unixOf(ev.Start), unixOf(ev.End), boolInt(ev.AllDay),
 		nullStr(ev.Timezone), nullStr(ev.RRule), nullStr(ev.RecurrenceID), nullStr(string(ev.Status)),
 		organizer, attendees, nullStr(string(ev.MyResponse)), rawJSON,
 		unixOf(ev.Updated), nullUnix(ev.DeletedAt)).Scan(&id)

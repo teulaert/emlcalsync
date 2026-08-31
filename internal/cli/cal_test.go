@@ -505,3 +505,44 @@ func TestCalDelete(t *testing.T) {
 		t.Fatalf("second delete exit = %d", code)
 	}
 }
+
+// TestCalCreateMeet: --meet asks a Google account's provider for a Meet room;
+// the minted link is printed and indexed, and a non-Google account refuses the
+// flag instead of silently dropping it.
+func TestCalCreateMeet(t *testing.T) {
+	env := calSeed(t)
+
+	// work syncs calendars over CalDAV: --meet is a usage error there.
+	if _, _, code := env.Run("cal", "create", "-a", "work",
+		"--title", "Sync", "--start", "2026-08-28 14:00", "--meet"); code != 2 {
+		t.Fatalf("--meet on a caldav account exit = %d, want 2", code)
+	}
+
+	env.Sync("home")
+	out := env.MustRun("cal", "create", "-a", "home",
+		"--title", "Intro call",
+		"--start", "2026-08-28 14:00", "--end", "2026-08-28 14:30",
+		"--attendees", "alice@example.com", "--meet")
+	var res struct {
+		ID      string `json:"id"`
+		MeetURL string `json:"meet_url"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out)
+	}
+	if !strings.HasPrefix(res.MeetURL, "https://meet.example/") {
+		t.Fatalf("meet_url = %q, want the provider's minted link", res.MeetURL)
+	}
+
+	// The link reached the index: cal show prints it without another sync.
+	out = env.MustRun("cal", "show", res.ID)
+	var ev struct {
+		ConferenceURL string `json:"conference_url"`
+	}
+	if err := json.Unmarshal([]byte(out), &ev); err != nil {
+		t.Fatalf("decode show: %v\n%s", err, out)
+	}
+	if ev.ConferenceURL != res.MeetURL {
+		t.Fatalf("conference_url = %q, want %q", ev.ConferenceURL, res.MeetURL)
+	}
+}

@@ -23,6 +23,7 @@ type calEventFlags struct {
 	attendees   []string
 	location    string
 	description string
+	meet        bool
 	dryRun      bool
 }
 
@@ -36,6 +37,7 @@ func (f *calEventFlags) bind(cmd *cobra.Command) {
 	fl.StringSliceVar(&f.attendees, "attendees", nil, "comma-separated attendee addresses")
 	fl.StringVar(&f.location, "location", "", "location")
 	fl.StringVar(&f.description, "description", "", "description")
+	fl.BoolVar(&f.meet, "meet", false, "attach a Google Meet link (Google Calendar accounts only)")
 	fl.BoolVar(&f.dryRun, "dry-run", false, "print what would be sent and exit 0 without touching the provider")
 }
 
@@ -123,6 +125,7 @@ type calResultOut struct {
 	ID       string      `json:"id"                table:"ID"`
 	Queued   bool        `json:"queued"            table:"QUEUED"`
 	Title    string      `json:"title"             table:"TITLE"`
+	Meet     string      `json:"meet_url,omitempty" table:"MEET"`
 	When     string      `json:"-"                 table:"WHEN"`
 	Start    output.Time `json:"start"             table:"-"`
 	StartUTC int64       `json:"start_utc"`
@@ -138,6 +141,7 @@ func calResult(ev *model.Event, account, calRemote, remoteID string, queued bool
 		ID:       model.EventPublicID(account, calRemote, remoteID),
 		Queued:   queued,
 		Title:    ev.Title,
+		Meet:     ev.ConferenceURL,
 		When:     calendar.FormatRange(ev.Start, ev.End, ev.AllDay, loc),
 		Start:    output.T(ev.Start),
 		StartUTC: ev.Start.Unix(),
@@ -172,6 +176,11 @@ command exits 6.`,
 			if err != nil {
 				return err
 			}
+			if f.meet {
+				if err := calMeetSupported(acct); err != nil {
+					return err
+				}
+			}
 			cal, err := calTargetCalendar(app, acct.Name, f.calendar)
 			if err != nil {
 				return err
@@ -191,18 +200,19 @@ command exits 6.`,
 				return err
 			}
 			ev := &model.Event{
-				AccountID:      acct.Name,
-				CalendarID:     cal.ID,
-				CalendarRemote: cal.RemoteID,
-				Title:          f.title,
-				Description:    f.description,
-				Location:       f.location,
-				Start:          start,
-				End:            end,
-				AllDay:         f.allDay,
-				Timezone:       loc.String(),
-				Attendees:      calAttendees(f.attendees),
-				Status:         model.StatusConfirmed,
+				AccountID:        acct.Name,
+				CalendarID:       cal.ID,
+				CalendarRemote:   cal.RemoteID,
+				Title:            f.title,
+				Description:      f.description,
+				Location:         f.location,
+				Start:            start,
+				End:              end,
+				AllDay:           f.allDay,
+				Timezone:         loc.String(),
+				Attendees:        calAttendees(f.attendees),
+				Status:           model.StatusConfirmed,
+				CreateConference: f.meet,
 			}
 			if f.dryRun {
 				return app.Printer().Print(calEventDetail(ev, loc))
@@ -230,6 +240,17 @@ command exits 6.`,
 	}
 	f.bind(cmd)
 	return cmd
+}
+
+// calMeetSupported rejects --meet on an account whose calendar backend cannot
+// mint a conference link. Only Google Calendar can: Meet rooms are created by
+// the server on request, and CalDAV/JMAP have no equivalent to ask for.
+func calMeetSupported(acct *config.Account) error {
+	if acct.Calendar != nil && acct.Calendar.Backend == model.BackendGCal {
+		return nil
+	}
+	return output.Errorf(output.ExitUsage,
+		"--meet needs a Google Calendar account; %s does not sync calendars over gcal", acct.Name)
 }
 
 // calAttendees turns --attendees into model attendees that have not replied.
@@ -314,6 +335,20 @@ supported — delete it and create it again.`,
 			}
 			if changed("attendees") {
 				ev.Attendees = calAttendees(f.attendees)
+			}
+			if changed("meet") && f.meet {
+				cfg, err := app.Config()
+				if err != nil {
+					return err
+				}
+				acct, ok := cfg.Account(account)
+				if !ok {
+					return output.Errorf(output.ExitUsage, "unknown account %q", account)
+				}
+				if err := calMeetSupported(acct); err != nil {
+					return err
+				}
+				ev.CreateConference = true
 			}
 			if changed("all-day") {
 				ev.AllDay = f.allDay

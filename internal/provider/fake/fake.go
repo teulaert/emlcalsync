@@ -718,6 +718,11 @@ func (f *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev *m
 	out := *ev
 	out.RemoteID = fmt.Sprintf("ev-%d", f.nextID)
 	out.CalendarRemote = calendarRemote
+	if out.CreateConference {
+		// Stand in for Google minting a Meet room on request.
+		out.ConferenceURL = "https://meet.example/" + out.RemoteID
+		out.CreateConference = false
+	}
 	f.putLocked(calendarRemote, out)
 	return &out, nil
 }
@@ -729,6 +734,10 @@ func (f *Calendar) UpdateEvent(ctx context.Context, ev *model.Event) (*model.Eve
 		return nil, err
 	}
 	out := *ev
+	if out.CreateConference {
+		out.ConferenceURL = "https://meet.example/" + out.RemoteID
+		out.CreateConference = false
+	}
 	f.putLocked(ev.CalendarRemote, out)
 	return &out, nil
 }

@@ -124,6 +124,7 @@ func (e *eventView) detail(w int) string {
 	add("Title", ev.Title)
 	add("When", calendar.FormatRange(ev.Start, ev.End, ev.AllDay, e.d.loc()))
 	add("Where", ev.Location)
+	add("Meet", ev.ConferenceURL)
 	add("Calendar", e.calName)
 	add("Account", ev.AccountID)
 	add("Status", string(ev.Status))

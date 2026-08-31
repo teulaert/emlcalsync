@@ -246,6 +246,7 @@ type Event struct {
 	Title          string
 	Description    string
 	Location       string
+	ConferenceURL  string // video-call link (Google Meet); "" when the event has none
 	Start          time.Time
 	End            time.Time
 	AllDay         bool
@@ -256,9 +257,15 @@ type Event struct {
 	Organizer      Address
 	Attendees      []Attendee
 	MyResponse     Participation
-	RawJSON        []byte // provider object for fidelity / minimal patches
-	Updated        time.Time
-	DeletedAt      *time.Time
+	// CreateConference asks the provider to mint and attach its conferencing
+	// room (a Google Meet link on Google Calendar) when the event is written.
+	// It is a request, not state: carried in the outbox payload so a queued
+	// create still asks for the room, never stored in the index — the
+	// resulting link comes back in ConferenceURL.
+	CreateConference bool
+	RawJSON          []byte // provider object for fidelity / minimal patches
+	Updated          time.Time
+	DeletedAt        *time.Time
 }
 
 func (e *Event) PublicID() string {

@@ -54,6 +54,11 @@ func (c *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev *m
 		if c.hasGuests(ev) {
 			call = call.SendUpdates(sendUpdatesAll)
 		}
+		if ev.CreateConference {
+			// Without this version parameter the server silently drops the
+			// conference create request from the body.
+			call = call.ConferenceDataVersion(1)
+		}
 		var err error
 		created, err = call.Do()
 		return err
@@ -79,6 +84,9 @@ func (c *Calendar) UpdateEvent(ctx context.Context, ev *model.Event) (*model.Eve
 		call := c.svc.Events.Patch(ev.CalendarRemote, ev.RemoteID, toAPIPatch(ev)).Context(ctx)
 		if c.hasGuests(ev) {
 			call = call.SendUpdates(sendUpdatesAll)
+		}
+		if ev.CreateConference {
+			call = call.ConferenceDataVersion(1)
 		}
 		var err error
 		updated, err = call.Do()

@@ -736,7 +736,7 @@ emlcal cal free --from .. --to .. [--duration 30m] [--hours 09:00-18:00]
 
 CALENDAR — write
 emlcal cal create --title .. --start .. --end .. [--calendar C] [--attendees ..]
-                  [--location ..] [--description ..] [--dry-run]
+                  [--location ..] [--description ..] [--meet] [--dry-run]
 emlcal cal update <id> [same flags]
 emlcal cal delete <id>
 emlcal cal respond <id> --accept|--decline|--tentative
@@ -758,6 +758,11 @@ emlcal completion zsh|bash|fish
 
 `--dry-run` on every write prints exactly what would be sent (full RFC822 for
 mail) and exits 0 without touching the outbox.
+
+`--meet` on `cal create`/`cal update` asks the server to mint and attach a
+Google Meet room; the link is printed and indexed as `conference_url`. Google
+Calendar accounts only — CalDAV and JMAP have no way to request one, so the
+flag is a usage error there.
 
 ---
 

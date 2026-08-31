@@ -141,6 +141,9 @@ func (f *fakeCalendar) handleInsert(w http.ResponseWriter, r *http.Request) {
 	stored.ICalUID = "created-1@google.com"
 	stored.Status = statusConfirmed
 	stored.Updated = "2026-08-25T10:00:00Z"
+	if ev.ConferenceData != nil && ev.ConferenceData.CreateRequest != nil {
+		stored.HangoutLink = "https://meet.google.com/aaa-bbbb-ccc"
+	}
 	f.writeJSON(w, &stored)
 }
 
@@ -594,6 +597,43 @@ func TestCreateUpdateDelete(t *testing.T) {
 	defer f.mu.Unlock()
 	if !reflect.DeepEqual(f.deleted, []string{"ev-9"}) {
 		t.Errorf("deleted = %v, want [ev-9]", f.deleted)
+	}
+}
+
+// TestCreateEventMeet: CreateConference sends a hangoutsMeet create request
+// with conferenceDataVersion=1, and the link the server mints comes back on
+// the model event.
+func TestCreateEventMeet(t *testing.T) {
+	f := newFakeCalendar(t)
+	c := newCal(t, f)
+	created, err := c.CreateEvent(context.Background(), "cal-1", &model.Event{
+		Title:            "Intro call",
+		Start:            time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC),
+		End:              time.Date(2026, 9, 1, 10, 30, 0, 0, time.UTC),
+		Timezone:         "UTC",
+		CreateConference: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	if created.ConferenceURL != "https://meet.google.com/aaa-bbbb-ccc" {
+		t.Errorf("conference url = %q, want the server's meet link", created.ConferenceURL)
+	}
+	f.mu.Lock()
+	ins, queries := f.lastInsert, f.insertQueries
+	f.mu.Unlock()
+	if ins.ConferenceData == nil || ins.ConferenceData.CreateRequest == nil {
+		t.Fatalf("insert body has no conference create request: %+v", ins.ConferenceData)
+	}
+	req := ins.ConferenceData.CreateRequest
+	if req.ConferenceSolutionKey == nil || req.ConferenceSolutionKey.Type != "hangoutsMeet" {
+		t.Errorf("solution key = %+v, want hangoutsMeet", req.ConferenceSolutionKey)
+	}
+	if req.RequestId == "" {
+		t.Error("conference create request has no request id")
+	}
+	if len(queries) != 1 || queries[0].Get("conferenceDataVersion") != "1" {
+		t.Errorf("insert query = %v, want conferenceDataVersion=1", queries)
 	}
 }
 

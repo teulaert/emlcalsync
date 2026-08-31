@@ -724,6 +724,12 @@ func (e *Engine) executeEvent(ctx context.Context, acct config.Account, cp provi
 			return "", err
 		}
 		if created != nil {
+			// A link the op asked the provider to mint (a Google Meet room)
+			// only exists in the response: carry it back onto the op's event
+			// so afterExecute indexes it and the CLI can print it.
+			if created.ConferenceURL != "" {
+				op.Event.ConferenceURL = created.ConferenceURL
+			}
 			return created.RemoteID, nil
 		}
 		return "", nil
@@ -734,6 +740,9 @@ func (e *Engine) executeEvent(ctx context.Context, acct config.Account, cp provi
 			return "", err
 		}
 		if updated != nil {
+			if updated.ConferenceURL != "" {
+				op.Event.ConferenceURL = updated.ConferenceURL
+			}
 			return updated.RemoteID, nil
 		}
 		return ev.RemoteID, nil

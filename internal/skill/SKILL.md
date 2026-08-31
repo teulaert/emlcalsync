@@ -88,7 +88,7 @@ emlcal mail send --draft <id> | (same flags as draft) [--dry-run]
 emlcal mail reply <id> (--body .. | --body-file f) [--all] [--dry-run]
 emlcal mail forward <id> --to .. [--body ..] [--no-attachments] [--dry-run]
 emlcal cal create --title .. --start .. --end .. [--calendar C] [--attendees ..] \
-                  [--location ..] [--description ..] [--dry-run]
+                  [--location ..] [--description ..] [--meet] [--dry-run]
 emlcal cal update <id> [same flags]
 emlcal cal delete <id>
 emlcal cal respond <id> --accept|--decline|--tentative
@@ -104,7 +104,9 @@ emlcal cal respond home:c:primary:abc123 --accept
 ```
 
 `--dry-run` prints exactly what would be sent (full RFC 822 for mail) and exits
-0 without queueing anything.
+0 without queueing anything. `--meet` attaches a Google Meet link to the event
+(Google Calendar accounts only); the result and `cal show` carry it as
+`meet_url` / `conference_url`.
 
 ## JSON shapes
 
