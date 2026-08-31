@@ -394,9 +394,39 @@ func (c *Config) AccountNames() []string {
 // Location resolves general.timezone, falling back to the system zone.
 func (c *Config) Location() (*time.Location, error) {
 	if c.General.Timezone == "" {
-		return time.Local, nil
+		return systemZone(), nil
 	}
 	return time.LoadLocation(c.General.Timezone)
+}
+
+// systemZone resolves the system time zone under its IANA name. time.Local
+// alone will not do: unless $TZ is set its name is literally "Local", which
+// is not an IANA identifier — events created with it are rejected by Google
+// Calendar ("Invalid time zone definition") and are no better on JSCalendar.
+// So the name is dug out of the places the platform records it, and
+// time.Local is only the last resort.
+func systemZone() *time.Location {
+	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" && tz != ":" {
+		if loc, err := time.LoadLocation(strings.TrimPrefix(tz, ":")); err == nil {
+			return loc
+		}
+	}
+	// Debian and friends write the name out.
+	if b, err := os.ReadFile("/etc/timezone"); err == nil {
+		if loc, err := time.LoadLocation(strings.TrimSpace(string(b))); err == nil {
+			return loc
+		}
+	}
+	// Nearly everywhere else (macOS included) /etc/localtime is a symlink
+	// into the zoneinfo tree and the name is the path under it.
+	if target, err := os.Readlink("/etc/localtime"); err == nil {
+		if _, name, ok := strings.Cut(target, "/zoneinfo/"); ok {
+			if loc, err := time.LoadLocation(name); err == nil {
+				return loc
+			}
+		}
+	}
+	return time.Local
 }
 
 // ---------------------------------------------------------------------------

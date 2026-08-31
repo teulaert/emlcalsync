@@ -220,7 +220,10 @@ func toAPITime(t time.Time, allDay bool, tz string) *calendarapi.EventDateTime {
 		return &calendarapi.EventDateTime{Date: t.Format(dateLayout)}
 	}
 	out := &calendarapi.EventDateTime{DateTime: t.Format(time.RFC3339)}
-	if tz != "" {
+	// "Local" is Go's name for an unresolved system zone, not an IANA
+	// identifier: Google rejects it outright. The RFC 3339 offset in
+	// DateTime already pins the instant, so it is safer to say nothing.
+	if tz != "" && tz != "Local" {
 		out.TimeZone = tz
 	}
 	return out

@@ -637,6 +637,33 @@ func TestCreateEventMeet(t *testing.T) {
 	}
 }
 
+// TestCreateEventLocalTimezone: an event whose zone never got resolved past
+// Go's "Local" must be sent without a timeZone — the RFC 3339 offset carries
+// the instant — because Google rejects "Local" as a zone name.
+func TestCreateEventLocalTimezone(t *testing.T) {
+	f := newFakeCalendar(t)
+	c := newCal(t, f)
+	_, err := c.CreateEvent(context.Background(), "cal-1", &model.Event{
+		Title:    "Sync",
+		Start:    time.Date(2026, 9, 1, 10, 0, 0, 0, time.Local),
+		End:      time.Date(2026, 9, 1, 11, 0, 0, 0, time.Local),
+		Timezone: "Local",
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	f.mu.Lock()
+	ins := f.lastInsert
+	f.mu.Unlock()
+	if ins.Start.TimeZone != "" || ins.End.TimeZone != "" {
+		t.Errorf("timeZone sent for the unresolved local zone: start=%q end=%q",
+			ins.Start.TimeZone, ins.End.TimeZone)
+	}
+	if ins.Start.DateTime == "" {
+		t.Errorf("start datetime empty: %+v", ins.Start)
+	}
+}
+
 func TestUpdateEventMissing(t *testing.T) {
 	f := newFakeCalendar(t)
 	c := newCal(t, f)

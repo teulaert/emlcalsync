@@ -578,8 +578,11 @@ func TestOpenSecretsLibsecretNotImplemented(t *testing.T) {
 
 func TestLocation(t *testing.T) {
 	c := Default()
-	if loc, err := c.Location(); err != nil || loc != time.Local {
-		t.Errorf("empty timezone should give the system zone: %v, %v", loc, err)
+	// The system zone must come back under its IANA name, never as "Local"
+	// (Google rejects that; see systemZone).
+	t.Setenv("TZ", "Europe/Brussels")
+	if loc, err := c.Location(); err != nil || loc.String() != "Europe/Brussels" {
+		t.Errorf("empty timezone should resolve the system zone by name: %v, %v", loc, err)
 	}
 	c.General.Timezone = "Europe/Amsterdam"
 	loc, err := c.Location()
