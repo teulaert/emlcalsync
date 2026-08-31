@@ -25,7 +25,7 @@ func mailCmd(app *App) *cobra.Command {
 		Use:   "mail",
 		Short: "Read, search and act on archived mail",
 		Long: `Read and write commands are split so an agent policy can allowlist the
-read half (mailboxes, list, search, read, thread, attachment list) and gate
+read half (mailboxes, list, search, read, open, thread, attachment list) and gate
 the write half (mark, move, archive, trash, draft, send, reply).
 
 All read commands work offline from the local index. The list-shaped commands
@@ -42,6 +42,7 @@ Examples:
   emlcal mail list --since 2d --no-bulk         last two days, no newsletters
   emlcal mail search "invoice august" --from acme
   emlcal mail read fastmail:Stn1JutmP6KN
+  emlcal mail open fastmail:Stn1JutmP6KN     the HTML as the sender wrote it
   emlcal mail thread fastmail:Stn1JutmP6KN`,
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error { return c.Help() },
@@ -51,6 +52,7 @@ Examples:
 		mailListCmd(app),
 		mailSearchCmd(app),
 		mailReadCmd(app),
+		mailOpenCmd(app),
 		mailThreadCmd(app),
 		mailAttachmentCmd(app),
 		mailMarkCmd(app),

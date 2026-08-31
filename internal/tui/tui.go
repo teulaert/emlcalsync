@@ -45,6 +45,12 @@ type Deps struct {
 	// StatePath is the directory holding emlcal.pid, so a manual refresh can
 	// nudge a running daemon. Empty disables the nudge.
 	StatePath string
+	// ViewDir is where o writes the page it hands the browser. Empty falls
+	// back to config.ViewDir().
+	ViewDir string
+	// Browser opens a URL on the desktop. Nil means browser.Open; a test sets
+	// it so that pressing o launches nothing.
+	Browser func(url string) error
 
 	// input and output are set by tests to drive the program headlessly.
 	input  ioReader

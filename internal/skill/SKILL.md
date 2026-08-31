@@ -158,6 +158,13 @@ account has no calendar, and the invite cannot be answered from here.
   mail and an unbounded query wastes tokens.
 - Read before you answer: `mail read <id>` for one message, `mail thread <id>`
   when the conversation matters. Never reply from a snippet alone.
+- A body that comes back empty, or as nothing but links and dashes, is HTML
+  mail the text extraction lost rather than a message with nothing in it. The
+  content is still there: read it with `mail read <id> --html`. A one-time
+  code, a total, a button's label — these live in the markup and nowhere else.
+  Tell the user they can see the page itself with `emlcal mail open <id>`
+  (or `o` in the TUI); do not run that yourself, it opens a browser on their
+  desktop.
 - Run write commands with `--dry-run` first and show the user the result, unless
   they have already told you to just send it.
 - Never `trash`, `delete` or `move` anything unless the user asked for it.

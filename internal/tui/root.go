@@ -157,6 +157,14 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case composeLoaded:
 		return r, r.onComposeLoaded(msg)
 
+	case browserOpened:
+		if msg.err != nil {
+			r.note("open in the browser: " + msg.err.Error())
+		} else {
+			r.note("opened " + msg.id + " in the browser")
+		}
+		return r, nil
+
 	case submitted:
 		return r, r.onSubmitted(msg)
 
@@ -339,6 +347,9 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, r.keys.AI):
 		return r, r.startSummary()
+
+	case key.Matches(msg, r.keys.Browser):
+		return r, r.openInBrowser()
 	}
 
 	if key.Matches(msg, r.keys.Copy) {
@@ -532,6 +543,31 @@ func (r *root) copyID() tea.Cmd {
 	}
 	r.note("copied " + id + " (" + what + " id)")
 	return tea.SetClipboard(id)
+}
+
+// openInBrowser is o: the message in focus, rendered as the sender wrote it
+// and handed to the desktop's browser.
+//
+// It is the way out of a message the text extractor mangled. HTML mail is
+// nested tables rather than prose, and any pass over it is a heuristic that
+// will sometimes drop the one line that was the point of the mail -- a
+// one-time login code, most memorably. Nothing on the page reaches the
+// network: `mail open` blocks remote content, so opening one does not tell
+// its sender that it was opened.
+//
+// A list row is a conversation rather than a message, so it opens the newest
+// message in it -- the one the row is showing.
+func (r *root) openInBrowser() tea.Cmd {
+	req, ok := r.focused()
+	if !ok {
+		return nil
+	}
+	if r.d.Engine == nil || r.d.Store == nil {
+		r.note("no archive to read the message from")
+		return nil
+	}
+	r.note("opening in the browser…")
+	return r.d.openInBrowser(req.account, req.remote, req.thread)
 }
 
 // startSummary is ctrl+g anywhere but the composer: it asks the model about

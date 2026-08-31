@@ -103,6 +103,10 @@ Principles:
 ~/.local/state/emlcal/
   emlcal.log
   sync.<account>.lock             flock per account
+
+~/.cache/emlcal/
+  view/
+    work-18f3a2b9.html            `mail open` pages, 0600, swept after a day
 ```
 
 Back up = copy `~/.local/share/emlcal` (the index is optional; blobs are the
@@ -664,6 +668,27 @@ At display time (`mail read`, default):
 
 Nothing here mutates stored data, so heuristics can improve without reindexing.
 
+**The escape hatch (`mail open`, `o` in the TUI).** HTML mail is not a document
+format so much as a pile of nested tables, and html2text is a rune loop rather
+than a parser: it will sometimes lose the one line that was the point of the
+message. The failure that named this is real — a `<style type="text/css">`
+whose CSS carries a bare child combinator (`.a>table>tbody>tr>td`) re-enters
+the library's skip state on every stray `>`, and the single `</style>` leaves
+it there, so an American Express one-time code arrived as three footer links.
+Around 8% of the HTML-only mail in a real archive trips that shape.
+
+Rather than chase every such message, `mail open` renders the message as a
+standalone page and hands it to the desktop's browser (`mime.HTMLDocument`):
+the sender's own markup, its `cid:` parts folded in as `data:` URIs, the
+`<body>` attributes lifted so a message that paints its own background stays
+readable, and a short header block above it.
+
+The page declares a content security policy that lets it load nothing —
+`default-src 'none'; img-src data:`. An archive whose reads never touch the
+network must not start doing so because the text extractor gave up, and HTML
+mail is full of tracking pixels that would otherwise tell the sender that the
+message was opened. `--remote` lifts the policy, and the page says so.
+
 ---
 
 ## 9. CLI surface
@@ -713,6 +738,8 @@ emlcal mail list [--mailbox inbox] [--unread] [--flagged] [--from X] [--to X]
                  [--since 2d] [--no-bulk] [--thread] [--limit N]
 emlcal mail search "<fts query>" [same filters]     FTS5 syntax: AND OR NOT "phrase" col:term
 emlcal mail read <id> [--full] [--html] [--raw] [--headers]
+emlcal mail open <id> [-O path] [--remote]           render it and open it in the browser;
+                                                     remote content blocked unless --remote (§8)
 emlcal mail thread <id>                              all messages, oldest first, stripped bodies
 emlcal mail attachment list <id>
 emlcal mail attachment get <id> <part|filename> [-O path]   (fetches remote if raw_complete=0; -o is the format flag)
@@ -935,6 +962,7 @@ internal/
   model/          Account, Mailbox, Message, Event, ids
   store/          SQLite open/migrate, typed queries (sqlc-generated), FTS helpers
   blob/           content-addressed zstd store
+  browser/        hand a URL to the desktop; write the pages `mail open` renders
   mime/           parse, text extraction, quote/signature stripping, RFC822 builder
   compose/        reply headers, quoting, address parsing, SMTP envelope (cli + tui)
   doctext/        attachment -> text: pdftotext for PDFs, html2text, plain text

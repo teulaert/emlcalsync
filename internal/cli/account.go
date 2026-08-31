@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/teulaert/emlcalsync/internal/browser"
 	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
@@ -429,7 +430,7 @@ func coreGoogleLogin(ctx context.Context, app *App, acct config.Account) error {
 	}
 	open := app.OpenBrowser
 	if open == nil {
-		open = oauth.OpenSystemBrowser
+		open = browser.Open
 	}
 	tok, err := oauth.Login(ctx, cfg, oauth.LoginOptions{OpenBrowser: open, Output: app.Stderr})
 	if err != nil {

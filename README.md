@@ -173,7 +173,7 @@ sync      [--account] [--full] [--watch] [--mail-only|--calendar-only]
 status · doctor · outbox · reindex · gc · export (--mbox | --maildir) · service · skill
 tui       interactive mail + calendar, merged across accounts
 
-mail      mailboxes · list · search · read · thread · attachment list|get      (read)
+mail      mailboxes · list · search · read · open · thread · attachment list|get (read)
           attachment text (a PDF or HTML attachment as text; PDFs need
                            poppler-utils' pdftotext -- `doctor` checks)         (read)
           mark · move · archive · trash · draft · send · reply · forward       (write)
@@ -193,6 +193,13 @@ cal       calendars · agenda · show · free                                   
   `--dry-run` on every write.
 - Exit codes: 0 ok · 1 error · 2 usage · 3 not found · 4 offline ·
   5 provider rejected · 6 queued in outbox.
+- `mail open <id>` renders a message as a standalone HTML page and opens it
+  in your browser — the escape hatch for mail no text extraction does justice
+  to, when the one-time code or the amount lives in the markup and nowhere
+  else. `o` does the same on the message in focus in the TUI. The page loads
+  nothing from the network: inline images travel inside it, and the tracking
+  pixels do not fire, so opening a message does not tell its sender that you
+  did. `--remote` lifts that; `-O path` writes the page instead of opening it.
 - A mailed invitation — the `text/calendar` part Outlook, Google Calendar and
   Fastmail send, which Exchange hides inside the alternative with no name —
   comes out of `mail read` and `mail thread` as a card: what, when, where,
@@ -226,6 +233,7 @@ commands and gates the writes:
 ~/.local/share/emlcal/emlcal.db       SQLite index (rebuildable)
 ~/.local/share/emlcal/blobs/          the archive: raw .eml.zst, sha256-addressed
 ~/.local/state/emlcal/                log, pid, locks
+~/.cache/emlcal/view/                 pages `mail open` rendered (disposable)
 ```
 
 Backing up or moving to another machine = copying the first four. Sync state

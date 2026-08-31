@@ -10,8 +10,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"runtime"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -20,7 +18,8 @@ import (
 // LoginOptions tunes the interactive flow. The zero value is usable: the
 // authorization URL is printed to stdout and the user opens it themselves.
 type LoginOptions struct {
-	// OpenBrowser is called with the authorization URL. When nil, the URL is
+	// OpenBrowser is called with the authorization URL -- browser.Open, for
+	// an interactive terminal. When nil, the URL is
 	// only printed to Output. Returning an error is not fatal: the URL stays
 	// on screen and the flow keeps waiting for the redirect.
 	OpenBrowser func(url string) error
@@ -32,21 +31,6 @@ type LoginOptions struct {
 	// Timeout bounds the wait for the redirect. Zero means "until ctx is
 	// done"; when ctx has no deadline either, five minutes is used.
 	Timeout time.Duration
-}
-
-// OpenSystemBrowser launches the platform's default browser. Pass it as
-// LoginOptions.OpenBrowser for an interactive terminal.
-func OpenSystemBrowser(url string) error {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
-	}
-	return cmd.Start()
 }
 
 const defaultLoginTimeout = 5 * time.Minute

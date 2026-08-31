@@ -38,6 +38,16 @@ func DataDir() string { return xdgDir("XDG_DATA_HOME", filepath.Join(".local", "
 // StateDir returns $XDG_STATE_HOME/emlcal (default ~/.local/state/emlcal).
 func StateDir() string { return xdgDir("XDG_STATE_HOME", filepath.Join(".local", "state")) }
 
+// CacheDir returns $XDG_CACHE_HOME/emlcal (default ~/.cache/emlcal). What
+// lives there is disposable: deleting it costs nothing but the work to make
+// it again.
+func CacheDir() string { return xdgDir("XDG_CACHE_HOME", ".cache") }
+
+// ViewDir holds the HTML pages `mail open` renders for the browser. It is
+// under the cache directory because a rendered message is a copy of something
+// the archive already has, kept only until the browser has read it.
+func ViewDir() string { return filepath.Join(CacheDir(), "view") }
+
 // DefaultPath is the config file emlcal reads when no --config is given:
 // $EMLCAL_CONFIG, else <config dir>/config.toml.
 func DefaultPath() string {

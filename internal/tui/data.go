@@ -9,7 +9,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/teulaert/emlcalsync/internal/browser"
 	"github.com/teulaert/emlcalsync/internal/compose"
+	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/itip"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
@@ -548,4 +550,67 @@ const pollInterval = 2 * time.Second
 
 func poll() tea.Cmd {
 	return tea.Tick(pollInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+// browserOpened is what openInBrowser sends back: the id that was opened, or
+// the reason it was not.
+type browserOpened struct {
+	id  string
+	err error
+}
+
+// openInBrowser renders one message as a standalone HTML page and hands it to
+// the desktop's browser. remote names the message; when it is empty the
+// newest message in the thread is taken, which is what a list row shows.
+//
+// The fetch budget is the download one rather than the row-lookup one: a
+// message archived envelope-only has to come off the provider before there is
+// anything to render.
+func (d Deps) openInBrowser(accountID, remote, thread string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
+		// forward is set for what it rules out rather than what it does: it
+		// stops resolveCompose from answering a thread with the unfinished
+		// draft in it. o means "show me this message", never "show me what I
+		// was writing about it".
+		m, _, err := resolveCompose(ctx, d, composeRequest{
+			account: accountID, remote: remote, thread: thread, forward: true,
+		})
+		if err != nil {
+			return browserOpened{err: err}
+		}
+		raw, err := d.Engine.EnsureRaw(ctx, m.AccountID, m.RemoteID)
+		if err != nil {
+			return browserOpened{id: m.PublicID(), err: err}
+		}
+		doc, err := mime.HTMLDocument(raw, mime.HTMLDocOptions{})
+		if err != nil {
+			return browserOpened{id: m.PublicID(), err: err}
+		}
+		path, err := browser.WritePage(d.viewDir(), m.PublicID(), doc, d.now())
+		if err != nil {
+			return browserOpened{id: m.PublicID(), err: err}
+		}
+		url, err := browser.FileURL(path)
+		if err != nil {
+			return browserOpened{id: m.PublicID(), err: err}
+		}
+		open := d.Browser
+		if open == nil {
+			open = browser.Open
+		}
+		if err := open(url); err != nil {
+			return browserOpened{id: m.PublicID(), err: err}
+		}
+		return browserOpened{id: m.PublicID()}
+	}
+}
+
+func (d Deps) viewDir() string {
+	if d.ViewDir != "" {
+		return d.ViewDir
+	}
+	return config.ViewDir()
 }

@@ -45,13 +45,16 @@ func (f *fakeFactory) Pusher(ctx context.Context, acct config.Account) (provider
 
 // testEnv is an App wired to temp XDG dirs and fake providers.
 type testEnv struct {
-	T       *testing.T
-	Dir     string
-	Config  string
-	Mail    map[string]*fake.Mail
-	Cal     map[string]*fake.Calendar
-	Stdin   string
-	Now     time.Time
+	T      *testing.T
+	Dir    string
+	Config string
+	Mail   map[string]*fake.Mail
+	Cal    map[string]*fake.Calendar
+	Stdin  string
+	Now    time.Time
+	// Opened collects the URLs a command would have handed the desktop, so a
+	// test can press the escape hatch without a browser appearing.
+	Opened  []string
 	factory *fakeFactory
 }
 
@@ -113,6 +116,10 @@ func (e *testEnv) App() (*App, *bytes.Buffer, *bytes.Buffer) {
 		Now:        func() time.Time { return e.Now },
 		ConfigPath: e.Config,
 		Factory:    e.factory,
+		OpenBrowser: func(url string) error {
+			e.Opened = append(e.Opened, url)
+			return nil
+		},
 	}
 	return app, &out, &errb
 }

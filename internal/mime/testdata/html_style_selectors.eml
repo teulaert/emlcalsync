@@ -1,0 +1,19 @@
+From: American Sample <noreply@example.com>
+To: jane@example.org
+Subject: Your one-time verification code
+Date: Mon, 31 Aug 2026 08:43:57 +0000
+Message-ID: <otp-001@example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<!doctype html><html lang="en"><head><title>Your one-time verification code</title>
+<style type="text/css">@media all and (max-width: 480px) {
+  .imageContent>table>tbody>tr>td { padding: 0px !important; }
+}
+.table-layout-fixed>table table { table-layout: fixed; }
+</style></head><body style="background-color:#d9d9d6;">
+<div>One-time verification code:</div>
+<div>678863</div>
+<div><a href="https://example.com/privacy">Privacy</a></div>
+</body></html>
