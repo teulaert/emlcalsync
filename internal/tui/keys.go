@@ -148,5 +148,9 @@ func (k keymap) helpLines() [][2]string {
 		{"M", "cycle the mailbox (inbox, all, flagged, drafts, sent, archive, trash, spam)"},
 		{"R", "refresh now (and nudge the sync daemon)"},
 		{"?", "this help"},
+		{"", ""},
+		// The marks, not keys -- and A is both, which is exactly why it is
+		// worth spelling out here.
+		{"● and A", "row marks: unread · carries an attachment"},
 	}
 }

@@ -134,19 +134,25 @@ func mailThreadRows(threads []model.Thread, app *App) []mailThreadRow {
 		for _, p := range t.Participants {
 			short = append(short, output.ShortAddr(p))
 		}
+		att := ""
+		if t.HasAttachments {
+			att = "A" // the letter MailFlags uses, so both rows read alike
+		}
 		rows = append(rows, mailThreadRow{
-			ID:           t.PublicID(),
-			Last:         output.T(t.Last),
-			LastUTC:      t.Last.Unix(),
-			LastRel:      output.RelTime(t.Last, app.Now()),
-			Subject:      t.Subject,
-			Count:        t.MessageCount,
-			Unread:       t.UnreadCount,
-			First:        output.T(t.First),
-			FirstUTC:     t.First.Unix(),
-			Participants: t.Participants,
-			PartShort:    strings.Join(short, ", "),
-			Account:      t.AccountID,
+			ID:             t.PublicID(),
+			Last:           output.T(t.Last),
+			LastUTC:        t.Last.Unix(),
+			LastRel:        output.RelTime(t.Last, app.Now()),
+			Subject:        t.Subject,
+			Count:          t.MessageCount,
+			Unread:         t.UnreadCount,
+			First:          output.T(t.First),
+			FirstUTC:       t.First.Unix(),
+			Participants:   t.Participants,
+			PartShort:      strings.Join(short, ", "),
+			HasAttachments: t.HasAttachments,
+			AttStr:         att,
+			Account:        t.AccountID,
 		})
 	}
 	return rows

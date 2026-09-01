@@ -25,6 +25,8 @@ type reader struct {
 	body string
 	// invite is the calendar card, when the message carries one.
 	invite *readerInvite
+	// atts are the message's parts, so the header names the files.
+	atts []model.Attachment
 
 	vp      viewport.Model
 	ready   bool
@@ -61,7 +63,7 @@ func (r *reader) reload() tea.Cmd {
 // changes what an open reader shows; everything else pushes a new one.
 func (r *reader) show(accountID, remote string) tea.Cmd {
 	r.accountID, r.remote = accountID, remote
-	r.msg, r.body, r.invite, r.loadErr = nil, "", nil, nil
+	r.msg, r.body, r.invite, r.atts, r.loadErr = nil, "", nil, nil, nil
 	if r.ready {
 		r.vp.SetContent("")
 		r.vp.GotoTop()
@@ -88,6 +90,7 @@ func (r *reader) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 			r.msg = msg.msg
 			r.body = msg.body
 			r.invite = msg.invite
+			r.atts = msg.attachments
 			r.setContent(w, h)
 		}
 		return r, nil
@@ -149,8 +152,14 @@ func (r *reader) headerLines(w int) []string {
 		truncCells("Date:    "+m.Date.In(r.d.loc()).Format("Mon, 02 Jan 2006 15:04"), w),
 		truncCells("Subject: "+m.Subject, w),
 	)
-	if m.HasAttachments {
-		lines = append(lines, truncCells("Attach:  yes", w))
+	for i, d := range attachmentDescs(r.atts, m.HasAttachments) {
+		// The label on the first line only, the rest hanging under it, the
+		// way the other headers align.
+		label := "Attach:  "
+		if i > 0 {
+			label = "         "
+		}
+		lines = append(lines, truncCells(label+d, w))
 	}
 	for i, l := range lines {
 		lines[i] = styleFaint.Render(l)
@@ -160,6 +169,67 @@ func (r *reader) headerLines(w int) []string {
 		lines = append(lines, inviteCard(r.invite, r.d.loc(), w)...)
 	}
 	return lines
+}
+
+// maxAttachmentLines caps the header block. A message with more parts than
+// this is rare and never worth eating the body with; the overflow line still
+// says how many are missing.
+const maxAttachmentLines = 4
+
+// attachmentDescs names what a message actually carries, one string per line:
+// "invoice.pdf · 57.3KB". A flag saying "yes, something is attached" answers
+// the wrong question -- what you want to know before filing a forward is
+// whether the invoice is on it, and that is a filename.
+//
+// Inline parts are counted rather than listed: the images an HTML mail embeds
+// in its own body are not what anyone means by an attachment, and a
+// newsletter carries a dozen. Counting them keeps the block honest about
+// everything the message holds without letting the decoration crowd out the
+// document.
+//
+// hasAttachments is what the index says, which is the fallback when the rows
+// themselves could not be read -- better to repeat the flag than to draw a
+// message with files as one without.
+func attachmentDescs(atts []model.Attachment, hasAttachments bool) []string {
+	var named []string
+	inline := 0
+	for _, a := range atts {
+		if a.Inline {
+			inline++
+			continue
+		}
+		named = append(named, attachmentName(a)+" · "+output.HumanSize(a.Size))
+	}
+	out := named
+	// Truncating to N plus a "+1 more" line costs the same height as simply
+	// listing N+1, so the cap only bites once it actually saves a line.
+	if len(named) > maxAttachmentLines+1 {
+		out = append(named[:maxAttachmentLines:maxAttachmentLines],
+			fmt.Sprintf("+%d more", len(named)-maxAttachmentLines))
+	}
+	if inline > 0 {
+		out = append(out, fmt.Sprintf("+%d inline", inline))
+	}
+	if len(out) == 0 && hasAttachments {
+		// The index says there are files but no rows name them: a message
+		// indexed before its parts were recorded, or a read that failed. Say
+		// what is known rather than nothing.
+		return []string{"yes"}
+	}
+	return out
+}
+
+// attachmentName is what to call a part on screen. Most carry a filename;
+// one that does not is still worth naming by its type, and a part with
+// neither by where it sits, which is what `attachment get` takes.
+func attachmentName(a model.Attachment) string {
+	if s := strings.TrimSpace(a.Filename); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(a.ContentType); s != "" {
+		return s
+	}
+	return "part " + a.PartPath
 }
 
 // inviteCard lays out an invitation the way a mail client shows one: between

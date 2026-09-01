@@ -42,7 +42,9 @@ type threadOpened struct {
 	// invites are the calendar cards of the messages that carry one, by
 	// remote id.
 	invites map[string]*readerInvite
-	err     error
+	// attachments are the parts of the messages that carry any, by remote id.
+	attachments map[string][]model.Attachment
+	err         error
 }
 
 type bodyLoaded struct {
@@ -52,7 +54,10 @@ type bodyLoaded struct {
 	body string
 	// invite is the calendar card of a message that carries one, or nil.
 	invite *readerInvite
-	err    error
+	// attachments are the message's parts, so the header can name the files
+	// rather than only admit that there are some.
+	attachments []model.Attachment
+	err         error
 }
 
 // readerInvite is an invitation as the reader shows it: what the mail says,
@@ -178,7 +183,18 @@ func (d Deps) openThread(seq int, accountID, threadID string) tea.Cmd {
 		t, msgs, err := d.Store.GetThread(ctx, accountID, threadID, false)
 		out := threadOpened{seq: seq, thread: t, messages: msgs, err: err}
 		for i := range msgs {
-			if ri := d.loadInvite(ctx, &msgs[i]); ri != nil {
+			// One attachment query per message, shared between the card and
+			// the header block: the invite lives in the same rows the header
+			// lists, and reading them twice per message would double the cost
+			// of opening a long thread for nothing.
+			atts := d.attachmentsOf(ctx, &msgs[i])
+			if len(atts) > 0 {
+				if out.attachments == nil {
+					out.attachments = map[string][]model.Attachment{}
+				}
+				out.attachments[msgs[i].RemoteID] = atts
+			}
+			if ri := d.loadInvite(ctx, &msgs[i], atts); ri != nil {
 				if out.invites == nil {
 					out.invites = map[string]*readerInvite{}
 				}
@@ -197,14 +213,31 @@ func (d Deps) loadBody(seq int, accountID, remote string) tea.Cmd {
 		if err != nil {
 			return bodyLoaded{seq: seq, id: model.MessagePublicID(accountID, remote), err: err}
 		}
+		atts := d.attachmentsOf(ctx, m)
 		return bodyLoaded{
-			seq:    seq,
-			id:     m.PublicID(),
-			msg:    m,
-			body:   readableBody(ctx, d, m),
-			invite: d.loadInvite(ctx, m),
+			seq:         seq,
+			id:          m.PublicID(),
+			msg:         m,
+			body:        readableBody(ctx, d, m),
+			invite:      d.loadInvite(ctx, m, atts),
+			attachments: atts,
 		}
 	}
+}
+
+// attachmentsOf reads a message's attachment rows. The index already knows
+// whether there are any, so a message without them costs no query at all --
+// which is what keeps opening a long thread of plain replies free.
+func (d Deps) attachmentsOf(ctx context.Context, m *model.Message) []model.Attachment {
+	if !m.HasAttachments || d.Store == nil {
+		return nil
+	}
+	atts, err := d.Store.ListAttachments(ctx, m.ID)
+	if err != nil {
+		d.log().Warn("attachments: list", "id", m.PublicID(), "err", err)
+		return nil
+	}
+	return atts
 }
 
 // loadInvite reads the calendar card of a message the index says carries
@@ -212,12 +245,8 @@ func (d Deps) loadBody(seq int, accountID, remote string) tea.Cmd {
 // which reads the archive and only fetches for an envelope-only stub; a
 // message whose bytes cannot be had shows no card, and the log says why.
 // Screens drawn without an engine -- tests, mostly -- show none either.
-func (d Deps) loadInvite(ctx context.Context, m *model.Message) *readerInvite {
+func (d Deps) loadInvite(ctx context.Context, m *model.Message, atts []model.Attachment) *readerInvite {
 	if !m.HasAttachments || d.Store == nil || d.Engine == nil {
-		return nil
-	}
-	atts, err := d.Store.ListAttachments(ctx, m.ID)
-	if err != nil {
 		return nil
 	}
 	carries := false

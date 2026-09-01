@@ -191,7 +191,10 @@ type Thread struct {
 	Last         time.Time
 	MessageCount int
 	UnreadCount  int
-	Participants []Address
+	// HasAttachments is true when any live message in the thread carries a
+	// file, so a list can say so without opening the conversation.
+	HasAttachments bool
+	Participants   []Address
 }
 
 func (t *Thread) PublicID() string { return ThreadPublicID(t.AccountID, t.ThreadID) }

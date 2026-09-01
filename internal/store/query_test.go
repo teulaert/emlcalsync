@@ -356,6 +356,59 @@ func TestThreadSummaryTracksMessages(t *testing.T) {
 	}
 }
 
+func TestThreadSummaryTracksAttachments(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+
+	// A plain opener: nothing attached.
+	putMessage(t, s, &model.Message{
+		AccountID: "work", RemoteID: "a", ThreadID: "th", Received: base,
+		MailboxRemotes: []string{"mb-inbox"},
+	}, &mime.Parsed{Subject: "Can you send the invoice?", From: addr("A", "a@x.example"), TextBody: "one"})
+
+	th, _, err := s.GetThread(ctx, "work", "th", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if th.HasAttachments {
+		t.Fatal("a thread of plain replies must not claim to carry files")
+	}
+
+	// The reply that actually carries it lights the whole thread up: the list
+	// row stands for the conversation, and "the invoice is in here" is what
+	// the row has to be able to say.
+	putMessage(t, s, &model.Message{
+		AccountID: "work", RemoteID: "b", ThreadID: "th", Received: base.Add(time.Hour),
+		MailboxRemotes: []string{"mb-inbox"},
+	}, &mime.Parsed{
+		Subject: "Re: Can you send the invoice?", From: addr("B", "b@x.example"), TextBody: "two",
+		Attachments: []mime.Part{{Path: "2", Filename: "invoice.pdf", ContentType: "application/pdf", Size: 4096}},
+	})
+
+	th, _, _ = s.GetThread(ctx, "work", "th", false)
+	if !th.HasAttachments {
+		t.Fatal("thread summary missed the attached invoice")
+	}
+	// ListThreads reads the same column, since that is what the TUI list uses.
+	ths, err := s.ListThreads(ctx, MessageFilter{Accounts: []string{"work"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ths) != 1 || !ths[0].HasAttachments {
+		t.Fatalf("ListThreads = %+v, want the flag set", ths)
+	}
+
+	// And it goes out again with the message that carried it.
+	if _, err := s.MarkDeleted(ctx, "work", []string{"b"}); err != nil {
+		t.Fatal(err)
+	}
+	th, _, _ = s.GetThread(ctx, "work", "th", false)
+	if th.HasAttachments {
+		t.Error("the flag outlived the only message that carried a file")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Search
 

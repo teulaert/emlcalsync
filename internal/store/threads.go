@@ -159,7 +159,8 @@ func (tx *Tx) refreshThread(ctx context.Context, accountID, threadID string) err
 		return nil
 	}
 	rows, err := tx.q.QueryContext(ctx, `
-		SELECT subject, from_addr, from_name, to_json, cc_json, received_utc, is_unread
+		SELECT subject, from_addr, from_name, to_json, cc_json, received_utc, is_unread,
+		       has_attachments
 		  FROM messages
 		 WHERE account_id = ? AND thread_id = ? AND deleted_at IS NULL
 		 ORDER BY received_utc, id`, accountID, threadID)
@@ -171,13 +172,15 @@ func (tx *Tx) refreshThread(ctx context.Context, accountID, threadID string) err
 		count, unread int
 		first, last   int64
 		subject       string
+		hasAttach     bool
 		seen          = map[string]bool{}
 		participants  []model.Address
 	)
 	for rows.Next() {
 		var subj, fromAddr, fromName, toJSON, ccJSON sql.NullString
-		var received, isUnread int64
-		if err := rows.Scan(&subj, &fromAddr, &fromName, &toJSON, &ccJSON, &received, &isUnread); err != nil {
+		var received, isUnread, attach int64
+		if err := rows.Scan(&subj, &fromAddr, &fromName, &toJSON, &ccJSON, &received, &isUnread,
+			&attach); err != nil {
 			rows.Close()
 			return err
 		}
@@ -189,6 +192,12 @@ func (tx *Tx) refreshThread(ctx context.Context, accountID, threadID string) err
 		count++
 		if isUnread != 0 {
 			unread++
+		}
+		// Any message with a file makes the whole thread carry one: the row
+		// stands for the conversation, and a reply that adds nothing does not
+		// take the invoice back out of it.
+		if attach != 0 {
+			hasAttach = true
 		}
 		if subject == "" {
 			subject = subj.String
@@ -225,13 +234,15 @@ func (tx *Tx) refreshThread(ctx context.Context, accountID, threadID string) err
 
 	if _, err := tx.q.ExecContext(ctx, `
 		INSERT INTO threads (account_id, thread_id, subject, first_utc, last_utc,
-		                     message_count, unread_count, participants_json)
-		VALUES (?,?,?,?,?,?,?,?)
+		                     message_count, unread_count, has_attachments, participants_json)
+		VALUES (?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(account_id, thread_id) DO UPDATE SET
 		  subject = excluded.subject, first_utc = excluded.first_utc, last_utc = excluded.last_utc,
 		  message_count = excluded.message_count, unread_count = excluded.unread_count,
+		  has_attachments = excluded.has_attachments,
 		  participants_json = excluded.participants_json`,
-		accountID, threadID, nullStr(subject), first, last, count, unread, participantsJSON); err != nil {
+		accountID, threadID, nullStr(subject), first, last, count, unread,
+		boolInt(hasAttach), participantsJSON); err != nil {
 		return fmt.Errorf("store: upsert thread %s/%s: %w", accountID, threadID, err)
 	}
 	return nil
@@ -313,9 +324,9 @@ func (s *Store) RebuildThreads(ctx context.Context, accountID string) error {
 func scanThread(sc scanner) (model.Thread, error) {
 	var t model.Thread
 	var subject, participants sql.NullString
-	var first, last, count, unread sql.NullInt64
+	var first, last, count, unread, attach sql.NullInt64
 	if err := sc.Scan(&t.AccountID, &t.ThreadID, &subject, &first, &last,
-		&count, &unread, &participants); err != nil {
+		&count, &unread, &attach, &participants); err != nil {
 		return t, err
 	}
 	t.Subject = subject.String
@@ -323,12 +334,13 @@ func scanThread(sc scanner) (model.Thread, error) {
 	t.Last = nullTime(last)
 	t.MessageCount = int(count.Int64)
 	t.UnreadCount = int(unread.Int64)
+	t.HasAttachments = attach.Int64 != 0
 	t.Participants = unmarshalAddrs(participants)
 	return t, nil
 }
 
 const threadCols = `t.account_id, t.thread_id, t.subject, t.first_utc, t.last_utc,
-	t.message_count, t.unread_count, t.participants_json`
+	t.message_count, t.unread_count, t.has_attachments, t.participants_json`
 
 // ListThreads returns thread summaries whose messages match f, newest activity
 // first. Filter fields that are per-message (From, mailbox, unread, …) select

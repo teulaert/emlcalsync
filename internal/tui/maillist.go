@@ -401,16 +401,19 @@ func (m *mailList) View(w, h int) string {
 	acctW = min(acctW, 10)
 	const (
 		markW = 2
+		attW  = 1
 		cntW  = 3
 		timeW = 9
 		partW = 18
 		gaps  = 5
 	)
-	subjW := w - acctW - markW - cntW - timeW - partW - gaps
+	subjW := w - acctW - markW - attW - cntW - timeW - partW - gaps
 	if subjW < 10 {
 		// Narrow terminal: drop the participants column before the subject.
+		// The attachment mark stays -- it is one cell, and whether a
+		// conversation carries a file is not a detail worth losing first.
 		partW2 := 0
-		subjW = w - acctW - markW - cntW - timeW - partW2 - 4
+		subjW = w - acctW - markW - attW - cntW - timeW - partW2 - 4
 		if subjW < 8 {
 			subjW = 8
 		}
@@ -428,6 +431,15 @@ func (m *mailList) rows(w, rows, acctW, subjW, partW, cntW, timeW int) string {
 		if t.UnreadCount > 0 {
 			mark = "●"
 		}
+		// The same letter `emlcal mail list` prints in its flag column, so
+		// what the TUI shows and what an agent reads say attachment the same
+		// way. One cell, ASCII: a paperclip glyph is double-width in some
+		// terminals and single in others, which would shift the subject
+		// column row by row.
+		att := " "
+		if t.HasAttachments {
+			att = "A"
+		}
 		var parts []string
 		for _, p := range t.Participants {
 			parts = append(parts, output.ShortAddr(p))
@@ -441,7 +453,7 @@ func (m *mailList) rows(w, rows, acctW, subjW, partW, cntW, timeW int) string {
 			cnt = fmt.Sprintf("%d", t.MessageCount)
 		}
 
-		line := padCells(t.AccountID, acctW) + " " + mark + " " + padCells(subject, subjW)
+		line := padCells(t.AccountID, acctW) + " " + mark + att + " " + padCells(subject, subjW)
 		if partW > 0 {
 			line += " " + padCells(strings.Join(parts, ", "), partW)
 		}

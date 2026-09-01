@@ -33,7 +33,8 @@ type threadView struct {
 	subject   string
 
 	messages []model.Message
-	invites  map[string]*readerInvite // calendar cards, by remote id
+	invites  map[string]*readerInvite      // calendar cards, by remote id
+	atts     map[string][]model.Attachment // attachment rows, by remote id
 	cursor   int
 	top      int // compact: first visible row
 
@@ -225,6 +226,7 @@ func (t *threadView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 		}
 		t.messages = t.keep(msg.messages)
 		t.invites = msg.invites
+		t.atts = msg.attachments
 		slices.Reverse(t.messages)
 		if msg.thread != nil {
 			t.subject = msg.thread.Subject
@@ -439,6 +441,19 @@ func (t *threadView) layout(w int) {
 			t.lines = append(t.lines, threadLine{msg: i})
 		}
 		t.lines = append(t.lines, threadLine{msg: i, head: true, text: t.headerText(m, w)})
+		// Under the header, where the reader puts them: the flag column
+		// already says a file is there, and the names say which. The label
+		// goes on the first line only, the rest hanging under it.
+		for j, l := range attachmentDescs(t.atts[m.RemoteID], m.HasAttachments) {
+			label := "  attached: "
+			if j > 0 {
+				label = "            "
+			}
+			t.lines = append(t.lines, threadLine{
+				msg:  i,
+				text: styleFaint.Render(truncCells(label+l, w)),
+			})
+		}
 		for _, l := range inviteCard(t.invites[m.RemoteID], t.d.loc(), w-2) {
 			t.lines = append(t.lines, threadLine{msg: i, text: "  " + l})
 		}

@@ -116,6 +116,12 @@ type mailThreadRow struct {
 	First    output.Time `json:"first"`
 	FirstUTC int64       `json:"first_utc"`
 
+	// HasAttachments is true when any message in the thread carries a file.
+	// The same question the per-message rows answer, asked of the whole
+	// conversation, which is what a thread row stands for.
+	HasAttachments bool   `json:"has_attachments"`
+	AttStr         string `json:"-"            table:"ATT"`
+
 	Participants []model.Address `json:"participants"`
 	PartShort    string          `json:"-"        table:"PARTICIPANTS,max=30"`
 

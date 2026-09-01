@@ -223,6 +223,7 @@ CREATE TABLE threads (                     -- maintained at index time, for fast
   subject       TEXT,
   first_utc     INTEGER, last_utc INTEGER,
   message_count INTEGER, unread_count INTEGER,
+  has_attachments INTEGER NOT NULL DEFAULT 0, -- any live message carries a file
   participants_json TEXT,
   PRIMARY KEY (account_id, thread_id)
 );

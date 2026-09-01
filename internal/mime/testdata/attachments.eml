@@ -1,0 +1,41 @@
+From: Lennert <lennert@example.com>
+To: books@example.net
+Subject: Fwd: Your receipt #2164-3490
+Date: Tue, 1 Sep 2026 08:38:39 +0200
+Message-ID: <fwd-receipt@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: multipart/related; boundary="inner"
+
+--inner
+Content-Type: text/plain; charset=utf-8
+
+Met vriendelijke groet,
+
+Lennert
+--inner
+Content-Type: image/png
+Content-Disposition: inline; filename="logo.png"
+Content-ID: <logo@example.com>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmM
+IQAAAABJRU5ErkJggg==
+--inner--
+--outer
+Content-Type: application/pdf; name="Invoice-GRK6NZDJ-0025.pdf"
+Content-Disposition: attachment; filename="Invoice-GRK6NZDJ-0025.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PC9UeXBlL0NhdGFsb2c+PgplbmRvYmoKdHJhaWxlcgo8
+PC9Sb290IDEgMCBSPj4KJSVFT0YK
+--outer
+Content-Type: application/pdf; name="Receipt-2164-3490.pdf"
+Content-Disposition: attachment; filename="Receipt-2164-3490.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJeLjz9MKMSAwIG9iago8PC9UeXBlL0NhdGFsb2c+PgplbmRvYmoKdHJhaWxlcgo8
+PC9Sb290IDEgMCBSPj4KJSVFT0YK
+--outer--
