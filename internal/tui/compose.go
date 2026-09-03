@@ -76,6 +76,13 @@ type composeView struct {
 	// focus indexes fields, or is bodyFocus for the body.
 	focus int
 
+	// book is the address book, loaded when the composer opened; hints are
+	// the entries matching what is being typed into To, Cc or Bcc, and hint
+	// the one enter takes. See compose_hints.go.
+	book  []model.Contact
+	hints []model.Contact
+	hint  int
+
 	// files are the attachments going out with the message: a forward's, and
 	// nothing else's. filesNote names any the fetch could not get, and stays
 	// on screen rather than in a status that the next keystroke clears.
@@ -332,9 +339,15 @@ func (c *composeView) kindWord() string {
 	return "reply"
 }
 
-// Init has nothing to load: everything the composer shows was in hand when it
-// was pushed.
-func (c *composeView) Init() tea.Cmd { return nil }
+// Init fetches the address book. Everything the composer shows was in hand
+// when it was pushed; what it completes To with is not, and is nothing to
+// hold the screen for.
+func (c *composeView) Init() tea.Cmd {
+	if c.d.Store == nil {
+		return nil
+	}
+	return c.d.loadContacts()
+}
 
 // reload is a no-op. The root re-queries the visible screen every time the
 // daemon commits, and re-reading the archive under a half-written reply would
@@ -351,6 +364,14 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 	c.ensure(w, h)
 	if ev, ok := msg.(modelEvent); ok {
 		return c, c.onDraft(ev)
+	}
+	if ev, ok := msg.(contactsLoaded); ok {
+		// Completion is a convenience: a book that failed to load is a
+		// composer that does not complete, not one that complains.
+		if ev.err == nil {
+			c.book = ev.contacts
+		}
+		return c, nil
 	}
 	press, isKey := msg.(tea.KeyPressMsg)
 	if !isKey {
@@ -393,12 +414,27 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 	case key.Matches(press, k.PrevField):
 		c.moveFocus(-1)
 		return c, nil
+	// The address book's keys count only while it is offering something:
+	// otherwise enter in a header field is nothing, and in the body a line.
+	case len(c.hints) > 0 && key.Matches(press, k.TakeHint):
+		c.takeHint()
+		return c, nil
+	case len(c.hints) > 0 && key.Matches(press, k.NextHint):
+		c.cycleHint(1)
+		return c, nil
+	case len(c.hints) > 0 && key.Matches(press, k.PrevHint):
+		c.cycleHint(-1)
+		return c, nil
 	}
 
 	// Anything else is text. A keystroke that reaches the buffer is a change
 	// of mind about leaving, so a pending question lapses.
 	c.pending, c.err, c.info = pendingNone, nil, ""
-	return c, c.toFocused(msg)
+	cmd := c.toFocused(msg)
+	if c.hintable() {
+		c.refreshHints()
+	}
+	return c, cmd
 }
 
 // toFocused hands a message to whichever field has the cursor. Only that one
@@ -424,6 +460,7 @@ func (c *composeView) moveFocus(d int) {
 // addressed before they are written.
 func (c *composeView) focusField(i int) {
 	c.focus = i
+	c.hints, c.hint = nil, 0
 	for j, f := range c.fields {
 		if j == i {
 			f.Focus()
@@ -641,6 +678,8 @@ func (c *composeView) footer(w int) string {
 		return "esc again to leave the draft as it was"
 	case c.pending == pendingDiscard:
 		return "esc again to throw this reply away"
+	case len(c.hints) > 0:
+		return c.hintsFooter(w)
 	case c.info != "":
 		return c.info
 	}

@@ -121,6 +121,25 @@ func (a Address) String() string {
 	return fmt.Sprintf("%s <%s>", a.Name, a.Email)
 }
 
+// Contact is one address the archive has seen, and how the account stands to
+// it: how often it wrote to them, how often they turn up at all, and when
+// last. There is no contacts sync; this is derived from the messages, so it
+// knows everyone who has ever been on one and nobody who has not.
+type Contact struct {
+	Email string `json:"email"`
+	Name  string `json:"name,omitempty"`
+	// Accounts are the ones that know them, sorted.
+	Accounts []string `json:"accounts"`
+	// SentCount is how many messages the account(s) wrote to them; Count is
+	// how many they are on at all.
+	SentCount int       `json:"sent"`
+	Count     int       `json:"messages"`
+	Last      time.Time `json:"last"`
+}
+
+// Address is the contact as it goes on a header.
+func (c Contact) Address() Address { return Address{Name: c.Name, Email: c.Email} }
+
 // Flags are the normalised per-message flags.
 // Gmail: UNREAD/STARRED/DRAFT labels. JMAP: $seen/$flagged/$draft/$answered.
 type Flags struct {

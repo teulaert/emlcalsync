@@ -282,6 +282,11 @@ func (e *Engine) purgeDeleted(ctx context.Context) (int, map[string]bool, error)
 		if err := e.st.RebuildThreads(ctx, a); err != nil {
 			return total, shas, err
 		}
+		// The purge cascades into message_addresses without passing through
+		// UpsertMessage, so the summary is recomputed the same way.
+		if err := e.st.RebuildContacts(ctx, a); err != nil {
+			return total, shas, err
+		}
 	}
 	return total, shas, nil
 }

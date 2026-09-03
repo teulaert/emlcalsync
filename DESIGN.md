@@ -40,7 +40,10 @@ Omarchy integrations, are views on it.
   the edges (discovery, redirects, scheduling) can only be verified against
   one that is actually being used.
 - An MCP server. Trivial to add later on top of the same internal API.
-- Contacts sync (possible later via People API / JMAP Contacts).
+- Contacts *sync* (possible later via People API / JMAP Contacts). The address
+  book is derived from the archive instead — everyone who has been on a
+  message, ranked by who you write to (§5 `contacts`, §9.2) — and a synced
+  source could later merge into the same table.
 - Being a mail *client* with a rendering engine — HTML is stored, not rendered.
 
 ---
@@ -215,6 +218,27 @@ CREATE TABLE attachments (
   content_id   TEXT,
   is_inline    INTEGER NOT NULL DEFAULT 0,
   remote_ref   TEXT                        -- Gmail attachmentId / JMAP blobId (lazy fetch)
+);
+
+CREATE TABLE message_addresses (           -- who is on each message: the address book's facts
+  message_id    INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  account_id    TEXT NOT NULL,
+  email         TEXT NOT NULL,             -- lower-cased
+  name          TEXT,                      -- as written on this message
+  field         TEXT NOT NULL,             -- 'from' | 'to' | 'cc' | 'bcc' (never reply-to)
+  outbound      INTEGER NOT NULL DEFAULT 0,-- the account wrote this message (sent mailbox, own From, draft)
+  date_utc      INTEGER NOT NULL,
+  PRIMARY KEY (message_id, email, field)
+);
+
+CREATE TABLE contacts (                    -- the address book: one row per (account, address)
+  account_id    TEXT NOT NULL,
+  email         TEXT NOT NULL,
+  name          TEXT,                      -- newest name on record, From beating To
+  sent_count    INTEGER NOT NULL,          -- messages the account wrote to them
+  total_count   INTEGER NOT NULL,          -- messages they are on at all
+  last_utc      INTEGER,
+  PRIMARY KEY (account_id, email)
 );
 
 CREATE TABLE threads (                     -- maintained at index time, for fast listing
@@ -791,6 +815,10 @@ emlcal cal update <id> [same flags]
 emlcal cal delete <id>
 emlcal cal respond <id> --accept|--decline|--tentative
 
+CONTACTS — read (derived from the archive; nothing to sync)
+emlcal contacts list [--limit N]              everyone on a message, ranked: written to, then seen, then recent
+emlcal contacts search <query> [--limit N]    by part of a name or address; row.address is what --to takes
+
 MAINTENANCE
 emlcal outbox list | retry | drop <id>
 emlcal reindex [--account A]                  rebuild index from blobs
@@ -1038,7 +1066,8 @@ partial pages, and crashes mid-batch.
 | 8 | `tui` reply: `r` / `a` open a composer over the message in focus, send or save as a draft | a person can answer their mail without leaving the archive |
 | 9 | `internal/ai` + Ollama, `ctrl+g` in the composer drafts the reply from the thread; the read commands are its tools | a local model can read the archive and write for the person, through one layer the CLI can share later |
 | 10 | `ctrl+g` on a conversation summarizes it or answers a question, `r` replies from there; `ai summarize` on the CLI | a person can act on mail without reading it, and an agent can ask the local model the same |
-| later | `ai ask` across the archive, persisted summaries for a list digest, cloud backends, forwarding and new mail from the TUI, Omarchy menu integrations, embeddings, contacts, MCP shim | |
+| 11 | `contacts list` / `search`, derived from the archive; the TUI composer completes To/Cc/Bcc from it | a person, or an agent, can address mail to somebody by name |
+| later | `ai ask` across the archive, persisted summaries for a list digest, cloud backends, forwarding and new mail from the TUI, Omarchy menu integrations, embeddings, contacts sync, MCP shim | |
 
 Phase 1 is deliberately Fastmail-first: an API token, no consent screens, and
 push support make it the fastest path to a real archive you can query.
@@ -1519,6 +1548,20 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     replaced `model.Address.String()` for the editable To/Cc fields: that is a
     display formatter and leaves a comma in a display name unquoted, which the
     parser then reads back as two addresses.
+
+- **Address book (`contacts`, migration `0006`)** is derived, not synced.
+  `UpsertMessage` replaces the message's `message_addresses` rows after its
+  memberships are written (the sent-mailbox check needs them) and re-aggregates
+  `contacts` for every address the message named before or names now, so a
+  re-index counts nothing twice; the migration backfills both tables in SQL
+  (`json_each` over `to_json`/`cc_json`/`bcc_json`) inside `Open`'s window, and
+  `reindex` is the recovery if that were ever cut short. The gc purge calls
+  `RebuildContacts` beside `RebuildThreads`, since a `DELETE FROM messages`
+  cascades into the facts without touching the summary. Own addresses and the
+  robots (`noreply`, `notifications`, `mailer-daemon`, …) are excluded at read
+  time, so the rule can change without a re-index. The TUI composer loads the
+  top 2000 once per composer and matches in memory: the bubbles' suggestions
+  complete a whole field by prefix, which a comma-separated To defeats.
 
 ### Still to verify against live accounts
 

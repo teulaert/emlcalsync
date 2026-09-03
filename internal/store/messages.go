@@ -243,6 +243,11 @@ func (tx *Tx) UpsertMessage(ctx context.Context, msg *model.Message, parsed *mim
 	if err := tx.replaceMemberships(ctx, id, m.AccountID, m.MailboxRemotes); err != nil {
 		return 0, err
 	}
+	// After the memberships: whether this message sits in Sent is part of
+	// what the address book records about everyone on it.
+	if err := tx.replaceAddresses(ctx, id, m.AccountID); err != nil {
+		return 0, err
+	}
 	if err := tx.recordRefs(ctx, m.AccountID, id, refs); err != nil {
 		return 0, err
 	}

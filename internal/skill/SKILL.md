@@ -60,6 +60,8 @@ emlcal cal calendars [--account A]
 emlcal cal agenda [--days 7 | --from .. --to ..] [--calendar C]
 emlcal cal show <id>
 emlcal cal free --from .. --to .. [--duration 30m] [--hours 09:00-18:00]
+emlcal contacts list [--limit N]                 # people in the archive, by who you write to
+emlcal contacts search <name-or-address>         # find a person; row.address goes into --to
 emlcal status                                    # counts, last sync, daemon state
 ```
 
@@ -152,7 +154,17 @@ account has no calendar, and the invite cannot be answered from here.
  "calendar":"Work","location":"Room 2","my_response":"accepted","account":"home"}
 ```
 
+`contacts list` / `contacts search` — an array, best match first:
+
+```json
+{"name":"Anna de Vries","email":"anna@example.com","address":"Anna de Vries <anna@example.com>",
+ "sent":12,"messages":31,"last":"2026-08-23T16:40:00+02:00","accounts":["work"]}
+```
+
 ## Guidance
+
+- To mail a person the user names but does not spell out, `contacts search
+  <name>` and pass the row's `address` to `--to`. Never guess an address.
 
 - Bound every search with `--since` (and `--limit`) — the archive holds years of
   mail and an unbounded query wastes tokens.

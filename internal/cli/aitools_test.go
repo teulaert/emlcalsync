@@ -43,7 +43,7 @@ func TestAIToolsAreTheReadCommands(t *testing.T) {
 	ts := app.AITools()
 
 	names := toolNames(ts)
-	for _, want := range []string{"mail_list", "mail_search", "mail_read", "mail_thread", "mail_mailboxes", "mail_attachment_list", "cal_agenda", "cal_show", "cal_free", "cal_calendars"} {
+	for _, want := range []string{"mail_list", "mail_search", "mail_read", "mail_thread", "mail_mailboxes", "mail_attachment_list", "cal_agenda", "cal_show", "cal_free", "cal_calendars", "contacts_list", "contacts_search"} {
 		if !strings.Contains(" "+strings.Join(names, " ")+" ", " "+want+" ") {
 			t.Errorf("missing tool %q in %v", want, names)
 		}

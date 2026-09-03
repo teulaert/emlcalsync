@@ -37,6 +37,7 @@ var (
 		"mail list", "mail search", "mail read", "mail thread",
 		"mail mailboxes", "mail attachment list", "mail attachment text",
 		"cal agenda", "cal show", "cal free", "cal calendars",
+		"contacts list", "contacts search",
 		"status",
 	}
 	// writeCommands reach the provider and are asked about first.

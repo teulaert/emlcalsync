@@ -179,6 +179,7 @@ mail      mailboxes · list · search · read · open · thread · attachment li
           mark · move · archive · trash · restore · draft · send · reply · forward (write)
 cal       calendars · agenda · show · free                                    (read)
           create · update · delete · respond                                  (write)
+contacts  list · search <q>   the people in the archive, by who you write to  (read)
 ```
 
 `emlcal <command> --help` documents every flag. Useful defaults:
@@ -191,6 +192,14 @@ cal       calendars · agenda · show · free                                   
   `new_id`, and the old one stops resolving.
 - `--since 2d`, `--until`, `--account` (repeatable) on every list;
   `--dry-run` on every write.
+- There is no address book to keep: `contacts` is derived from the mail
+  already here — everyone who has been on a message, ranked by how often you
+  have written to them, then how often they turn up, then how recently. Your
+  own addresses and the robots (noreply, notifications, mailer-daemon) are
+  left out. `contacts search vries` finds a person by part of a name or
+  address, and the row's `address` is what `--to` takes. The TUI composer
+  completes To, Cc and Bcc from the same book as you type: ctrl+n / ctrl+p
+  pick, enter takes.
 - Exit codes: 0 ok · 1 error · 2 usage · 3 not found · 4 offline ·
   5 provider rejected · 6 queued in outbox.
 - `mail open <id>` renders a message as a standalone HTML page and opens it
@@ -294,7 +303,7 @@ conversation it summarizes it — or answers a question you type — on a screen
 of its own, from which `r` replies; in the composer it drafts the reply, with
 instructions or without. Either way the model reads the whole thread and can
 look other mail and the calendar up first. Not yet: creating or editing events from
-the TUI, embeddings for semantic search, contacts. `y` copies the id in focus to the clipboard — the
+the TUI, embeddings for semantic search. `y` copies the id in focus to the clipboard — the
 thread's on a list row, the message's in a thread or the reader — which is
 what an agent with the skill wants to be told; the reader and the expanded
 thread show it too.
