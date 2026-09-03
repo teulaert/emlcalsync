@@ -144,9 +144,87 @@ func TestRootHelpOverlayOpensAndAnyKeyCloses(t *testing.T) {
 			t.Errorf("help is missing %q:\n%s", want, view)
 		}
 	}
-	send(t, r, "j")
+	send(t, r, "x")
 	if r.showHelp {
 		t.Error("a key press did not close help")
+	}
+}
+
+// TestRootHelpScrollsOnAShortWindow is the bug it was written for: the key
+// list is longer than the window, and the keys below the fold used to be
+// unreachable because every key closed the overlay.
+func TestRootHelpScrollsOnAShortWindow(t *testing.T) {
+	d := newTestDeps(t, "work")
+	r := newTestRoot(t, d)
+	r.w, r.h = 100, 12
+
+	send(t, r, "?")
+	first := r.render()
+	if !strings.Contains(first, "more below") {
+		t.Errorf("a short window does not say there is more to see:\n%s", first)
+	}
+	if n := strings.Count(first, "\n") + 1; n != r.h {
+		t.Errorf("help drew %d lines, want exactly %d", n, r.h)
+	}
+
+	send(t, r, "j")
+	if r.helpOff != 1 || !r.showHelp {
+		t.Fatalf("j closed the help or did not scroll it (off=%d, up=%v)", r.helpOff, r.showHelp)
+	}
+	send(t, r, "k")
+	if r.helpOff != 0 {
+		t.Errorf("k did not scroll back up (off=%d)", r.helpOff)
+	}
+	send(t, r, "ctrl+f")
+	if r.helpOff == 0 {
+		t.Error("ctrl+f did not page down")
+	}
+
+	// G reaches the last screenful and stops there, and the end of the list
+	// is what it shows -- the row marks are the last thing in it.
+	send(t, r, "G")
+	last := r.render()
+	if !strings.Contains(last, "row marks") {
+		t.Errorf("G did not reach the end of the list:\n%s", last)
+	}
+	if !strings.Contains(last, "the end") {
+		t.Errorf("the footer does not say it is the end:\n%s", last)
+	}
+	if n := strings.Count(last, "\n") + 1; n != r.h {
+		t.Errorf("help drew %d lines at the end, want exactly %d", n, r.h)
+	}
+
+	// Reopening starts at the top again.
+	send(t, r, "x")
+	send(t, r, "?")
+	if r.helpOff != 0 {
+		t.Errorf("reopening the help kept the old offset (%d)", r.helpOff)
+	}
+}
+
+// TestRootHelpFitsWhenTheWindowIsTall is the other side of it: with room for
+// the whole list there is nothing to scroll and the footer says as much.
+func TestRootHelpFitsWhenTheWindowIsTall(t *testing.T) {
+	d := newTestDeps(t, "work")
+	r := newTestRoot(t, d)
+	r.w, r.h = 100, 80
+
+	send(t, r, "?")
+	view := r.render()
+	if !strings.Contains(view, "any key to close") {
+		t.Errorf("a tall window should just say any key closes:\n%s", view)
+	}
+	if strings.Contains(view, "more below") {
+		t.Errorf("nothing is hidden, so nothing should say so:\n%s", view)
+	}
+	// Every key in the list is on the screen, wrapped rather than cut: the
+	// composer's longest key is the one that used to be truncated.
+	if !strings.Contains(view, "ctrl+n / ctrl+p, enter") {
+		t.Errorf("the widest key is cut off:\n%s", view)
+	}
+	send(t, r, "j")
+	if r.showHelp {
+		t.Error("with nothing to scroll, j should close the help like any other key")
 	}
 }
 

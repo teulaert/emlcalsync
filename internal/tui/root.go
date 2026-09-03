@@ -12,6 +12,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"github.com/mattn/go-runewidth"
 
 	"github.com/teulaert/emlcalsync/internal/model"
 )
@@ -66,7 +67,11 @@ type root struct {
 	statusSeq int
 	undo      *undoRecord
 	showHelp  bool
-	quitting  bool
+	// helpOff is how far the help overlay is scrolled, in wrapped lines. The
+	// key list is longer than most terminals are tall, so it has to be a
+	// window over the list rather than the top of it.
+	helpOff  int
+	quitting bool
 
 	// answers is what the model has said about conversations this session,
 	// so a summary looked at twice is asked for once.
@@ -225,7 +230,14 @@ func (r *root) capturing() bool {
 
 func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if r.showHelp {
+		// The movement keys scroll the list; everything else closes it, which
+		// is the whole contract the footer promises.
+		if off, ok := r.helpScroll(msg); ok {
+			r.helpOff = off
+			return r, nil
+		}
 		r.showHelp = false
+		r.helpOff = 0
 		return r, nil
 	}
 	// ctrl+c quits from anywhere, ahead of the capture gate below: a screen
@@ -273,6 +285,7 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, r.keys.Help):
 		r.showHelp = true
+		r.helpOff = 0
 		return r, nil
 
 	case key.Matches(msg, r.keys.Quit):
@@ -919,26 +932,104 @@ func (r *root) render() string {
 	return title + "\n" + body + "\n" + styleFaint.Render(padCells(line, r.w))
 }
 
+// helpRows is the key list laid out for the width in hand: one string per
+// screen line, the description wrapped under the key column. It is wrapped
+// here rather than left to the terminal because a line the terminal folds is
+// a line the scrolling cannot account for -- which is how the bottom of the
+// list came to be unreachable on a short window.
+func (r *root) helpRows() []string {
+	lines := r.keys.helpLines()
+	// The key column is as wide as the widest key, so the longest of them --
+	// the composer's address-book keys -- is not cut off.
+	col := 0
+	for _, l := range lines {
+		col = max(col, runewidth.StringWidth(l[0]))
+	}
+	col += 2
+	room := max(r.w-col-2, 12)
+	rows := make([]string, 0, len(lines))
+	for _, l := range lines {
+		if l[0] == "" {
+			rows = append(rows, "")
+			continue
+		}
+		for i, d := range wrapCells(l[1], room) {
+			k := l[0]
+			if i > 0 {
+				k = ""
+			}
+			rows = append(rows, "  "+padCells(k, col)+d)
+		}
+	}
+	return rows
+}
+
+// helpBody is how many of those rows the window has room for, the header and
+// the footer taken off.
+func (r *root) helpBody() int { return max(r.h-2, 1) }
+
+// clampHelp keeps an offset inside the list: never past the last screenful,
+// never before the first.
+func (r *root) clampHelp(off int) int {
+	return max(min(off, max(len(r.helpRows())-r.helpBody(), 0)), 0)
+}
+
+// helpScroll answers a key press while the help is up: where the list should
+// be scrolled to, and whether the key was a movement key at all. Anything
+// else is not ours -- the caller closes the overlay on it.
+func (r *root) helpScroll(msg tea.KeyPressMsg) (int, bool) {
+	// With room for the whole list there is nothing to scroll, and the footer
+	// says any key closes it -- so the movement keys close it too, rather
+	// than being the two keys that quietly do nothing.
+	if len(r.helpRows()) <= r.helpBody() {
+		return 0, false
+	}
+	page := max(r.helpBody()-1, 1)
+	off := r.helpOff
+	switch {
+	case key.Matches(msg, r.keys.Down), key.Matches(msg, r.keys.LineDown):
+		off++
+	case key.Matches(msg, r.keys.Up), key.Matches(msg, r.keys.LineUp):
+		off--
+	case key.Matches(msg, r.keys.PageDown):
+		off += page
+	case key.Matches(msg, r.keys.PageUp):
+		off -= page
+	case key.Matches(msg, r.keys.Top):
+		off = 0
+	case key.Matches(msg, r.keys.Bottom):
+		off = len(r.helpRows())
+	default:
+		return 0, false
+	}
+	return r.clampHelp(off), true
+}
+
 func (r *root) helpView() string {
+	rows := r.helpRows()
+	body := r.helpBody()
+	off := r.clampHelp(r.helpOff)
+	more := max(len(rows)-body, 0) - off
+
+	foot := " any key to close"
+	if len(rows) > body {
+		if more > 0 {
+			foot = " j/k scroll · " + strconv.Itoa(more) + " more below · any other key closes"
+		} else {
+			foot = " j/k scroll · the end · any other key closes"
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString(styleHeader.Render(padCells(" emlcal — keys", r.w)))
 	b.WriteString("\n")
-	n := 1
-	for _, l := range r.keys.helpLines() {
-		if n >= r.h-1 {
-			break
+	for i := 0; i < body; i++ {
+		if n := off + i; n < len(rows) {
+			b.WriteString(rows[n])
 		}
-		if l[0] == "" {
-			b.WriteString("\n")
-		} else {
-			b.WriteString("  " + padCells(l[0], 20) + l[1] + "\n")
-		}
-		n++
-	}
-	for ; n < r.h-1; n++ {
 		b.WriteString("\n")
 	}
-	b.WriteString(styleFaint.Render(padCells(" any key to close", r.w)))
+	b.WriteString(styleFaint.Render(padCells(foot, r.w)))
 	return b.String()
 }
 
