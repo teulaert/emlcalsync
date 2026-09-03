@@ -51,6 +51,9 @@ type keymap struct {
 	DeleteDraft key.Binding
 	NextField   key.Binding
 	PrevField   key.Binding
+	// The From row: which account a new message or a forward goes out from.
+	NextAccount key.Binding
+	PrevAccount key.Binding
 	// The address book under To, Cc and Bcc. They are only looked at while
 	// something is being offered; otherwise enter and the arrows are what
 	// they were.
@@ -106,9 +109,13 @@ func defaultKeys() keymap {
 		DeleteDraft: key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("ctrl+x", "delete the draft")),
 		NextField:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next field")),
 		PrevField:   key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "previous field")),
-		NextHint:    key.NewBinding(key.WithKeys("ctrl+n", "down"), key.WithHelp("ctrl+n", "next address offered")),
-		PrevHint:    key.NewBinding(key.WithKeys("ctrl+p", "up"), key.WithHelp("ctrl+p", "previous address offered")),
-		TakeHint:    key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "take the address offered")),
+		NextAccount: key.NewBinding(key.WithKeys("right", "space"),
+			key.WithHelp("→", "the next account to send from")),
+		PrevAccount: key.NewBinding(key.WithKeys("left"),
+			key.WithHelp("←", "the previous account to send from")),
+		NextHint: key.NewBinding(key.WithKeys("ctrl+n", "down"), key.WithHelp("ctrl+n", "next address offered")),
+		PrevHint: key.NewBinding(key.WithKeys("ctrl+p", "up"), key.WithHelp("ctrl+p", "previous address offered")),
+		TakeHint: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "take the address offered")),
 	}
 }
 
@@ -150,7 +157,8 @@ func (k keymap) helpLines() [][2]string {
 		{"  ctrl+s", "save it as a draft on the server"},
 		{"  ctrl+x", "delete the draft being edited (twice)"},
 		{"  ctrl+g", "draft it with the AI model: asks for instructions, enter alone just answers"},
-		{"  tab / shift+tab", "next / previous field"},
+		{"  tab / shift+tab", "next / previous field (shift+tab from To reaches From)"},
+		{"  ← / → , space", "on the From row: the account it goes out from (a new message or a forward)"},
 		{"  ctrl+n / ctrl+p, enter", "in To, Cc, Bcc: pick / take an address the archive knows, as it is typed"},
 		{"  esc", "cancel (twice, once something is written)"},
 		{"", ""},

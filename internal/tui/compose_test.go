@@ -1378,8 +1378,8 @@ func TestNewMessageOpensEmpty(t *testing.T) {
 	if got := r.render(); !strings.Contains(got, "new · ") {
 		t.Errorf("the header does not say this is a new message:\n%s", got)
 	}
-	// Nothing on screen chose the account, so the status line says which one.
-	if got := r.render(); !strings.Contains(got, "from work@example.com") {
+	// Nothing on screen chose the account, so the From row says which one.
+	if got := r.render(); !strings.Contains(got, "work@example.com · work") {
 		t.Errorf("nothing said which account it goes out from:\n%s", got)
 	}
 }
@@ -1447,5 +1447,121 @@ func TestTheComposerOffersTheAIKeyOnlyWithAConversation(t *testing.T) {
 	send(t, r, "c")
 	if got := r.render(); strings.Contains(got, "ctrl+g ai draft") {
 		t.Errorf("a new message offers an AI draft it has nothing to write from:\n%s", got)
+	}
+}
+
+// TestNewMessagePicksTheAccountOnTheFromRow is the composer's answer to the
+// account filter being the only way to choose a sender: the From row, one
+// shift+tab back from To.
+func TestNewMessagePicksTheAccountOnTheFromRow(t *testing.T) {
+	d := newTestDeps(t, "work", "home")
+	r := newTestRoot(t, d)
+
+	send(t, r, "c")
+	c := composerOn(t, r)
+	if c.account != "work" {
+		t.Fatalf("a new message opened on %q, want the first account", c.account)
+	}
+
+	send(t, r, "shift+tab")
+	if c.focus != fromFocus {
+		t.Fatalf("shift+tab from To reached %d, want the From row", c.focus)
+	}
+	if got := r.render(); !strings.Contains(got, "the account this goes out from") {
+		t.Errorf("the footer does not say how to pick an account:\n%s", got)
+	}
+
+	send(t, r, "right")
+	if c.account != "home" || c.from.Email != "home@example.com" {
+		t.Fatalf("→ left the sender at %q / %q", c.account, c.from.Email)
+	}
+	if got := r.render(); !strings.Contains(got, "home@example.com · home") {
+		t.Errorf("the From row does not show the account picked:\n%s", got)
+	}
+
+	// space is the same key on this row, and left goes back.
+	send(t, r, "space")
+	if c.account != "work" {
+		t.Errorf("space did not cycle on (account %q)", c.account)
+	}
+	send(t, r, "left")
+	if c.account != "home" {
+		t.Errorf("← did not go back (account %q)", c.account)
+	}
+
+	// tab carries on into To, and the row's keys are letters again in a field.
+	send(t, r, "tab")
+	if c.focus != 0 {
+		t.Fatalf("tab from From reached %d, want To", c.focus)
+	}
+	send(t, r, "space")
+	if c.account != "home" {
+		t.Errorf("space in To changed the account to %q", c.account)
+	}
+	if c.to.Value() != " " {
+		t.Errorf("space in To was eaten by the From row (to = %q)", c.to.Value())
+	}
+}
+
+// A reply goes out from the account that received it, so there is nothing to
+// pick: the row is on screen, and the cursor does not stop on it.
+func TestReplyShowsTheSenderButDoesNotPickIt(t *testing.T) {
+	d := newTestDeps(t, "work", "home")
+	addConversation(t, d, "work", "w1", "t1")
+	r := newTestRoot(t, d)
+
+	send(t, r, "r")
+	c := composerOn(t, r)
+	if got := r.render(); !strings.Contains(got, "work@example.com · work") {
+		t.Errorf("the reply does not say which account it answers from:\n%s", got)
+	}
+	if c.canPickAccount() {
+		t.Error("a reply offered to change its account")
+	}
+	// A reply opens in the body; the ring is From-less, so tab walks the
+	// fields and comes back without ever landing on it.
+	for i := range 8 {
+		send(t, r, "tab")
+		if c.focus == fromFocus {
+			t.Fatalf("tab %d landed on the From row of a reply", i+1)
+		}
+	}
+}
+
+// A single-account setup has nothing to choose between, so the row is there to
+// be read and nothing more.
+func TestOneAccountDoesNotOfferTheFromRow(t *testing.T) {
+	d := newTestDeps(t, "work")
+	r := newTestRoot(t, d)
+
+	send(t, r, "c")
+	c := composerOn(t, r)
+	if c.canPickAccount() {
+		t.Error("one account, and the composer still offered to pick one")
+	}
+	send(t, r, "shift+tab")
+	if c.focus == fromFocus {
+		t.Error("shift+tab landed on a row with nothing to pick")
+	}
+}
+
+// A draft on the server lives in one account's Drafts folder, and neither
+// provider can move it. Switching would trash a message the new account has
+// never heard of, so the row says so instead.
+func TestStoredDraftKeepsItsAccount(t *testing.T) {
+	d := newTestDeps(t, "work", "home")
+	r := newTestRoot(t, d)
+
+	send(t, r, "c")
+	c := composerOn(t, r)
+	c.draftRemote = "d1" // as ctrl+s leaves it
+
+	send(t, r, "shift+tab")
+	send(t, r, "right")
+	if c.account != "work" {
+		t.Errorf("a stored draft changed account to %q", c.account)
+	}
+	if got := r.render(); !strings.Contains(got, "stored in work") {
+		t.Errorf("nothing explained why the account is fixed:\n%s", got)
 	}
 }

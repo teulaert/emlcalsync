@@ -285,7 +285,10 @@ answer it right there, through the calendar's copy of the event; in the
 reader `enter` opens that event. `r` replies to the
 message in focus and `a` replies to everyone: the composer opens with the
 recipients, the subject and the quoted original filled in, `ctrl+d` sends it
-and `ctrl+s` saves it as a draft on the server. `enter` on a draft reopens it
+and `ctrl+s` saves it as a draft on the server. The `From` row above `To`
+names the account the message goes out from; on a new message or a forward
+`shift+tab` from `To` reaches it and `←` / `→` pick another, a reply having to
+answer from the account that received it. `enter` on a draft reopens it
 in the composer to finish and send — straight off the row in the drafts
 mailbox, so finishing one is `M` to drafts, `enter`, `ctrl+d`. Replying to a
 thread you have already half answered carries that draft on instead of starting

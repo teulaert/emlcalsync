@@ -129,6 +129,11 @@ const (
 const (
 	// bodyFocus is the focus index of the body, one past the header fields.
 	bodyFocus = 4
+	// fromFocus is the From row. It is not one of the fields -- there is
+	// nothing to type into it, the account is picked from the configured
+	// ones -- so it sits past the body rather than at 0, and the order the
+	// cursor moves in is focusRing rather than counting.
+	fromFocus = 5
 	// labelW is the width of the "To" / "Subject" gutter.
 	labelW = 9
 )
@@ -246,16 +251,13 @@ func newForwardCompose(d Deps, orig *model.Message, files []mime.DraftAttachment
 //
 // Every other composer takes its account from the message it opened on. This
 // one has no message, so the caller decides -- the list's account filter, in
-// practice -- and the status line names the address it will go out as, because
-// a sender nobody picked on screen is the one thing about a new message that
-// is not written anywhere on it.
+// practice -- and the From row names the address it will go out as, shift+tab
+// away from To for picking another. A sender nobody chose on screen was the
+// one thing about a new message that was written nowhere on it.
 func newBlankCompose(d Deps, account string, from model.Address) *composeView {
 	c := newComposeView(d, kindNew, account, from)
 	c.fill("", "", "", "", "")
 	c.focusField(0)
-	if from.Email != "" {
-		c.info = "from " + from.Email
-	}
 	return c
 }
 
@@ -414,6 +416,14 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 	case key.Matches(press, k.PrevField):
 		c.moveFocus(-1)
 		return c, nil
+	// The From row's keys count only while the cursor is on it: space in the
+	// body is a space, and the arrows there move the cursor.
+	case c.focus == fromFocus && key.Matches(press, k.NextAccount):
+		c.cycleAccount(1)
+		return c, nil
+	case c.focus == fromFocus && key.Matches(press, k.PrevAccount):
+		c.cycleAccount(-1)
+		return c, nil
 	// The address book's keys count only while it is offering something:
 	// otherwise enter in a header field is nothing, and in the body a line.
 	case len(c.hints) > 0 && key.Matches(press, k.TakeHint):
@@ -441,6 +451,11 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 // gets it: a blurred input ignores key presses anyway.
 func (c *composeView) toFocused(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
+	if c.focus == fromFocus {
+		// The From row is a choice, not a buffer. There is no field at this
+		// index, so nothing may be handed one.
+		return nil
+	}
 	if c.focus == bodyFocus {
 		c.body, cmd = c.body.Update(msg)
 		return cmd
@@ -450,9 +465,67 @@ func (c *composeView) toFocused(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
+// canPickAccount reports whether the account is this composer's to choose. A
+// reply goes out from the account that received what it answers and a stored
+// draft from the one holding it; a message with nothing behind it, or one
+// being passed on, is the person's call -- when there is more than one
+// account to call it between.
+func (c *composeView) canPickAccount() bool {
+	return (c.kind == kindNew || c.kind == kindForward) && len(c.d.Accounts) > 1
+}
+
+// focusRing is what tab moves through, in the order the rows are on screen.
+// From is in it only when the account can be picked: a row the cursor stops
+// on and nothing can be done to is worse than no row at all.
+func (c *composeView) focusRing() []int {
+	ring := make([]int, 0, bodyFocus+2)
+	if c.canPickAccount() {
+		ring = append(ring, fromFocus)
+	}
+	for i := range bodyFocus {
+		ring = append(ring, i)
+	}
+	return append(ring, bodyFocus)
+}
+
 func (c *composeView) moveFocus(d int) {
-	n := bodyFocus + 1
-	c.focusField(((c.focus+d)%n + n) % n)
+	ring := c.focusRing()
+	at := 0
+	for i, f := range ring {
+		if f == c.focus {
+			at = i
+		}
+	}
+	c.focusField(ring[((at+d)%len(ring)+len(ring))%len(ring)])
+}
+
+// cycleAccount moves the From row on to the next configured account, taking
+// the address it sends as with it.
+//
+// A draft already stored on a server is left where it is. It lives in one
+// account's Drafts folder, neither provider can move a draft, and saving or
+// sending trashes the old message by id -- an id the new account knows
+// nothing about. So the row says why instead of quietly sending from
+// somewhere the draft is not.
+func (c *composeView) cycleAccount(d int) {
+	c.pending, c.err, c.info = pendingNone, nil, ""
+	if c.draftRemote != "" {
+		c.info = "this draft is stored in " + c.account +
+			" — esc, then c, to write from another account"
+		return
+	}
+	accounts := c.d.Accounts
+	if len(accounts) < 2 {
+		return
+	}
+	at := 0
+	for i, a := range accounts {
+		if a == c.account {
+			at = i
+		}
+	}
+	next := accounts[((at+d)%len(accounts)+len(accounts))%len(accounts)]
+	c.account, c.from = next, c.d.sendFrom(next)
 }
 
 // focusField puts the cursor in one field. A reply opens in the body, over the
@@ -594,13 +667,44 @@ func (c *composeView) build(kind sync.OpKind) (sync.Op, error) {
 	return op, nil
 }
 
-// headerRows is how many rows sit above the rule: the four fields, and the
-// files row when there is one. The body gets what is left.
+// headerRows is how many rows sit above the rule: the From row, the four
+// fields, and the files row when there is one. The body gets what is left.
 func (c *composeView) headerRows() int {
+	n := len(c.fields) + 1
 	if len(c.files) > 0 || c.filesNote != "" {
-		return len(c.fields) + 1
+		n++
 	}
-	return len(c.fields)
+	return n
+}
+
+// fromRow is the account the message goes out from, written where it can be
+// read before ctrl+d rather than guessed. Every composer shows it; on a new
+// message or a forward it is also where it is picked.
+func (c *composeView) fromRow(w int) string {
+	label := padCells(" From", labelW)
+	if c.focus != fromFocus {
+		label = styleFaint.Render(label)
+	}
+	line := c.from.Email
+	if line == "" {
+		line = "(this account has no address configured)"
+	}
+	if c.account != "" {
+		line += " · " + c.account
+	}
+	if c.canPickAccount() && c.focus != fromFocus {
+		line += " · shift+tab to change"
+	}
+	if c.focus == fromFocus {
+		// The arrows are the affordance: the row is a choice being made, not
+		// a line being read.
+		line = "‹ " + line + " ›"
+	}
+	line = padCells(line, max(w-labelW, 0))
+	if c.focus != fromFocus {
+		return label + styleFaint.Render(line)
+	}
+	return label + line
 }
 
 // filesView is the attachments row: what is going out with the message, and
@@ -640,6 +744,7 @@ func (c *composeView) View(w, h int) string {
 	c.ensure(w, h)
 	rows := listRows(h)
 	out := make([]string, 0, rows)
+	out = append(out, c.fromRow(w))
 	for i, f := range c.fields {
 		label := padCells(" "+composeLabels[i], labelW)
 		if i != c.focus {
@@ -647,7 +752,7 @@ func (c *composeView) View(w, h int) string {
 		}
 		out = append(out, label+f.View())
 	}
-	if c.headerRows() > len(c.fields) {
+	if c.headerRows() > len(c.fields)+1 {
 		out = append(out, styleFaint.Render(padCells(" Files", labelW))+c.filesView(w))
 	}
 	out = append(out, styleFaint.Render(strings.Repeat("─", max(w, 0))))
@@ -682,6 +787,8 @@ func (c *composeView) footer(w int) string {
 		return c.hintsFooter(w)
 	case c.info != "":
 		return c.info
+	case c.focus == fromFocus:
+		return "← / → or space: the account this goes out from · tab: on to To"
 	}
 	// The hints are what this composer can actually do: there is nothing to
 	// delete without a stored draft, and nothing for the model to read without

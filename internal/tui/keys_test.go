@@ -9,10 +9,12 @@ import (
 )
 
 // spelledElsewhere is the keys the ? overlay deliberately does not name: the
-// arrows and paging keys nobody has to be told to try, ⌫ which the overlay
-// draws rather than spells, and ctrl+c, which the q line already stands for.
+// arrows and paging keys nobody has to be told to try -- the overlay draws
+// them as arrows where it names them at all -- ⌫, which it draws rather than
+// spells, and ctrl+c, which the q line already stands for.
 var spelledElsewhere = map[string]bool{
 	"up": true, "down": true, "home": true, "end": true,
+	"left": true, "right": true,
 	"pgup": true, "pgdown": true, "backspace": true, "ctrl+c": true,
 }
 
