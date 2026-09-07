@@ -4,6 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"io/fs"
+	stdmime "mime"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -661,6 +666,199 @@ func (d Deps) openInBrowser(accountID, remote, thread string, pictures bool) tea
 		}
 		return browserOpened{id: m.PublicID()}
 	}
+}
+
+// fileRow is one part on the files screen, with the message it belongs to:
+// from a list row the screen spans the conversation, and the receipt's PDF
+// and the reply's are not the same file.
+type fileRow struct {
+	msg model.Message
+	att model.Attachment
+}
+
+// name is what the file is called on screen and on disk: the sender's name
+// for it, or one made from where it sits and what it is when there is none.
+func (r fileRow) name() string {
+	fallback := "part-" + strings.ReplaceAll(r.att.PartPath, ".", "-")
+	if exts, _ := stdmime.ExtensionsByType(r.att.ContentType); len(exts) > 0 {
+		fallback += exts[0]
+	}
+	return browser.FileName(r.att.Filename, fallback)
+}
+
+// filesLoaded is what loadFiles sends back.
+type filesLoaded struct {
+	seq  int
+	rows []fileRow
+	err  error
+}
+
+// loadFiles reads the parts of one message, or of every message in a
+// conversation when remote is empty. A list row's mark says a file is
+// somewhere in the thread, and the file it was marked for is as likely on
+// the first message as on the last -- so from a row the whole conversation
+// is listed, newest first, the way the thread view stacks them.
+//
+// Files come before inline parts within a message: the document is what
+// the screen was opened for, the letterhead is what it also holds.
+func (d Deps) loadFiles(seq int, accountID, remote, threadID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		var msgs []model.Message
+		if remote != "" {
+			m, err := d.Store.GetMessage(ctx, accountID, remote)
+			if err != nil {
+				return filesLoaded{seq: seq, err: err}
+			}
+			msgs = []model.Message{*m}
+		} else {
+			_, ms, err := d.Store.GetThread(ctx, accountID, threadID, false)
+			if err != nil {
+				return filesLoaded{seq: seq, err: err}
+			}
+			slices.Reverse(ms)
+			msgs = ms
+		}
+		var rows []fileRow
+		for i := range msgs {
+			atts := d.attachmentsOf(ctx, &msgs[i])
+			slices.SortStableFunc(atts, func(a, b model.Attachment) int {
+				return cmpBool(a.Inline, b.Inline)
+			})
+			for _, a := range atts {
+				rows = append(rows, fileRow{msg: msgs[i], att: a})
+			}
+		}
+		return filesLoaded{seq: seq, rows: rows}
+	}
+}
+
+func cmpBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case !a:
+		return -1
+	}
+	return 1
+}
+
+// fileOpened is what openFile sends back: the file that was opened or saved,
+// or why it was not.
+type fileOpened struct {
+	id    string
+	name  string
+	path  string
+	saved bool
+	err   error
+}
+
+// openFile fetches one part and either hands it to whatever the desktop
+// opens that kind of file with -- the PDF viewer, the image viewer -- or
+// writes it to the downloads folder. The bytes come the way a forward's do:
+// out of the archived message when it is there, off the provider when only
+// the envelope was kept.
+//
+// Opened files land beside the pages o renders, in a directory per message,
+// and are swept with them; a saved one is the user's, and stays. A name the
+// folder already has is not overwritten: the second invoice.pdf becomes
+// "invoice (1).pdf", the way a browser does it, because the one already
+// there may be a different invoice.
+func (d Deps) openFile(m model.Message, a model.Attachment, save bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		row := fileRow{msg: m, att: a}
+		out := fileOpened{id: m.PublicID(), name: row.name(), saved: save}
+		ref := a.RemoteRef
+		if ref == "" {
+			ref = a.PartPath
+		}
+		data, err := d.Engine.FetchAttachment(ctx, m.AccountID, m.RemoteID, ref)
+		if err != nil {
+			out.err = err
+			return out
+		}
+		if save {
+			out.path, out.err = saveFile(d.downloadDir(), out.name, data)
+			return out
+		}
+		path, err := browser.WriteFile(d.viewDir(), m.PublicID(), out.name, data, d.now())
+		if err != nil {
+			out.err = err
+			return out
+		}
+		url, err := browser.FileURL(path)
+		if err != nil {
+			out.err = err
+			return out
+		}
+		open := d.Browser
+		if open == nil {
+			open = browser.Open
+		}
+		if err := open(url); err != nil {
+			out.err = err
+			return out
+		}
+		out.path = path
+		return out
+	}
+}
+
+// saveFile writes data under name in dir, picking the next free name when
+// that one is taken, and returns the absolute path it went to.
+func saveFile(dir, name string, data []byte) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	for i := range 1000 {
+		n := name
+		if i > 0 {
+			n = fmt.Sprintf("%s (%d)%s", stem, i, ext)
+		}
+		path := filepath.Join(dir, n)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		_, werr := f.Write(data)
+		if cerr := f.Close(); werr == nil {
+			werr = cerr
+		}
+		if werr != nil {
+			return "", werr
+		}
+		return filepath.Abs(path)
+	}
+	return "", fmt.Errorf("%s: every name up to (999) is taken in %s", name, dir)
+}
+
+func (d Deps) downloadDir() string {
+	if d.DownloadDir != "" {
+		return d.DownloadDir
+	}
+	return config.DownloadDir()
+}
+
+// shortHome writes a path the way a shell prompt would, with the home
+// directory as ~: the status line has one row, and /home/somebody/Downloads
+// spends a third of it on what everybody already knows.
+func shortHome(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if rest, ok := strings.CutPrefix(path, home); ok && (rest == "" || rest[0] == filepath.Separator) {
+		return "~" + rest
+	}
+	return path
 }
 
 // remoteContent is whether o fetches the pictures a message hosts elsewhere.

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // appDir is the per-spec subdirectory name under each XDG base directory.
@@ -47,6 +48,53 @@ func CacheDir() string { return xdgDir("XDG_CACHE_HOME", ".cache") }
 // under the cache directory because a rendered message is a copy of something
 // the archive already has, kept only until the browser has read it.
 func ViewDir() string { return filepath.Join(CacheDir(), "view") }
+
+// DownloadDir is where a file saved out of the TUI lands when the
+// configuration names nowhere: the desktop's own downloads folder, which is
+// $XDG_DOWNLOAD_DIR, else what user-dirs.dirs says it is, else ~/Downloads.
+//
+// It is deliberately not one of emlcal's own directories. A saved attachment
+// is something the user asked to have, to open from wherever the rest of
+// their files are; a cache directory is where nobody would look for it.
+func DownloadDir() string {
+	if v := os.Getenv("XDG_DOWNLOAD_DIR"); filepath.IsAbs(v) {
+		return filepath.Clean(v)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "Downloads"
+	}
+	if v := userDir(home, "XDG_DOWNLOAD_DIR"); v != "" {
+		return v
+	}
+	return filepath.Join(home, "Downloads")
+}
+
+// userDir reads one entry out of user-dirs.dirs, the file the desktop keeps
+// its folder choices in: lines of the form XDG_DOWNLOAD_DIR="$HOME/Downloads".
+// It lives directly under the config base, not under emlcal's own directory.
+// Anything unreadable, or a value that is not an absolute path, is nothing.
+func userDir(home, key string) string {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if !filepath.IsAbs(base) {
+		base = filepath.Join(home, ".config")
+	}
+	b, err := os.ReadFile(filepath.Join(base, "user-dirs.dirs"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		v, ok := strings.CutPrefix(strings.TrimSpace(line), key+"=")
+		if !ok {
+			continue
+		}
+		v = strings.ReplaceAll(strings.Trim(v, `"`), "$HOME", home)
+		if filepath.IsAbs(v) {
+			return filepath.Clean(v)
+		}
+	}
+	return ""
+}
 
 // DefaultPath is the config file emlcal reads when no --config is given:
 // $EMLCAL_CONFIG, else <config dir>/config.toml.

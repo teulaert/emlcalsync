@@ -142,3 +142,59 @@ func TestWritePageSweepsStalePages(t *testing.T) {
 		t.Errorf("the sweep took a file that was not ours: %v", err)
 	}
 }
+
+func TestWriteFileKeepsTheNameAndSweepsWithThePages(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	path, err := WriteFile(dir, "work:abc", "invoice.pdf", []byte("%PDF-1.4"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(path) != "invoice.pdf" {
+		t.Errorf("written as %s, want the file's own name", path)
+	}
+	if filepath.Dir(filepath.Dir(path)) != dir {
+		t.Errorf("%s is not in a directory of its own under %s", path, dir)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode %v, want 0600", info.Mode().Perm())
+	}
+	// A day later the file and its directory are gone, taken by the same
+	// sweep a page write runs.
+	old := now.Add(-2 * pageTTL)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WritePage(dir, "work:def", []byte("<p>hi"), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("stale file survived the sweep: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Errorf("emptied directory survived the sweep: %v", err)
+	}
+}
+
+func TestFileName(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"invoice.pdf", "invoice.pdf"},
+		{"../../.bashrc", ".bashrc"},
+		{`..\..\x.txt`, "x.txt"},
+		{"a/b/c.png", "c.png"},
+		{"bad\x00name\n.txt", "badname.txt"},
+		{"", "fallback"},
+		{".", "fallback"},
+		{"..", "fallback"},
+		{"/", "fallback"},
+	}
+	for _, tc := range tests {
+		if got := FileName(tc.in, "fallback"); got != tc.want {
+			t.Errorf("FileName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

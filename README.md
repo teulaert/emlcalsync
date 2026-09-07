@@ -214,6 +214,14 @@ contacts  list · search <q>   the people in the archive, by who you write to  (
   message leaves your machine; `remote_content = false` under `[general]`
   makes that the default, and `O` in the TUI goes the other way for one
   message. `-O path` writes the page instead of opening it.
+- `v` in the TUI lists the files attached to the message in focus — on a
+  list row, to the whole conversation, since that is what the row's `A`
+  stands for — with the inline parts marked as such. `enter` there opens one
+  with whatever the desktop opens that kind of file with, and `w` saves it to
+  your downloads folder without overwriting a name already there;
+  `download_dir` under `[general]` picks another folder. `mail attachment
+  get <id> <part|filename>` is the same from the shell, and the part path
+  the screen shows is what it takes.
 - A mailed invitation — the `text/calendar` part Outlook, Google Calendar and
   Fastmail send, which Exchange hides inside the alternative with no name —
   comes out of `mail read` and `mail thread` as a card: what, when, where,
@@ -296,7 +304,8 @@ a second one, and `ctrl+x` in the composer deletes the draft being edited.
 `f` forwards the message in focus, attachments and all — they are fetched
 with it, shown in the composer, and any that could not be got are named there
 rather than quietly left off — and `c` writes a new one from the account the
-list is filtered to; both open with the cursor in To. `emlcal mail forward <id>
+list is filtered to; both open with the cursor in To. `v` lists the files a
+message carries, where `enter` opens one on the desktop and `w` saves it. `emlcal mail forward <id>
 --to ..` is the same thing from the shell, files and all. The keys are Gmail's
 over vim's (`e` archive, `s` star, `d` trash, `i` back to the inbox,
 `j`/`k`/`g`/`G` to move, `z` undo, `/` search), with `⌫` trashing beside `d`

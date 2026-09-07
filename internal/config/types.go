@@ -192,6 +192,9 @@ type General struct {
 	// does tell the sender the message was opened. Set it false to keep that
 	// quiet; --remote and --no-remote decide one message at a time.
 	RemoteContent bool `toml:"remote_content"`
+	// DownloadDir is where the TUI's w puts an attachment it saves. Empty
+	// means the desktop's downloads folder (DownloadDir()).
+	DownloadDir string `toml:"download_dir"`
 
 	// Directory layout, always absolute after Load.
 	ConfigDir string `toml:"config_dir"`

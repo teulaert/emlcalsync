@@ -56,6 +56,11 @@ func render(c *Config) []byte {
 	b.WriteString("# referrer — and the page itself still loads nothing, but asking does tell\n")
 	b.WriteString("# the sender the message was opened. false leaves those pictures out.\n")
 	fmt.Fprintf(&b, "remote_content = %v\n", c.General.RemoteContent)
+	if c.General.DownloadDir != "" {
+		b.WriteString("# Where the TUI saves an attachment (w on the files screen). Unset means\n")
+		b.WriteString("# the desktop's downloads folder.\n")
+		fmt.Fprintf(&b, "download_dir   = %s\n", quote(c.General.DownloadDir))
+	}
 	b.WriteString("# Where OAuth and API tokens live: file | libsecret.\n")
 	fmt.Fprintf(&b, "secret_backend = %s\n", quote(orDefault(c.General.SecretBackend, DefaultSecretBackend)))
 

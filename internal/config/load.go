@@ -43,6 +43,7 @@ type fileGeneral struct {
 	DefaultAccount *string `toml:"default_account"`
 	RawMaxSize     *Size   `toml:"raw_max_size"`
 	RemoteContent  *bool   `toml:"remote_content"`
+	DownloadDir    *string `toml:"download_dir"`
 	ConfigDir      *string `toml:"config_dir"`
 	DataDir        *string `toml:"data_dir"`
 	StateDir       *string `toml:"state_dir"`
@@ -161,6 +162,9 @@ func merge(c *Config, fc *fileConfig) error {
 	}
 	if g.RemoteContent != nil {
 		c.General.RemoteContent = *g.RemoteContent
+	}
+	if err := setDir(&c.General.DownloadDir, g.DownloadDir); err != nil {
+		return fmt.Errorf("general.download_dir: %w", err)
 	}
 	if err := setDir(&c.General.ConfigDir, g.ConfigDir); err != nil {
 		return fmt.Errorf("general.config_dir: %w", err)

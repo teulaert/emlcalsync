@@ -74,6 +74,51 @@ func WritePage(dir, key string, doc []byte, now time.Time) (string, error) {
 	return filepath.Abs(path)
 }
 
+// WriteFile puts one file where the desktop's handler for its type can read
+// it and returns its absolute path. It sits beside the pages, in a directory
+// of its own named after key -- the message, in practice -- and under its own
+// name, so the viewer that opens it shows the name the sender gave it and is
+// picked by the extension. The same sweep that tidies the pages takes these.
+//
+// The file is 0600 in a 0700 directory, for the reason the pages are: an
+// attachment is the mail.
+func WriteFile(dir, key, name string, data []byte, now time.Time) (string, error) {
+	sub := filepath.Join(dir, strings.TrimSuffix(pageName(key), ".html"))
+	// Sweep first: the directory about to be made is empty until the write,
+	// and an empty directory is exactly what the sweep takes away.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	sweep(dir, now)
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		return "", err
+	}
+	path := filepath.Join(sub, FileName(name, "file"))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
+	}
+	return filepath.Abs(path)
+}
+
+// FileName is name as a single path element. What came in a
+// Content-Disposition is whatever the sender typed, and "../../.bashrc" is a
+// name a sender can type: the directories go, so do control characters, and
+// a name with nothing left is fallback.
+func FileName(name, fallback string) string {
+	name = filepath.Base(strings.ReplaceAll(name, "\\", "/"))
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, name)
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." || name == "/" {
+		return fallback
+	}
+	return name
+}
+
 // pageName turns a key into a file name nothing in it can escape.
 func pageName(key string) string {
 	safe := strings.Map(func(r rune) rune {
@@ -90,21 +135,46 @@ func pageName(key string) string {
 	return safe + ".html"
 }
 
-// sweep removes pages nobody is coming back to. Errors are ignored on
-// purpose: failing to tidy up is not a reason to refuse to show a message.
+// sweep removes pages nobody is coming back to, and the files WriteFile put
+// in the directories beside them: each of those is emptied of what is stale
+// and then removed if nothing is left. Errors are ignored on purpose: failing
+// to tidy up is not a reason to refuse to show a message.
 func sweep(dir string, now time.Time) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".html") {
+		path := filepath.Join(dir, e.Name())
+		if e.IsDir() {
+			sweepFiles(path, now)
 			continue
 		}
-		info, err := e.Info()
-		if err != nil || now.Sub(info.ModTime()) <= pageTTL {
+		if !strings.HasSuffix(e.Name(), ".html") {
 			continue
 		}
-		_ = os.Remove(filepath.Join(dir, e.Name()))
+		if stale(e, now) {
+			_ = os.Remove(path)
+		}
 	}
+}
+
+// sweepFiles is sweep for one message's directory of attachments.
+func sweepFiles(dir string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() && stale(e, now) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+	// Fails while anything is still inside, which is the point.
+	_ = os.Remove(dir)
+}
+
+func stale(e os.DirEntry, now time.Time) bool {
+	info, err := e.Info()
+	return err == nil && now.Sub(info.ModTime()) > pageTTL
 }

@@ -39,6 +39,8 @@ type keymap struct {
 	Copy        key.Binding
 	Browser     key.Binding
 	BrowserFlip key.Binding
+	Files       key.Binding
+	Save        key.Binding
 	Help        key.Binding
 
 	// The composer's own keys. They live here with the rest rather than as
@@ -102,7 +104,9 @@ func defaultKeys() keymap {
 		Browser:    key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in the browser")),
 		BrowserFlip: key.NewBinding(key.WithKeys("O"),
 			key.WithHelp("O", "open in the browser, the other way on pictures")),
-		Help: key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Files: key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "the attached files")),
+		Save:  key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "save the file")),
+		Help:  key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 
 		Send:        key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "send")),
 		SaveDraft:   key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save as a draft")),
@@ -145,6 +149,7 @@ func (k keymap) helpLines() [][2]string {
 		{"y", "copy the id to the clipboard: the thread's on a row, the message's in a thread or the reader"},
 		{"o", "open the message in the browser, as the sender wrote it"},
 		{"O", "the same, reversing whether the pictures the sender hosts elsewhere are fetched"},
+		{"v", "the files attached: enter opens one on the desktop, w saves it to the downloads folder"},
 		{"y / n / t", "on an event, or the mail inviting to one: accept / decline / tentative"},
 		{"enter", "on an invitation: open the event on the calendar"},
 		{"  r", "on the summary: reply to the conversation"},

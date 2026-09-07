@@ -29,7 +29,11 @@ it sends is what ` + "`emlcal mail reply`" + ` would have sent. f forwards that
 message on and c starts a new one. o opens the message in focus in the
 browser, as the sender wrote it, for the mail no text extraction does justice
 to; the page itself loads nothing, and O reverses whether the pictures the
-sender hosts elsewhere were fetched for it. With a model
+sender hosts elsewhere were fetched for it. v lists the files attached to the
+message in focus -- on a list row, to the whole conversation -- and there
+enter opens one with whatever the desktop opens that kind of file with,
+while w saves it to the downloads folder (download_dir under [general]
+picks another). With a model
 configured under [ai] in config.toml, ctrl+g in the composer drafts the reply
 from the thread, with or without instructions; the model can look other mail
 and the calendar up first, through the same read commands.
@@ -74,16 +78,17 @@ Press ? for the keys.`,
 				tools = app.AITools()
 			}
 			return tui.Run(cmd.Context(), tui.Deps{
-				Store:     st,
-				Engine:    eng,
-				Config:    cfg,
-				Accounts:  accounts,
-				Loc:       app.Location(),
-				Now:       app.Now,
-				Logger:    app.Logger(),
-				AI:        model,
-				Tools:     tools,
-				StatePath: cfg.General.StateDir,
+				Store:       st,
+				Engine:      eng,
+				Config:      cfg,
+				Accounts:    accounts,
+				Loc:         app.Location(),
+				Now:         app.Now,
+				Logger:      app.Logger(),
+				AI:          model,
+				Tools:       tools,
+				StatePath:   cfg.General.StateDir,
+				DownloadDir: cfg.General.DownloadDir,
 			})
 		},
 	}

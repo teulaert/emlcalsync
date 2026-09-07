@@ -1178,3 +1178,33 @@ func TestSaveKeepsAIModels(t *testing.T) {
 		t.Error("an empty [ai] table should not be written")
 	}
 }
+
+func TestDownloadDirFollowsTheDesktop(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_DOWNLOAD_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	if got, want := DownloadDir(), filepath.Join(home, "Downloads"); got != want {
+		t.Errorf("no user-dirs.dirs: %q, want %q", got, want)
+	}
+
+	cfg := filepath.Join(home, ".config")
+	if err := os.MkdirAll(cfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg, "user-dirs.dirs"), []byte(
+		"# This file is written by xdg-user-dirs-update\n"+
+			"XDG_DESKTOP_DIR=\"$HOME/Desktop\"\n"+
+			"XDG_DOWNLOAD_DIR=\"$HOME/dl\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := DownloadDir(), filepath.Join(home, "dl"); got != want {
+		t.Errorf("user-dirs.dirs: %q, want %q", got, want)
+	}
+
+	t.Setenv("XDG_DOWNLOAD_DIR", "/srv/incoming")
+	if got := DownloadDir(); got != "/srv/incoming" {
+		t.Errorf("$XDG_DOWNLOAD_DIR: %q", got)
+	}
+}

@@ -170,6 +170,20 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return r, nil
 
+	case fileOpened:
+		switch {
+		case msg.err != nil && msg.saved:
+			r.note("save " + msg.name + ": " + msg.err.Error())
+		case msg.err != nil:
+			r.note("open " + msg.name + ": " + msg.err.Error())
+		case msg.saved:
+			r.note("saved " + shortHome(msg.path))
+		default:
+			r.note("opened " + msg.name)
+		}
+		// The files screen is waiting on it too, to take its busy mark off.
+		return r, r.broadcast(msg)
+
 	case submitted:
 		return r, r.onSubmitted(msg)
 
@@ -369,6 +383,15 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, r.keys.BrowserFlip):
 		return r, r.openInBrowser(!r.d.remoteContent())
+
+	case key.Matches(msg, r.keys.Files):
+		return r, r.showFiles()
+
+	case key.Matches(msg, r.keys.Save):
+		if fv, ok := r.top().(*filesView); ok {
+			return r, r.openFile(fv, true)
+		}
+		return r, nil
 	}
 
 	if key.Matches(msg, r.keys.Copy) {
@@ -422,6 +445,8 @@ func (r *root) open() tea.Cmd {
 			return r.push(newEventView(r.d, ev.AccountID, ev.CalendarRemote, ri.calName, ev.RemoteID))
 		}
 		return nil
+	case *filesView:
+		return r.openFile(s, false)
 	case *agenda:
 		o := s.selectedOcc()
 		if o == nil {
@@ -593,6 +618,68 @@ func (r *root) openInBrowser(pictures bool) tea.Cmd {
 		r.note("opening in the browser…")
 	}
 	return r.d.openInBrowser(req.account, req.remote, req.thread, pictures)
+}
+
+// showFiles is v: the files attached to what is in focus, on a screen of
+// their own. A message's from the thread or the reader; from a list row the
+// whole conversation's, since that is what the row's A stands for. The index
+// already says whether there is anything to list, so an empty screen is
+// never pushed -- the answer is one line in the status bar instead.
+func (r *root) showFiles() tea.Cmd {
+	if _, ok := r.top().(*filesView); ok {
+		return nil
+	}
+	req, ok := r.focused()
+	if !ok {
+		return nil
+	}
+	var subject string
+	switch s := r.top().(type) {
+	case *mailList:
+		t := s.selected()
+		subject = t.Subject
+		if !t.HasAttachments {
+			r.note("nothing attached")
+			return nil
+		}
+	case *threadView:
+		m := s.selected()
+		subject = m.Subject
+		if !m.HasAttachments {
+			r.note("nothing attached")
+			return nil
+		}
+	case *reader:
+		subject = s.msg.Subject
+		if !s.msg.HasAttachments {
+			r.note("nothing attached")
+			return nil
+		}
+	case *summaryView:
+		subject = s.subject
+	}
+	if r.d.Engine == nil || r.d.Store == nil {
+		r.note("no archive to read the files from")
+		return nil
+	}
+	return r.push(newFilesView(r.d, req.account, req.remote, req.thread, subject))
+}
+
+// openFile is enter or w on the files screen: the file under the cursor,
+// opened on the desktop or saved to the downloads folder. One at a time --
+// the fetch can be a download, and the footer says which file it is on.
+func (r *root) openFile(fv *filesView, save bool) tea.Cmd {
+	row := fv.selected()
+	if row == nil || fv.busy != "" {
+		return nil
+	}
+	fv.busy = row.name()
+	if save {
+		r.note("saving " + fv.busy + "…")
+	} else {
+		r.note("opening " + fv.busy + "…")
+	}
+	return r.d.openFile(row.msg, row.att, save)
 }
 
 // startSummary is ctrl+g anywhere but the composer: it asks the model about

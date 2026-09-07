@@ -50,8 +50,12 @@ type Deps struct {
 	// back to config.ViewDir().
 	ViewDir string
 	// Browser opens a URL on the desktop. Nil means browser.Open; a test sets
-	// it so that pressing o launches nothing.
+	// it so that pressing o launches nothing. The files screen hands it the
+	// attachment enter was pressed on, for the same reason.
 	Browser func(url string) error
+	// DownloadDir is where w on the files screen saves an attachment. Empty
+	// falls back to config.DownloadDir(), the desktop's own folder.
+	DownloadDir string
 	// Fetch pulls the pictures o folds into the page, when the configuration
 	// asks for them. Nil means webasset's own.
 	Fetch mime.FetchFunc
