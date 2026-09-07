@@ -673,6 +673,112 @@ func addStoredDraft(t *testing.T, d Deps, mail *fake.Mail, remote string) {
 	}
 }
 
+// addStoredDraftWithAttachment is a draft on the server with a file on it, the
+// shape `mail draft --attach` leaves behind. The raw message is not archived,
+// so the bytes have to come off the provider the way a forward's do.
+func addStoredDraftWithAttachment(t *testing.T, d Deps, mail *fake.Mail, remote, filename string) {
+	t.Helper()
+	raw := []byte("From: work@example.com\r\nTo: anna@example.com\r\n" +
+		"Subject: de offerte\r\nMIME-Version: 1.0\r\n" +
+		"Content-Type: multipart/mixed; boundary=b1\r\n\r\n" +
+		"--b1\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" +
+		"Hierbij de offerte.\r\n" +
+		"--b1\r\nContent-Type: application/pdf\r\n" +
+		"Content-Disposition: attachment; filename=\"" + filename + "\"\r\n\r\n" +
+		"%PDF-1.4 pretend\r\n--b1--\r\n")
+	mail.Add(fake.NewMsg(remote, raw).WithMailboxes("DRAFTS").
+		WithFlags(model.Flags{Draft: true}))
+
+	parsed, err := mime.Parse(raw)
+	if err != nil {
+		t.Fatalf("mime.Parse: %v", err)
+	}
+	when := testNow.Add(-time.Minute)
+	m := &model.Message{
+		AccountID:      "work",
+		RemoteID:       remote,
+		ThreadID:       "t-" + remote,
+		Subject:        "de offerte",
+		From:           model.Address{Email: "work@example.com"},
+		To:             []model.Address{{Email: "anna@example.com"}},
+		Date:           when,
+		Received:       when,
+		TextBody:       "Hierbij de offerte.",
+		Flags:          model.Flags{Draft: true},
+		HasAttachments: true,
+		MailboxRemotes: []string{"DRAFTS"},
+		IndexedAt:      testNow,
+	}
+	if _, err := d.Store.UpsertMessage(context.Background(), m, parsed); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+}
+
+// A draft is reopened to be finished, and finishing it rebuilds the message
+// from what the composer holds. So it has to hold the files the draft was
+// saved with -- `mail draft --attach` said the file was on it, and the list
+// row marks it A, which is a promise the send has to keep.
+func TestReopeningADraftKeepsItsFiles(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addStoredDraftWithAttachment(t, d, mail, "m2", "offerte.pdf")
+
+	r := newTestRoot(t, d)
+	toDrafts(t, r)
+	send(t, r, "enter")
+
+	c := composerOn(t, r)
+	if len(c.files) != 1 {
+		t.Fatalf("the reopened draft carries %d files, want the one it was saved with", len(c.files))
+	}
+	if c.files[0].Filename != "offerte.pdf" {
+		t.Errorf("file = %q", c.files[0].Filename)
+	}
+	if string(c.files[0].Data) != "attachment:m2:2" {
+		t.Errorf("file content = %q, want what the provider handed back", c.files[0].Data)
+	}
+	if got := r.render(); !strings.Contains(got, "offerte.pdf") {
+		t.Errorf("the composer does not show the file it is sending:\n%s", got)
+	}
+}
+
+// And the file is on what actually goes out. This is the whole bug: the
+// message left without it, after every screen had said it was there.
+func TestSendingAReopenedDraftSendsItsFiles(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addStoredDraftWithAttachment(t, d, mail, "m2", "offerte.pdf")
+
+	r := newTestRoot(t, d)
+	toDrafts(t, r)
+	send(t, r, "enter")
+	send(t, r, "ctrl+d")
+
+	sent := mail.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("the provider was handed %d messages, want 1", len(sent))
+	}
+	parsed, err := mime.Parse(sent[0])
+	if err != nil {
+		t.Fatalf("what went out does not parse: %v", err)
+	}
+	if len(parsed.Attachments) != 1 {
+		t.Fatalf("what went out has %d attachments, want the draft's one:\n%s",
+			len(parsed.Attachments), sent[0])
+	}
+	if parsed.Attachments[0].Filename != "offerte.pdf" {
+		t.Errorf("attachment = %q", parsed.Attachments[0].Filename)
+	}
+	data, _, _, err := mime.PartContent(sent[0], parsed.Attachments[0].Path)
+	if err != nil {
+		t.Fatalf("PartContent: %v", err)
+	}
+	if string(data) != "attachment:m2:2" {
+		t.Errorf("what went out carries %q", data)
+	}
+	if !strings.Contains(parsed.TextBody, "Hierbij de offerte.") {
+		t.Errorf("the text went missing under the attachment:\n%s", parsed.TextBody)
+	}
+}
+
 // A draft is not a message to read: enter on one reopens the editor.
 func TestEnterOnADraftOpensItForEditing(t *testing.T) {
 	d, mail := newTriageDeps(t)

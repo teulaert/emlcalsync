@@ -336,7 +336,7 @@ func (d Deps) loadCompose(seq int, req composeRequest) tea.Cmd {
 		// than a read off disk: the budget is the one a fetch gets, not the
 		// one a row lookup gets.
 		timeout := 15 * time.Second
-		if req.forward {
+		if req.forward || req.draft {
 			timeout = 90 * time.Second
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -347,15 +347,23 @@ func (d Deps) loadCompose(seq int, req composeRequest) tea.Cmd {
 		}
 		ensureText(ctx, d, m)
 		out := composeLoaded{seq: seq, req: resolved, msg: m}
-		if resolved.forward {
-			out.files, out.filesNote = d.forwardFiles(ctx, m)
+		// A forward carries the original's files; a stored draft carries the
+		// ones it was saved with. Both go back out through mime.Build, which
+		// builds from what the composer holds -- so a file the composer does
+		// not hold is a file the message goes without.
+		switch {
+		case resolved.forward:
+			out.files, out.filesNote = d.carriedFiles(ctx, m, "forward")
+		case resolved.draft:
+			out.files, out.filesNote = d.carriedFiles(ctx, m, "draft")
 		}
 		return out
 	}
 }
 
-// forwardFiles fetches the attachments the forward carries, and says which
-// ones it could not.
+// carriedFiles fetches the attachments a composer takes out with it -- the
+// original's on a forward, the stored draft's on a draft being finished --
+// and says which ones it could not.
 //
 // The bytes come through the engine, which reads them out of the archived raw
 // message when it has one and downloads them from the provider when it does
@@ -363,13 +371,18 @@ func (d Deps) loadCompose(seq int, req composeRequest) tea.Cmd {
 // named rather than dropped: forwarding is mostly done *for* the attachment,
 // so "it went without them" is the one outcome nobody may discover at the
 // other end.
-func (d Deps) forwardFiles(ctx context.Context, m *model.Message) ([]mime.DraftAttachment, string) {
+//
+// A draft is the same story from the other side. The composer rebuilds the
+// message from what is on screen, so a draft reopened without its files is
+// sent without them -- and the person sending it has already seen the file
+// listed, on the draft, before they opened it.
+func (d Deps) carriedFiles(ctx context.Context, m *model.Message, what string) ([]mime.DraftAttachment, string) {
 	if !m.HasAttachments || d.Store == nil || d.Engine == nil {
 		return nil, ""
 	}
 	atts, err := d.Store.ListAttachments(ctx, m.ID)
 	if err != nil {
-		d.log().Warn("forward: list attachments", "id", m.PublicID(), "err", err)
+		d.log().Warn(what+": list attachments", "id", m.PublicID(), "err", err)
 		return nil, "the attachments could not be read: " + err.Error()
 	}
 	var (
@@ -392,7 +405,7 @@ func (d Deps) forwardFiles(ctx context.Context, m *model.Message) ([]mime.DraftA
 		}
 		data, err := d.Engine.FetchAttachment(ctx, m.AccountID, m.RemoteID, ref)
 		if err != nil {
-			d.log().Warn("forward: fetch attachment", "id", m.PublicID(), "part", a.PartPath, "err", err)
+			d.log().Warn(what+": fetch attachment", "id", m.PublicID(), "part", a.PartPath, "err", err)
 			short = append(short, name)
 			continue
 		}

@@ -84,8 +84,9 @@ type composeView struct {
 	hint  int
 
 	// files are the attachments going out with the message: a forward's, and
-	// nothing else's. filesNote names any the fetch could not get, and stays
-	// on screen rather than in a status that the next keystroke clears.
+	// the ones a stored draft was saved with. filesNote names any the fetch
+	// could not get, and stays on screen rather than in a status that the
+	// next keystroke clears.
 	files     []mime.DraftAttachment
 	filesNote string
 
@@ -198,13 +199,19 @@ func newReplyCompose(d Deps, orig *model.Message, all bool) *composeView {
 // stripped or rebuilt. What it does not carry is the message it answers --
 // only the headers pointing at it -- so sending it marks nothing answered,
 // exactly as `mail send --draft` does not.
-func newDraftCompose(d Deps, m *model.Message) *composeView {
+//
+// The files it was saved with come back with it. Sending from here rebuilds
+// the message out of what the composer holds, so a draft reopened without its
+// attachments is one sent without them -- silently, after `mail draft
+// --attach` said the file was on it and the list row marked it A.
+func newDraftCompose(d Deps, m *model.Message, files []mime.DraftAttachment, note string) *composeView {
 	from := m.From
 	if from.Email == "" {
 		from = d.sendFrom(m.AccountID)
 	}
 	c := newComposeView(d, kindDraft, m.AccountID, from)
 	c.draftRemote = m.RemoteID
+	c.files, c.filesNote = files, note
 	c.threadID = m.ThreadID
 	c.inReplyTo = m.InReplyTo
 	c.references = append([]string(nil), m.References...)
