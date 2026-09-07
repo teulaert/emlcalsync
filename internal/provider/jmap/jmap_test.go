@@ -1249,6 +1249,42 @@ func TestCreateDraftDoesNotRetryImport(t *testing.T) {
 	}
 }
 
+// TestSendDraftAlreadyOnTheServer: `mail send --draft` submits the draft's own
+// bytes, which the account already holds -- the draft. Email/import answers
+// "alreadyExists" with that message's id, and the send is that message going
+// out, not a failure and not a second copy.
+func TestSendDraftAlreadyOnTheServer(t *testing.T) {
+	f := newFakeServer(t)
+	m := f.client(t).Mail()
+	raw := []byte("From: me@example.com\r\nTo: you@example.com\r\n\r\nwith the invoice attached\r\n")
+
+	draft, err := m.CreateDraft(testCtx(t), raw)
+	if err != nil {
+		t.Fatalf("CreateDraft: %v", err)
+	}
+	before := len(f.emails)
+
+	sent, err := m.Send(testCtx(t), raw, "")
+	if err != nil {
+		t.Fatalf("Send of the stored draft: %v", err)
+	}
+	if sent != draft {
+		t.Errorf("the send made a new message %s; the draft %s is what goes out", sent, draft)
+	}
+	if len(f.emails) != before {
+		t.Errorf("the account holds %d messages, want %d: the draft was copied rather than sent",
+			len(f.emails), before)
+	}
+	// And it left the drafts mailbox the way any other send does.
+	e := f.emails[sent]
+	if e.Keywords[kwDraft] {
+		t.Error("the sent message is still marked $draft")
+	}
+	if n := f.attemptsFor("EmailSubmission/set"); n != 1 {
+		t.Errorf("the server saw %d submissions, want exactly 1", n)
+	}
+}
+
 // TestIdempotentCallsStillRetry guards the other half: an ordinary read is
 // still retried through the same code path.
 func TestIdempotentCallsStillRetry(t *testing.T) {

@@ -145,6 +145,10 @@ type SetError struct {
 	Type        string   `json:"type"`
 	Description string   `json:"description,omitempty"`
 	Properties  []string `json:"properties,omitempty"`
+	// ExistingID names the record a create collided with. RFC 8621 §4.9 puts
+	// it on an "alreadyExists" from Email/import, which is how a re-import of
+	// bytes the account already holds says which message they are.
+	ExistingID string `json:"existingId,omitempty"`
 }
 
 func (e SetError) Error() string {
@@ -1098,6 +1102,18 @@ func (m *Mail) importRaw(ctx context.Context, raw []byte, mailboxID string, keyw
 		return importedEmail{}, err
 	}
 	if se, bad := ir.NotCreated[cid]; bad {
+		// The account already holds these exact bytes, and the server says
+		// which message they are (RFC 8621 §4.9). That is not a failure: it
+		// is `send --draft` on a draft nobody edited, whose bytes are by
+		// definition the ones already sitting in Drafts. Adopt the message,
+		// put it where the import asked for and carry on -- the submission
+		// then moves that very draft to Sent, which is what the user meant.
+		if se.Type == "alreadyExists" && se.ExistingID != "" {
+			if err := m.adoptImported(ctx, se.ExistingID, mailboxID, keywords); err != nil {
+				return importedEmail{}, err
+			}
+			return importedEmail{ID: se.ExistingID, BlobID: blobID}, nil
+		}
 		return importedEmail{}, fmt.Errorf("jmap: Email/import rejected: %w", se)
 	}
 	em, ok := ir.Created[cid]
@@ -1105,6 +1121,21 @@ func (m *Mail) importRaw(ctx context.Context, raw []byte, mailboxID string, keyw
 		return importedEmail{}, errors.New("jmap: Email/import returned no created email")
 	}
 	return em, nil
+}
+
+// adoptImported puts a message the import collided with into the mailbox the
+// import asked for, with the keywords it asked for, so the caller may treat it
+// as the message it just imported however it got there. On the case this
+// exists for -- the unedited draft being sent -- it is a no-op patch: the
+// draft is already in Drafts with $draft on it.
+func (m *Mail) adoptImported(ctx context.Context, id, mailboxID string, keywords map[string]bool) error {
+	patch := map[string]any{"mailboxIds": map[string]bool{mailboxID: true}}
+	for kw, on := range keywords {
+		if on {
+			patch["keywords/"+kw] = true
+		}
+	}
+	return m.setEmails(ctx, []string{id}, patch, "adopt an already imported message")
 }
 
 // CreateDraft stores raw in the drafts mailbox.

@@ -1,6 +1,7 @@
 package jmap
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -417,8 +418,21 @@ func (f *fakeServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
-	id := fmt.Sprintf("blob-up-%d", len(f.blobs)+1)
-	f.blobs[id] = data
+	// Blobs are content-addressed on a real server, so uploading the same
+	// bytes twice yields the same id. That is what makes a re-import of an
+	// unedited draft collide, which is the case Email/import answers with
+	// "alreadyExists".
+	id := ""
+	for existing, b := range f.blobs {
+		if bytes.Equal(b, data) {
+			id = existing
+			break
+		}
+	}
+	if id == "" {
+		id = fmt.Sprintf("blob-up-%d", len(f.blobs)+1)
+		f.blobs[id] = data
+	}
 	f.mu.Unlock()
 	writeJSON(w, map[string]any{
 		"accountId": testAccount,
@@ -917,6 +931,12 @@ func (f *fakeServer) emailImport(name string, args map[string]any) (string, map[
 			notCreated[cid] = map[string]any{"type": "blobNotFound"}
 			continue
 		}
+		// RFC 8621 §4.9: bytes the account already holds are not imported
+		// again; the error names the message they are.
+		if existing := f.emailWithBlob(blobID); existing != "" {
+			notCreated[cid] = map[string]any{"type": "alreadyExists", "existingId": existing}
+			continue
+		}
 		id := fmt.Sprintf("email-imported-%d", len(f.emails)+1)
 		e := &fakeEmail{
 			ID:         id,
@@ -938,6 +958,16 @@ func (f *fakeServer) emailImport(name string, args map[string]any) (string, map[
 		"accountId": testAccount, "oldState": nil, "newState": f.emailState,
 		"created": created, "notCreated": notCreated,
 	}
+}
+
+// emailWithBlob is the id of the message holding these bytes, or "".
+func (f *fakeServer) emailWithBlob(blobID string) string {
+	for _, id := range f.order {
+		if e := f.emails[id]; e != nil && e.BlobID == blobID {
+			return id
+		}
+	}
+	return ""
 }
 
 func (f *fakeServer) submissionSet(name string, args map[string]any) (string, map[string]any) {
