@@ -222,6 +222,12 @@ contacts  list · search <q>   the people in the archive, by who you write to  (
   `download_dir` under `[general]` picks another folder. `mail attachment
   get <id> <part|filename>` is the same from the shell, and the part path
   the screen shows is what it takes.
+- The reader and the expanded thread show what the sender typed, with the
+  quoted reply, the forwarded original and the signature folded away — the
+  same cut `mail read` makes by default. The fold says how many lines are
+  under it, and `F` opens them, which is what a forward needs: three lines of
+  "see below" over the message that is the whole point of sending it.
+  `mail read --full` is the same from the shell.
 - A mailed invitation — the `text/calendar` part Outlook, Google Calendar and
   Fastmail send, which Exchange hides inside the alternative with no name —
   comes out of `mail read` and `mail thread` as a card: what, when, where,

@@ -35,9 +35,54 @@ func TestThreadOpensOnTheMessageTextNotAnIndex(t *testing.T) {
 			t.Errorf("expanded thread is missing %q:\n%s", want, got)
 		}
 	}
-	// The bodies go through StripQuotes, the same as the reader's.
-	if strings.Contains(got, "quoted") {
+	// The bodies go through the same cut the reader makes: the quote is
+	// folded away, and the fold says it is there.
+	if strings.Contains(got, "> quoted") {
 		t.Errorf("expanded thread kept the quoted reply:\n%s", got)
+	}
+	if !strings.Contains(got, "F to show") {
+		t.Errorf("expanded thread hid the quote without saying so:\n%s", got)
+	}
+}
+
+// A forward is three lines of "see below" over the message that is the point
+// of sending it, and the cut puts that message under the fold. F is what
+// unfolds it, in the thread and in the reader alike, and the choice sticks
+// when the next message is opened.
+func TestFullShowsTheQuotedHalf(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "First", "anna", 2*time.Hour, false)
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter") // the thread
+	tv, ok := r.top().(*threadView)
+	if !ok {
+		t.Fatalf("top screen is %T, want the thread", r.top())
+	}
+	if got := view(tv, 80, 20); strings.Contains(got, "> quoted") {
+		t.Fatalf("the thread drew the quote before F:\n%s", got)
+	}
+	send(t, r, "F")
+	got := view(tv, 80, 20)
+	if !strings.Contains(got, "> quoted") {
+		t.Errorf("F did not show the quoted half:\n%s", got)
+	}
+	if !strings.Contains(got, "F to hide") {
+		t.Errorf("the fold does not say how to fold it back:\n%s", got)
+	}
+
+	// Into the reader, which opens the way the thread was left.
+	send(t, r, "enter")
+	rd, ok := r.top().(*reader)
+	if !ok {
+		t.Fatalf("top screen is %T, want the reader", r.top())
+	}
+	if got := view(rd, 80, 20); !strings.Contains(got, "> quoted") {
+		t.Errorf("the reader folded the quote away again:\n%s", got)
+	}
+	send(t, r, "F")
+	if got := view(rd, 80, 20); strings.Contains(got, "> quoted") {
+		t.Errorf("F did not fold the quote back:\n%s", got)
 	}
 }
 

@@ -22,7 +22,11 @@ type reader struct {
 	remote    string
 
 	msg  *model.Message
-	body string
+	body bodyText
+	// full is whether the quoted half of the body is drawn. It is the root's
+	// choice, handed down: reading a forward whole is a mood, not a property
+	// of one message, and it should survive stepping to the next one.
+	full bool
 	// invite is the calendar card, when the message carries one.
 	invite *readerInvite
 	// atts are the message's parts, so the header names the files.
@@ -63,7 +67,7 @@ func (r *reader) reload() tea.Cmd {
 // changes what an open reader shows; everything else pushes a new one.
 func (r *reader) show(accountID, remote string) tea.Cmd {
 	r.accountID, r.remote = accountID, remote
-	r.msg, r.body, r.invite, r.atts, r.loadErr = nil, "", nil, nil, nil
+	r.msg, r.body, r.invite, r.atts, r.loadErr = nil, bodyText{}, nil, nil, nil
 	if r.ready {
 		r.vp.SetContent("")
 		r.vp.GotoTop()
@@ -115,7 +119,7 @@ func (r *reader) ensure(w, h int) {
 		r.vp = viewport.New(viewport.WithWidth(w), viewport.WithHeight(vh))
 		r.vp.SoftWrap = true
 		r.ready = true
-		r.vp.SetContent(r.body)
+		r.vp.SetContent(r.body.text(r.full))
 		return
 	}
 	if r.vp.Width() != w || r.vp.Height() != vh {
@@ -126,8 +130,18 @@ func (r *reader) ensure(w, h int) {
 
 func (r *reader) setContent(w, h int) {
 	r.ensure(w, h)
-	r.vp.SetContent(r.body)
+	r.vp.SetContent(r.body.text(r.full))
 	r.vp.GotoTop()
+}
+
+// setFull draws or folds away the quoted half. The scroll position stays
+// where it is: the fold line is what was being looked at when F was pressed,
+// and the text opens under it.
+func (r *reader) setFull(full bool) {
+	r.full = full
+	if r.ready {
+		r.vp.SetContent(r.body.text(r.full))
+	}
 }
 
 func (r *reader) headerLines(w int) []string {

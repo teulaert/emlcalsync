@@ -41,6 +41,7 @@ type keymap struct {
 	BrowserFlip key.Binding
 	Files       key.Binding
 	Save        key.Binding
+	Full        key.Binding
 	Help        key.Binding
 
 	// The composer's own keys. They live here with the rest rather than as
@@ -106,6 +107,7 @@ func defaultKeys() keymap {
 			key.WithHelp("O", "open in the browser, the other way on pictures")),
 		Files: key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "the attached files")),
 		Save:  key.NewBinding(key.WithKeys("w"), key.WithHelp("w", "save the file")),
+		Full:  key.NewBinding(key.WithKeys("F"), key.WithHelp("F", "show the quoted part")),
 		Help:  key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 
 		Send:        key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "send")),
@@ -150,6 +152,7 @@ func (k keymap) helpLines() [][2]string {
 		{"o", "open the message in the browser, as the sender wrote it"},
 		{"O", "the same, reversing whether the pictures the sender hosts elsewhere are fetched"},
 		{"v", "the files attached: enter opens one on the desktop, w saves it to the downloads folder"},
+		{"F", "show the quoted part a message hides — the reply it answers, the original it forwards"},
 		{"y / n / t", "on an event, or the mail inviting to one: accept / decline / tentative"},
 		{"enter", "on an invitation: open the event on the calendar"},
 		{"  r", "on the summary: reply to the conversation"},

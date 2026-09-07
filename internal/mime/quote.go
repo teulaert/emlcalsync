@@ -59,11 +59,28 @@ var reQuoted = regexp.MustCompile(`^\s{0,3}>`)
 // returns an empty result for non-empty input: if the heuristics would remove
 // everything, the trimmed original is returned instead.
 func StripQuotes(text string) string {
+	own, _ := SplitReadable(text)
+	return own
+}
+
+// SplitReadable makes the cut StripQuotes makes and hands back both halves:
+// what the sender typed, and everything under it -- the reply being answered,
+// the original a forward carries, the signature.
+//
+// The tail is worth keeping because it is not always noise. A forward is
+// three lines of "see below" over the message that is the entire point of
+// sending it, and a screen that draws only the first half draws nothing.
+// Dropping it is right for a snippet, for a summary, for the quote a composer
+// rebuilds; a reader wants to be able to ask for it. rest is empty when
+// nothing was cut, including the case where the heuristics would have taken
+// the whole message and own is therefore the whole message.
+func SplitReadable(text string) (own, rest string) {
 	original := strings.TrimSpace(reCRLF.Replace(text))
 	if original == "" {
-		return ""
+		return "", ""
 	}
-	lines := strings.Split(original, "\n")
+	all := strings.Split(original, "\n")
+	lines := all
 
 	if i := cutIndex(lines); i >= 0 {
 		lines = lines[:i]
@@ -83,9 +100,11 @@ func StripQuotes(text string) string {
 
 	out := normalizeText(strings.Join(lines, "\n"))
 	if strings.TrimSpace(out) == "" {
-		return original
+		return original, ""
 	}
-	return out
+	// Every step above only truncates, and on the same backing array, so what
+	// was dropped is exactly the lines past the ones that survived.
+	return out, normalizeText(strings.Join(all[len(lines):], "\n"))
 }
 
 // SplitQuote divides text into what its author wrote and the quoted material

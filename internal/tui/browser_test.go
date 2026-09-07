@@ -46,7 +46,7 @@ func TestBrowserOpensTheMessageInFocus(t *testing.T) {
 		t.Fatalf("top screen is %T, want the reader", r.top())
 	}
 	// The reason o exists: the extracted body has no code in it.
-	if strings.Contains(rd.body, "678863") {
+	if strings.Contains(rd.body.own, "678863") {
 		t.Log("note: text extraction now finds the code; o is still the escape hatch")
 	}
 

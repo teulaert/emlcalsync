@@ -8,7 +8,6 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
 )
@@ -39,12 +38,16 @@ type threadView struct {
 	top      int // compact: first visible row
 
 	expanded bool
-	lines    []threadLine // expanded: the laid-out document
-	starts   []int        // expanded: first line of each message
-	off      int          // expanded: first visible line
-	laidOut  int          // width the layout was built for; 0 = none
-	dirty    bool
-	placed   bool // the opening cursor position has been chosen
+	// full is whether each message's quoted half is laid out with it: the
+	// reply it answers, the original it forwards. The root holds the choice
+	// so it carries between the thread and the reader.
+	full    bool
+	lines   []threadLine // expanded: the laid-out document
+	starts  []int        // expanded: first line of each message
+	off     int          // expanded: first visible line
+	laidOut int          // width the layout was built for; 0 = none
+	dirty   bool
+	placed  bool // the opening cursor position has been chosen
 
 	// holdUnread is the message the user has just marked unread by hand, so
 	// the automatic mark-read does not undo it while the cursor sits there.
@@ -139,6 +142,18 @@ func (t *threadView) rsvp(k string) (model.Participation, bool) {
 }
 
 // setExpanded switches mode, keeping the message being read under the cursor.
+// setFull lays the conversation out again with the quoted halves drawn or
+// folded away. The scroll position is kept: the fold lines sit where the eye
+// already is, and the text grows under them.
+func (t *threadView) setFull(v bool) tea.Cmd {
+	if t.full == v {
+		return nil
+	}
+	t.full = v
+	t.dirty = true
+	return nil
+}
+
 func (t *threadView) setExpanded(v bool) tea.Cmd {
 	if t.expanded == v {
 		return nil
@@ -457,11 +472,30 @@ func (t *threadView) layout(w int) {
 		for _, l := range inviteCard(t.invites[m.RemoteID], t.d.loc(), w-2) {
 			t.lines = append(t.lines, threadLine{msg: i, text: "  " + l})
 		}
-		for _, l := range wrapCells(threadBody(m), w-2) {
+		b := threadBody(m)
+		for _, l := range wrapCells(b.own, w-2) {
 			if l != "" {
 				l = "  " + l
 			}
 			t.lines = append(t.lines, threadLine{msg: i, text: l})
+		}
+		// The fold, and under it what it hides. Faint, like the header block:
+		// it is furniture, not the message.
+		if fold := b.fold(t.full); fold != "" {
+			t.lines = append(t.lines, threadLine{msg: i})
+			t.lines = append(t.lines, threadLine{
+				msg:  i,
+				text: styleFaint.Render(truncCells("  "+fold, w)),
+			})
+			if t.full {
+				t.lines = append(t.lines, threadLine{msg: i})
+				for _, l := range wrapCells(b.rest, w-2) {
+					if l != "" {
+						l = "  " + l
+					}
+					t.lines = append(t.lines, threadLine{msg: i, text: l})
+				}
+			}
 		}
 	}
 }
@@ -484,14 +518,14 @@ func (t *threadView) headerText(m *model.Message, w int) string {
 // the bodies, so there is nothing to load; what it cannot carry is a message
 // stored as an envelope-only stub (DESIGN.md §16), which has no body until the
 // raw bytes are fetched. Enter opens the reader, which does fetch.
-func threadBody(m *model.Message) string {
+func threadBody(m *model.Message) bodyText {
 	if s := strings.TrimSpace(m.TextBody); s != "" {
-		return mime.StripQuotes(m.TextBody)
+		return splitBody(m.TextBody)
 	}
 	if !m.RawComplete {
-		return "(too large to archive in full — enter to fetch and read it)"
+		return bodyText{own: "(too large to archive in full — enter to fetch and read it)"}
 	}
-	return "(no text)"
+	return bodyText{own: "(no text)"}
 }
 
 func (t *threadView) View(w, h int) string {

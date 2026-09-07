@@ -59,6 +59,11 @@ type root struct {
 	// survives going back to the list and opening the next thread.
 	threadExpanded bool
 
+	// full is whether messages are drawn with their quoted half: the reply
+	// they answer, the original they forward. Kept here for the same reason
+	// -- someone reading a forwarded chain wants the next message whole too.
+	full bool
+
 	// composeSeq names the composer being opened, so a second r before the
 	// first message has come back off disk does not push two.
 	composeSeq int
@@ -387,6 +392,9 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, r.keys.Files):
 		return r, r.showFiles()
 
+	case key.Matches(msg, r.keys.Full):
+		return r, r.showFull()
+
 	case key.Matches(msg, r.keys.Save):
 		if fv, ok := r.top().(*filesView); ok {
 			return r, r.openFile(fv, true)
@@ -422,7 +430,9 @@ func (r *root) open() tea.Cmd {
 				account: t.AccountID, thread: t.ThreadID, draft: true,
 			})
 		}
-		return r.push(newThreadView(r.d, t.AccountID, t.ThreadID, t.Subject, r.threadExpanded))
+		tv := newThreadView(r.d, t.AccountID, t.ThreadID, t.Subject, r.threadExpanded)
+		tv.full = r.full
+		return r.push(tv)
 	case *threadView:
 		m := s.selected()
 		if m == nil {
@@ -436,7 +446,9 @@ func (r *root) open() tea.Cmd {
 			})
 		}
 		// Opening a message marks it read, the way every mail client does.
-		return tea.Batch(r.push(newReader(r.d, m.AccountID, m.RemoteID)), r.markRead(m))
+		rd := newReader(r.d, m.AccountID, m.RemoteID)
+		rd.setFull(r.full)
+		return tea.Batch(r.push(rd), r.markRead(m))
 	case *reader:
 		// The one thing a reader opens onto is the event its invitation is
 		// for, when the calendar has it.
@@ -620,6 +632,26 @@ func (r *root) openInBrowser(pictures bool) tea.Cmd {
 	return r.d.openInBrowser(req.account, req.remote, req.thread, pictures)
 }
 
+// showFull is F: the half of a message the reader folds away -- the reply it
+// answers, the original a forward carries -- drawn, or folded away again.
+//
+// The cut is a heuristic (mime.SplitReadable), and heuristics are wrong
+// sometimes: on a reply it hides what you have already read, on a forward it
+// hides the entire point of the mail. This is the key that says "show me
+// anyway", so the answer to a bad cut is one keystroke rather than the
+// browser. The choice sticks until it is pressed again.
+func (r *root) showFull() tea.Cmd {
+	switch s := r.top().(type) {
+	case *reader:
+		r.full = !r.full
+		s.setFull(r.full)
+	case *threadView:
+		r.full = !r.full
+		return s.setFull(r.full)
+	}
+	return nil
+}
+
 // showFiles is v: the files attached to what is in focus, on a screen of
 // their own. A message's from the thread or the reader; from a list row the
 // whole conversation's, since that is what the row's A stands for. The index
@@ -734,7 +766,9 @@ func (r *root) onComposeLoaded(msg composeLoaded) tea.Cmd {
 		// conversation, so open that instead of saying nothing happened.
 		if msg.req.draft && msg.req.remote == "" && errors.Is(msg.err, model.ErrNotFound) {
 			r.onCal = false
-			return r.push(newThreadView(r.d, msg.req.account, msg.req.thread, "", r.threadExpanded))
+			tv := newThreadView(r.d, msg.req.account, msg.req.thread, "", r.threadExpanded)
+			tv.full = r.full
+			return r.push(tv)
 		}
 		r.note("compose: " + msg.err.Error())
 		return nil

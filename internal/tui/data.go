@@ -56,7 +56,7 @@ type bodyLoaded struct {
 	seq  int
 	id   string // public message id the body belongs to
 	msg  *model.Message
-	body string
+	body bodyText
 	// invite is the calendar card of a message that carries one, or nil.
 	invite *readerInvite
 	// attachments are the message's parts, so the header can name the files
