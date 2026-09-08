@@ -255,17 +255,23 @@ func coreCheckPDFReader() coreCheck {
 
 func coreCheckDaemon(app *App, cfg *config.Config) coreCheck {
 	path := corePidPathOf(cfg)
-	pid, err := coreReadPid(app)
+	rec, err := coreReadPid(app)
 	if errors.Is(err, os.ErrNotExist) {
 		return coreOK("daemon", "not running (no pid file)")
 	}
 	if err != nil {
 		return coreFail("daemon", fmt.Sprintf("%s: %v", path, err))
 	}
-	if !coreDaemonRunning(pid) {
-		return coreWarn("daemon", fmt.Sprintf("stale pid file %s (pid %d is gone); it is removed on the next `sync --watch`", path, pid))
+	if !rec.alive() {
+		gone := fmt.Sprintf("pid %d is gone", rec.PID)
+		if coreProcRecord(rec.PID).identified() {
+			// The number is taken, just not by the daemon: it was recycled,
+			// which is what a reboot does to every pid the daemon recorded.
+			gone = fmt.Sprintf("pid %d belongs to another process now", rec.PID)
+		}
+		return coreWarn("daemon", fmt.Sprintf("stale pid file %s (%s); it is removed on the next `sync --watch`", path, gone))
 	}
-	return coreOK("daemon", fmt.Sprintf("running (pid %d)", pid))
+	return coreOK("daemon", fmt.Sprintf("running (pid %d)", rec.PID))
 }
 
 func coreCheckOnline(app *App, cfg *config.Config) []coreCheck {

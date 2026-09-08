@@ -184,12 +184,12 @@ func coreDaemonState(app *App) coreDaemonInfo {
 		return coreDaemonInfo{}
 	}
 	info := coreDaemonInfo{PidFile: corePidPathOf(cfg)}
-	pid, err := coreReadPid(app)
+	rec, err := coreReadPid(app)
 	if err != nil {
 		return info
 	}
-	info.PID = pid
-	info.Running = coreDaemonRunning(pid)
+	info.PID = rec.PID
+	info.Running = rec.alive()
 	if !info.Running {
 		info.PID = 0
 	}
