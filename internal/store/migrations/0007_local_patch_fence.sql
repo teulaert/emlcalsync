@@ -1,0 +1,15 @@
+-- The local-write fence.
+--
+-- A write is patched into the index before it reaches the provider (DESIGN §2,
+-- §7.4), and the sync pass that follows applies whatever the provider reported
+-- at *fetch* time. Those two race. A pass already in flight when the write
+-- lands, or a provider that is briefly inconsistent about its own mutation
+-- (Gmail's labels are, for a few seconds after messages.trash), hands back the
+-- state from before the write and files the message back where it was. The
+-- pass after that corrects it -- so a trashed message reappears in the inbox
+-- and then leaves again, which is worse than either.
+--
+-- local_patch_at is when a local write last touched the row's flags or its
+-- mailbox membership. While it is recent, those columns are the archive's own
+-- and a provider-side write leaves them alone; see store.localPatchWindow.
+ALTER TABLE messages ADD COLUMN local_patch_at INTEGER;

@@ -830,14 +830,16 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 			b := b
 			err := r.e.st.Tx(ctx, func(tx *store.Tx) error {
 				for _, env := range b {
-					err := tx.UpdateMessageState(ctx, r.account(), env.RemoteID, env.Flags, nonNil(env.Mailboxes))
+					ok, err := tx.ApplyRemoteState(ctx, r.account(), env.RemoteID, env.Flags, nonNil(env.Mailboxes))
 					if errors.Is(err, model.ErrNotFound) {
 						continue
 					}
 					if err != nil {
 						return err
 					}
-					rep.Updated++
+					if ok {
+						rep.Updated++
+					}
 				}
 				if last {
 					return setState(tx)
@@ -1114,14 +1116,16 @@ func (r *mailRun) refreshEnvelopes(ctx context.Context, ef envelopeFetcher, ids 
 
 		err := r.e.st.Tx(ctx, func(tx *store.Tx) error {
 			for _, env := range envs {
-				err := tx.UpdateMessageState(ctx, r.account(), env.RemoteID, env.Flags, nonNil(env.Mailboxes))
+				ok, err := tx.ApplyRemoteState(ctx, r.account(), env.RemoteID, env.Flags, nonNil(env.Mailboxes))
 				if errors.Is(err, model.ErrNotFound) {
 					continue
 				}
 				if err != nil {
 					return err
 				}
-				updated++
+				if ok {
+					updated++
+				}
 			}
 			return nil
 		})

@@ -60,6 +60,12 @@ type Deps struct {
 	// asks for them. Nil means webasset's own.
 	Fetch mime.FetchFunc
 
+	// settled is where a deferred write reports back once the provider has
+	// answered; newRoot makes it. A Deps without one (a test that drives a
+	// screen directly) waits for every write instead, which is the older
+	// behaviour and needs no reader.
+	settled chan applied
+
 	// input and output are set by tests to drive the program headlessly.
 	input  ioReader
 	output ioWriter
@@ -101,5 +107,20 @@ func Run(ctx context.Context, d Deps) error {
 		opts = append(opts, tea.WithOutput(d.output))
 	}
 	_, err := tea.NewProgram(newRoot(d), opts...).Run()
+	// Writes handed off with Engine.ApplyLater may still be in the air. The
+	// outbox would retry them, but a moment's wait here means the last archive
+	// of a session lands now rather than on the daemon's next pass.
+	if d.Engine != nil {
+		wait, cancel := context.WithTimeout(context.WithoutCancel(ctx), exitWait)
+		if werr := d.Engine.WaitWrites(wait); werr != nil {
+			d.log().Warn("left writes for the outbox", "err", werr)
+		}
+		cancel()
+	}
 	return err
 }
+
+// exitWait is how long quitting waits for writes still on their way to the
+// provider. Short: the outbox is the real guarantee, and nobody should be made
+// to watch a terminal to close.
+const exitWait = 3 * time.Second

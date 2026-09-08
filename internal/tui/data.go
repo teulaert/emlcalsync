@@ -133,6 +133,9 @@ type applied struct {
 	// undo describes how to reverse what just happened, or is nil when the
 	// action is not reversible.
 	undo *undoRecord
+	// settled marks the second, late answer to a deferred write: the provider
+	// has now spoken, and only a write that did not go through says so.
+	settled bool
 }
 
 // dbChanged is emitted when another connection — in practice the sync daemon —

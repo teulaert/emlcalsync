@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,32 @@ func send(t *testing.T, r *root, key string) {
 	t.Helper()
 	_, cmd := r.Update(keyPress(key))
 	drain(t, r, cmd)
+	settle(t, r)
+}
+
+// settle waits for the writes the keystroke handed off, so a test can assert
+// on what the provider has. The program loop does not wait -- that is the
+// point of Engine.ApplyLater -- but a test asserting on the round trip has to.
+func settle(t *testing.T, r *root) {
+	t.Helper()
+	if r.d.Engine == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.d.Engine.WaitWrites(ctx); err != nil {
+		t.Fatalf("waiting for writes: %v", err)
+	}
+	// Whatever they reported back is now waiting on the channel; the program
+	// loop reads it, so the test does too.
+	for {
+		select {
+		case msg := <-r.d.settled:
+			drain(t, r, r.onSettled(msg))
+		default:
+			return
+		}
+	}
 }
 
 func TestRootSwitchesBetweenMailAndCalendar(t *testing.T) {

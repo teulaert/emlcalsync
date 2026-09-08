@@ -223,19 +223,33 @@ func respondOp(accountID, calRemote, remote string, r model.Participation) []acc
 // ---------------------------------------------------------------------------
 // Running them
 
+// settledBuffer is how many deferred writes may be waiting to be read before
+// one would block. A triage run is a few keystrokes a second at most, and each
+// answer re-arms the reader, so this is only ever a cushion.
+const settledBuffer = 64
+
 // apply runs every op and folds the results into one message.
+//
+// Engine.ApplyLater is what makes a triage keystroke cost nothing: the index
+// is patched and the outbox row committed before it returns, and the provider
+// round trip finishes behind us. What comes back is therefore only what is
+// known so far, which is why the answer arrives twice -- this message now, and
+// a second one marked settled if the write turns out to have gone wrong. Sends,
+// drafts and RSVPs are not deferred (their result is the point), so for those
+// the first message is already the whole story.
 //
 // ApplyResult.Renames matters even though Gmail and JMAP always return it
 // empty: on IMAP a move mints a new UID, so the id the caller passed in stops
 // naming anything. Everything the UI is still holding — the selected row, the
-// undo record, an open reader — has to be rewritten through it.
+// undo record, an open reader — has to be rewritten through it. IMAP is also
+// why such a write is never deferred: the renames have to be in hand.
 func (d Deps) apply(label string, ops []accountOp, undo *undoRecord) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		res := applied{action: label, renames: map[string]string{}, undo: undo}
 		for _, ao := range ops {
-			r, err := d.Engine.Apply(ctx, ao.account, ao.op)
+			r, err := d.applyOne(ctx, label, ao)
 			if err != nil {
 				res.err = fmt.Errorf("%s: %w", ao.account, err)
 				res.undo = nil // Apply already rolled its own patch back.
@@ -255,6 +269,54 @@ func (d Deps) apply(label string, ops []accountOp, undo *undoRecord) tea.Cmd {
 			res.undo.rewrite(res.renames)
 		}
 		return res
+	}
+}
+
+// applyOne runs a single account's op, deferring the provider round trip when
+// there is somewhere to report it back to.
+func (d Deps) applyOne(ctx context.Context, label string, ao accountOp) (*sync.ApplyResult, error) {
+	if d.settled == nil {
+		return d.Engine.Apply(ctx, ao.account, ao.op)
+	}
+	return d.Engine.ApplyLater(ctx, ao.account, ao.op, func(res *sync.ApplyResult, err error) {
+		if err == nil && (res == nil || !res.Queued) {
+			return // It went through; the screen has said so for a while now.
+		}
+		msg := applied{action: label, account: ao.account, settled: true}
+		if err != nil {
+			msg.err = fmt.Errorf("%s: %w", ao.account, err)
+		} else {
+			msg.queued = true
+		}
+		select {
+		case d.settled <- msg:
+		default:
+			d.log().Warn("dropped a settled write", "account", ao.account, "action", label, "err", err)
+		}
+	})
+}
+
+// waitSettled hands the root the next deferred write to report back.
+func waitSettled(ch <-chan applied) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg { return <-ch }
+}
+
+// warmProviders builds every account's mail provider in the background, so
+// that the first triage keystroke of a session does not pay for it. That cost
+// is real: a Gmail account refreshes its OAuth token, and a JMAP one fetches
+// the session and then the mailbox list to find out which id the trash is.
+func (d Deps) warmProviders() tea.Cmd {
+	if d.Engine == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		d.Engine.WarmMail(ctx)
+		return nil
 	}
 }
 

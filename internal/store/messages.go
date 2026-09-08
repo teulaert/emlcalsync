@@ -191,11 +191,32 @@ func (tx *Tx) UpsertMessage(ctx context.Context, msg *model.Message, parsed *mim
 	// A message can move between threads (Gmail rethreads on subject edits,
 	// JMAP on References changes). Remember where it was so the old summary
 	// is recomputed too, otherwise it keeps a phantom message.
+	var prevID sql.NullInt64
 	var prevThread string
 	if err := tx.q.QueryRowContext(ctx,
-		`SELECT thread_id FROM messages WHERE account_id = ? AND remote_id = ?`,
-		m.AccountID, m.RemoteID).Scan(&prevThread); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		`SELECT id, thread_id FROM messages WHERE account_id = ? AND remote_id = ?`,
+		m.AccountID, m.RemoteID).Scan(&prevID, &prevThread); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("store: upsert message %s/%s: %w", m.AccountID, m.RemoteID, err)
+	}
+
+	// A row a local write has just touched keeps its own flags and membership
+	// until the provider agrees with them: a delta re-fetching the message is
+	// exactly the pass that would otherwise file it back where it was. Only
+	// those two are held; everything else the fetch brings is newer than
+	// anything the archive knows and is written as it stands.
+	clearFence := false
+	if prevID.Valid {
+		f, err := tx.fenceOf(ctx, prevID.Int64)
+		if err != nil {
+			return 0, err
+		}
+		switch {
+		case !f.live:
+		case f.agreesWith(m.Flags, m.MailboxRemotes):
+			clearFence = true
+		default:
+			m.Flags, m.MailboxRemotes = f.flags, f.mailboxes
+		}
 	}
 
 	var id int64
@@ -265,6 +286,12 @@ func (tx *Tx) UpsertMessage(ctx context.Context, msg *model.Message, parsed *mim
 	}
 	if prevThread != "" && prevThread != m.ThreadID {
 		if err := tx.refreshThread(ctx, m.AccountID, prevThread); err != nil {
+			return 0, err
+		}
+	}
+
+	if clearFence {
+		if err := tx.setLocalPatch(ctx, id, time.Time{}); err != nil {
 			return 0, err
 		}
 	}
@@ -678,9 +705,205 @@ func (tx *Tx) UndeleteWithState(ctx context.Context, accountID, remote string, f
 	if err := requireRow(res, "message %s:%s", accountID, remote); err != nil {
 		return err
 	}
-	// UpdateMessageState refreshes the thread summary, which is what makes the
-	// message count as live again.
-	return tx.UpdateMessageState(ctx, accountID, remote, flags, mailboxRemotes)
+	// ApplyRemoteState refreshes the thread summary, which is what makes the
+	// message count as live again. It is the provider-side write, so a local
+	// patch the server has not caught up with keeps its flags and membership;
+	// deleted_at is cleared either way, since nothing local ever sets it.
+	_, err = tx.ApplyRemoteState(ctx, accountID, remote, flags, mailboxRemotes)
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// The local-write fence
+
+// localPatchWindow is how long a write of our own outranks what the provider
+// says about the same message.
+//
+// See migrations/0007_local_patch_fence.sql for what it is for. The two ways
+// of getting the window wrong are not symmetric: too long leaves a row saying
+// what the user asked for slightly before the server agrees, which is
+// indistinguishable from success, while too short brings back the flicker the
+// fence exists to stop.
+const localPatchWindow = 2 * time.Minute
+
+// fence is the state a recent local write left on a row.
+type fence struct {
+	live      bool
+	flags     model.Flags
+	mailboxes []string
+}
+
+// agreesWith reports whether the provider has caught up with the fenced state,
+// which is the moment the fence has nothing left to protect. A nil
+// mailboxRemotes means the caller is not touching membership, so only the
+// flags are compared.
+func (f fence) agreesWith(flags model.Flags, mailboxRemotes []string) bool {
+	if f.flags != flags {
+		return false
+	}
+	if mailboxRemotes == nil {
+		return true
+	}
+	if len(f.mailboxes) != len(mailboxRemotes) {
+		return false
+	}
+	have := make(map[string]int, len(f.mailboxes))
+	for _, r := range f.mailboxes {
+		have[r]++
+	}
+	for _, r := range mailboxRemotes {
+		if have[r] == 0 {
+			return false
+		}
+		have[r]--
+	}
+	return true
+}
+
+// fenceOf reads the fence for one message row.
+func (tx *Tx) fenceOf(ctx context.Context, id int64) (fence, error) {
+	var at sql.NullInt64
+	var unread, flagged, draft, answered int64
+	err := tx.q.QueryRowContext(ctx,
+		`SELECT local_patch_at, is_unread, is_flagged, is_draft, is_answered
+		   FROM messages WHERE id = ?`, id).Scan(&at, &unread, &flagged, &draft, &answered)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fence{}, nil
+	}
+	if err != nil {
+		return fence{}, fmt.Errorf("store: read local patch %d: %w", id, err)
+	}
+	if !at.Valid || time.Since(time.Unix(at.Int64, 0)) >= localPatchWindow {
+		return fence{}, nil
+	}
+	f := fence{live: true, flags: model.Flags{
+		Unread: unread != 0, Flagged: flagged != 0, Draft: draft != 0, Answered: answered != 0,
+	}}
+	f.mailboxes, err = tx.mailboxRemotesOf(ctx, id)
+	return f, err
+}
+
+// mailboxRemotesOf lists a message's mailbox membership by remote id. The
+// result is never nil, so it can be handed straight to replaceMemberships,
+// which reads nil as "leave membership alone".
+func (tx *Tx) mailboxRemotesOf(ctx context.Context, id int64) ([]string, error) {
+	rows, err := tx.q.QueryContext(ctx, `
+		SELECT mb.remote_id FROM message_mailboxes mm
+		  JOIN mailboxes mb ON mb.id = mm.mailbox_id
+		 WHERE mm.message_id = ?
+		 ORDER BY mb.sort_order, mb.name`, id)
+	if err != nil {
+		return nil, fmt.Errorf("store: read memberships: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var remote string
+		if err := rows.Scan(&remote); err != nil {
+			return nil, err
+		}
+		out = append(out, remote)
+	}
+	return out, rows.Err()
+}
+
+// setLocalPatch raises the fence (a non-zero at) or drops it (the zero time).
+func (tx *Tx) setLocalPatch(ctx context.Context, id int64, at time.Time) error {
+	var v any
+	if !at.IsZero() {
+		v = at.Unix()
+	}
+	if _, err := tx.q.ExecContext(ctx,
+		`UPDATE messages SET local_patch_at = ? WHERE id = ?`, v, id); err != nil {
+		return fmt.Errorf("store: local patch %d: %w", id, err)
+	}
+	return nil
+}
+
+// messageID resolves a message row id, or model.ErrNotFound.
+func (tx *Tx) messageID(ctx context.Context, accountID, remote string) (int64, error) {
+	var id int64
+	err := tx.q.QueryRowContext(ctx,
+		`SELECT id FROM messages WHERE account_id = ? AND remote_id = ?`,
+		accountID, remote).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, notFound("message %s:%s", accountID, remote)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: message %s:%s: %w", accountID, remote, err)
+	}
+	return id, nil
+}
+
+// PatchMessageState is UpdateMessageState for a write of the archive's own: it
+// applies the state and raises the fence, so the sync pass that follows does
+// not undo it before the provider has caught up.
+func (s *Store) PatchMessageState(ctx context.Context, accountID, remote string, flags model.Flags, mailboxRemotes []string) error {
+	return s.Tx(ctx, func(tx *Tx) error {
+		return tx.PatchMessageState(ctx, accountID, remote, flags, mailboxRemotes)
+	})
+}
+
+func (tx *Tx) PatchMessageState(ctx context.Context, accountID, remote string, flags model.Flags, mailboxRemotes []string) error {
+	id, err := tx.messageID(ctx, accountID, remote)
+	if err != nil {
+		return err
+	}
+	if err := tx.UpdateMessageState(ctx, accountID, remote, flags, mailboxRemotes); err != nil {
+		return err
+	}
+	return tx.setLocalPatch(ctx, id, time.Now())
+}
+
+// ApplyRemoteState is UpdateMessageState for what the provider reports. It
+// returns false without writing when a local write still outranks it, and
+// drops the fence when the two have converged.
+func (s *Store) ApplyRemoteState(ctx context.Context, accountID, remote string, flags model.Flags, mailboxRemotes []string) (bool, error) {
+	var applied bool
+	err := s.Tx(ctx, func(tx *Tx) error {
+		var err error
+		applied, err = tx.ApplyRemoteState(ctx, accountID, remote, flags, mailboxRemotes)
+		return err
+	})
+	return applied, err
+}
+
+func (tx *Tx) ApplyRemoteState(ctx context.Context, accountID, remote string, flags model.Flags, mailboxRemotes []string) (bool, error) {
+	id, err := tx.messageID(ctx, accountID, remote)
+	if err != nil {
+		return false, err
+	}
+	f, err := tx.fenceOf(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if f.live {
+		if !f.agreesWith(flags, mailboxRemotes) {
+			return false, nil
+		}
+		if err := tx.setLocalPatch(ctx, id, time.Time{}); err != nil {
+			return false, err
+		}
+	}
+	return true, tx.UpdateMessageState(ctx, accountID, remote, flags, mailboxRemotes)
+}
+
+// ClearLocalPatch drops the fence for a local write that turned out not to
+// have happened: the row has been put back the way the provider still has it,
+// so there is nothing left to protect. An unknown message is not an error.
+func (s *Store) ClearLocalPatch(ctx context.Context, accountID, remote string) error {
+	return s.Tx(ctx, func(tx *Tx) error { return tx.ClearLocalPatch(ctx, accountID, remote) })
+}
+
+func (tx *Tx) ClearLocalPatch(ctx context.Context, accountID, remote string) error {
+	id, err := tx.messageID(ctx, accountID, remote)
+	if errors.Is(err, model.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return tx.setLocalPatch(ctx, id, time.Time{})
 }
 
 // ---------------------------------------------------------------------------

@@ -108,35 +108,122 @@ func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult
 	if !ok {
 		return nil, fmt.Errorf("sync: unknown account %q", account)
 	}
-	if err := op.validate(); err != nil {
+	id, undo, err := e.enqueue(ctx, *acct, op)
+	if err != nil {
 		return nil, err
 	}
-	if err := e.ensureAccount(ctx, *acct); err != nil {
-		return nil, err
-	}
+	return e.push(ctx, *acct, op, id, undo)
+}
 
+// deferTimeout bounds a write ApplyLater is no longer waiting on. It is long
+// because nothing is blocked on it: the alternative to finishing is the outbox
+// retrying the row later, which is slower still.
+const deferTimeout = 2 * time.Minute
+
+// ApplyLater is Apply without the wait. It commits the outbox row and the
+// optimistic patch — the part that makes the write durable and puts it on
+// screen — and hands the provider round trip to a goroutine, which reports the
+// outcome to done. The returned result describes only what has happened so
+// far: OutboxID is set, Queued is false, and neither RemoteID nor Renames can
+// be known yet.
+//
+// This is what keeps a trash or an archive from costing a round trip of the
+// user's time. It is safe because the outbox row is already committed: a crash
+// before the goroutine finishes replays the write rather than losing it, which
+// is the same guarantee an offline write has always had (DESIGN §7.4).
+//
+// Writes whose answer the caller cannot do without are not deferred and run
+// through Apply instead: a send or a draft is only useful once its RemoteID is
+// known, and a backend that mints new ids on a move (IMAP) has to be waited
+// for or every id the caller is still holding goes stale.
+func (e *Engine) ApplyLater(ctx context.Context, account string, op Op, done func(*ApplyResult, error)) (*ApplyResult, error) {
+	acct, ok := e.cfg.Account(account)
+	if !ok {
+		return nil, fmt.Errorf("sync: unknown account %q", account)
+	}
+	if !deferrable(*acct, op) {
+		res, err := e.Apply(ctx, account, op)
+		if done != nil {
+			done(res, err)
+		}
+		return res, err
+	}
+	id, undo, err := e.enqueue(ctx, *acct, op)
+	if err != nil {
+		return nil, err
+	}
+	queued := e.deferPush(account, func() {
+		// The caller's context belongs to the keystroke that started this and
+		// is very likely already cancelled; only its values are worth keeping.
+		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), deferTimeout)
+		defer cancel()
+		res, err := e.push(bg, *acct, op, id, undo)
+		if done != nil {
+			done(res, err)
+		}
+	})
+	if !queued {
+		e.log.Warn("write handed to the outbox: too many already in flight",
+			"account", account, "kind", op.Kind, "outbox", id)
+		if done != nil {
+			done(&ApplyResult{OutboxID: id, Queued: true}, nil)
+		}
+	}
+	return &ApplyResult{OutboxID: id}, nil
+}
+
+// deferrable reports whether a write's result is of no use to the caller, so
+// that the round trip can happen behind its back. See ApplyLater.
+func deferrable(acct config.Account, op Op) bool {
+	switch op.Kind {
+	case OpFlags, OpMailboxes, OpArchive, OpTrash, OpRestore:
+		// provider.Remapper is an IMAP-only trait, and it is the config rather
+		// than the provider that is asked so that the decision costs nothing:
+		// building the provider to ask it is one of the round trips ApplyLater
+		// exists to get out of the way.
+		return acct.Mail != nil && acct.Mail.Backend != model.BackendIMAP
+	default:
+		return false
+	}
+}
+
+// enqueue records the write and patches the index, in one transaction. After
+// it commits the write is durable: it either reaches the provider now or the
+// outbox retries it.
+func (e *Engine) enqueue(ctx context.Context, acct config.Account, op Op) (int64, *rollback, error) {
+	if err := op.validate(); err != nil {
+		return 0, nil, err
+	}
+	if err := e.ensureAccount(ctx, acct); err != nil {
+		return 0, nil, err
+	}
 	payload, err := json.Marshal(op)
 	if err != nil {
-		return nil, fmt.Errorf("sync: marshal op: %w", err)
+		return 0, nil, fmt.Errorf("sync: marshal op: %w", err)
 	}
-
 	var id int64
 	var undo *rollback
 	err = e.st.Tx(ctx, func(tx *store.Tx) error {
 		var err error
-		id, err = tx.EnqueueOutbox(ctx, account, string(op.Kind), payload)
+		id, err = tx.EnqueueOutbox(ctx, acct.Name, string(op.Kind), payload)
 		if err != nil {
 			return err
 		}
-		undo, err = e.patchLocal(ctx, tx, *acct, op)
+		undo, err = e.patchLocal(ctx, tx, acct, op)
 		return err
 	})
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
+	return id, undo, nil
+}
 
+// push hands an enqueued write to the provider and retires, queues or fails
+// the outbox row by what comes back.
+func (e *Engine) push(ctx context.Context, acct config.Account, op Op, id int64, undo *rollback) (*ApplyResult, error) {
+	account := acct.Name
 	res := &ApplyResult{OutboxID: id}
-	remote, renames, err := e.execute(ctx, *acct, op)
+	remote, renames, err := e.execute(ctx, acct, op)
 	switch {
 	case err == nil:
 		res.RemoteID = remote
@@ -154,7 +241,7 @@ func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult
 		}
 		e.log.Info("outbox item done", "account", account, "kind", op.Kind,
 			"outbox", id, "messages", len(op.IDs), "remote", remote)
-		if err := e.afterExecute(ctx, *acct, op, remote); err != nil {
+		if err := e.afterExecute(ctx, acct, op, remote); err != nil {
 			return res, err
 		}
 		return res, nil
@@ -170,7 +257,7 @@ func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult
 	default:
 		// The write will never go through: put the index back the way it was
 		// and stop the row from being retried.
-		e.rollback(ctx, *acct, undo)
+		e.rollback(ctx, acct, undo)
 		e.failPermanently(ctx, id, err)
 		return res, err
 	}
@@ -309,7 +396,7 @@ func (e *Engine) patchLocal(ctx context.Context, tx *store.Tx, acct config.Accou
 			}
 			rb.note(msg)
 			f := applyFlags(msg.Flags, op.Flags.Set, op.Flags.Clear)
-			if err := tx.UpdateMessageState(ctx, acct.Name, id, f, nil); err != nil {
+			if err := tx.PatchMessageState(ctx, acct.Name, id, f, nil); err != nil {
 				return rb, err
 			}
 		}
@@ -339,7 +426,7 @@ func (e *Engine) patchLocal(ctx context.Context, tx *store.Tx, acct config.Accou
 					next = append(next, a)
 				}
 			}
-			if err := tx.UpdateMessageState(ctx, acct.Name, id, msg.Flags, nonNil(next)); err != nil {
+			if err := tx.PatchMessageState(ctx, acct.Name, id, msg.Flags, nonNil(next)); err != nil {
 				return rb, err
 			}
 		}
@@ -396,11 +483,16 @@ func (e *Engine) rollback(ctx context.Context, acct config.Account, rb *rollback
 	}
 	err := e.st.Tx(ctx, func(tx *store.Tx) error {
 		for _, m := range rb.msgs {
+			// The fence goes with it: the row is back the way the provider
+			// still has it, so there is nothing left for it to protect.
 			err := tx.UpdateMessageState(ctx, acct.Name, m.remote, m.flags, m.mailboxes)
 			if errors.Is(err, model.ErrNotFound) {
 				continue
 			}
 			if err != nil {
+				return err
+			}
+			if err := tx.ClearLocalPatch(ctx, acct.Name, m.remote); err != nil {
 				return err
 			}
 		}

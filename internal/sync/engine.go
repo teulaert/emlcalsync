@@ -96,6 +96,14 @@ type Engine struct {
 	retryMu stdsync.Mutex
 	retryAt map[int64]time.Time
 
+	// deferQ is the per-account queue of writes ApplyLater handed off, drained
+	// by one goroutine each so that they reach the provider in the order they
+	// were enqueued. Two keystrokes about the same message -- mark read, then
+	// mark unread again -- must not race, and the second has to win.
+	// inflight counts what is still in the air, for WaitWrites.
+	deferQ   map[string]chan func()
+	inflight stdsync.WaitGroup
+
 	// deltaCount counts deltas per account (for the periodic mailbox refresh).
 	deltaCount map[string]int
 
@@ -152,6 +160,7 @@ func New(o Options) (*Engine, error) {
 		mailP:     map[string]provider.MailProvider{},
 		calP:      map[string]provider.CalendarProvider{},
 		retryAt:   map[int64]time.Time{},
+		deferQ:    map[string]chan func(){},
 		watchers:  map[string]*accountWatch{},
 		waitMin:   oneShotWaitMin,
 		waitMax:   oneShotWaitMax,
@@ -419,6 +428,72 @@ func (e *Engine) ensureAccount(ctx context.Context, acct config.Account) error {
 		return fmt.Errorf("sync: %s: %w", acct.Name, err)
 	}
 	return nil
+}
+
+// deferQueue is how many handed-off writes may be waiting per account. It is
+// far more than a person can produce; overflowing it costs nothing worse than
+// the outbox pushing the write on its next pass.
+const deferQueue = 256
+
+// deferPush hands one account's write to that account's queue. It returns
+// false when the queue is full, which leaves the row for the outbox.
+func (e *Engine) deferPush(account string, fn func()) bool {
+	e.mu.Lock()
+	q, ok := e.deferQ[account]
+	if !ok {
+		q = make(chan func(), deferQueue)
+		e.deferQ[account] = q
+		go func() {
+			for f := range q {
+				f()
+			}
+		}()
+	}
+	e.mu.Unlock()
+
+	e.inflight.Add(1)
+	select {
+	case q <- func() { defer e.inflight.Done(); fn() }:
+		return true
+	default:
+		e.inflight.Done()
+		return false
+	}
+}
+
+// WaitWrites blocks until every write handed to ApplyLater has finished, or
+// ctx is done. Nothing depends on it -- a write still in the air is one the
+// outbox retries, not one that is lost -- but waiting a moment on the way out
+// means the common case never needs that retry.
+func (e *Engine) WaitWrites(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		e.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// WarmMail builds and caches every configured account's mail provider, so that
+// the first write of a session does not pay for it: a Gmail account refreshes
+// its OAuth token here rather than under a keystroke, and a JMAP one fetches
+// its session. Failures are left to the write that follows to report — this is
+// an optimisation, and an account that cannot be reached now may well be
+// reachable by the time anything is asked of it.
+func (e *Engine) WarmMail(ctx context.Context) {
+	for _, acct := range e.cfg.Accounts {
+		if acct.Mail == nil {
+			continue
+		}
+		if _, err := e.mailProvider(ctx, acct); err != nil {
+			e.log.Debug("warm mail provider", "account", acct.Name, "err", err)
+		}
+	}
 }
 
 func (e *Engine) mailProvider(ctx context.Context, acct config.Account) (provider.MailProvider, error) {

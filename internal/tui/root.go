@@ -85,6 +85,9 @@ type root struct {
 
 func newRoot(d Deps) *root {
 	accounts := d.Accounts
+	// Buffered so that a write reporting back can never block the goroutine
+	// pushing it, however long the root takes to get round to reading.
+	d.settled = make(chan applied, settledBuffer)
 	r := &root{d: d, keys: defaultKeys(), threadExpanded: true, answers: newAnswerCache()}
 	r.mail = []screen{newMailList(d, accounts)}
 	r.cal = []screen{newAgenda(d)}
@@ -129,7 +132,8 @@ func (r *root) pop() bool {
 
 func (r *root) Init() tea.Cmd {
 	r.watcher = newDBWatcher(context.Background(), r.d.Store)
-	return tea.Batch(r.mail[0].Init(), r.cal[0].Init(), poll())
+	return tea.Batch(r.mail[0].Init(), r.cal[0].Init(), poll(),
+		waitSettled(r.d.settled), r.d.warmProviders())
 }
 
 func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -162,6 +166,11 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return r, nil
 
 	case applied:
+		if msg.settled {
+			// One reader at a time: the next wait is armed only once this
+			// answer is in hand.
+			return r, tea.Batch(r.onSettled(msg), waitSettled(r.d.settled))
+		}
 		return r, r.onApplied(msg)
 
 	case composeLoaded:
@@ -990,6 +999,25 @@ func (r *root) onApplied(a applied) tea.Cmd {
 		r.note(a.action)
 	}
 	return reload
+}
+
+// onSettled is what a deferred write says once the provider has answered. The
+// screen moved on the moment the index was patched, so there is nothing left
+// to confirm: only a write that did not go through is worth interrupting for.
+//
+// A rejection has already been rolled back inside the engine, so the row is
+// back in the index and a reload is what puts it back on screen. A queued one
+// stands as it is — the outbox will push it — and only needs saying.
+func (r *root) onSettled(a applied) tea.Cmd {
+	switch {
+	case a.err != nil:
+		r.note(a.action + " did not go through: " + a.err.Error())
+		r.undo = nil
+		return r.top().reload()
+	case a.queued:
+		r.note(a.action + " queued — offline, it will go out on the next sync")
+	}
+	return nil
 }
 
 func (r *root) note(s string) {

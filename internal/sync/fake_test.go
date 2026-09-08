@@ -74,6 +74,10 @@ type fakeMail struct {
 	onEnumerate func(call int)
 	enumCalls   int
 
+	// gate, when set, holds every write until it is closed, so a test can look
+	// at the world in the moment a deferred write has not reached the provider.
+	gate chan struct{}
+
 	mailboxesChanged bool
 	// noTotal makes Total report that the provider cannot count.
 	noTotal bool
@@ -437,7 +441,28 @@ func (f *fakeMail) Changes(ctx context.Context, since string) (*provider.Changes
 	return ch, nil
 }
 
+// Gate holds every write until the returned func is called.
+func (f *fakeMail) Gate() (release func()) {
+	f.mu.Lock()
+	f.gate = make(chan struct{})
+	g := f.gate
+	f.mu.Unlock()
+	return func() { close(g) }
+}
+
+// waitGate blocks outside the lock, so a gated write does not wedge the whole
+// fake provider.
+func (f *fakeMail) waitGate() {
+	f.mu.Lock()
+	g := f.gate
+	f.mu.Unlock()
+	if g != nil {
+		<-g
+	}
+}
+
 func (f *fakeMail) SetFlags(ctx context.Context, ids []string, set, clear model.Flags) error {
+	f.waitGate()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.fail(); err != nil {
@@ -457,6 +482,7 @@ func (f *fakeMail) SetFlags(ctx context.Context, ids []string, set, clear model.
 }
 
 func (f *fakeMail) SetMailboxes(ctx context.Context, ids []string, add, remove []string) error {
+	f.waitGate()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.fail(); err != nil {

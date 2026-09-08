@@ -638,6 +638,43 @@ This is what makes "compose offline, send when back" work, and it makes every
 write crash-safe. Kinds: `send`, `draft`, `flags`, `mailboxes`, `trash`,
 `event.create|update|delete`.
 
+### 7.4.1 The local-write fence
+
+The optimistic patch and the sync pass race. A pass already in flight when a
+write lands, or a provider briefly inconsistent about its own mutation (Gmail's
+labels are, for a few seconds after `messages.trash`), reports the state from
+*before* the write and files the message back where it was; the pass after that
+corrects it. A trashed message therefore reappeared in the inbox and then left
+again.
+
+`messages.local_patch_at` (migration `0007`) records when a local write last
+touched a row's flags or mailbox membership. For `store.localPatchWindow`
+(2 min) those two columns are the archive's own: `ApplyRemoteState` refuses a
+provider-side write that disagrees, and `UpsertMessage` keeps the fenced values
+when a delta re-fetches the whole message. Agreement drops the fence early, and
+a rollback drops it too — a rejected write never happened, so the server is the
+truth again. Everything else a fetch brings (body, subject, thread) is written
+as it stands.
+
+### 7.4.2 Deferred writes
+
+`Engine.Apply` waits for the provider before returning. `Engine.ApplyLater`
+does not: it commits the outbox row and the optimistic patch — the part that
+makes the write durable and puts it on screen — and hands the round trip to a
+per-account queue, reporting the outcome through a callback. That is what keeps
+a trash or an archive in the TUI from costing a round trip of the user's time.
+
+It is safe because the outbox row is committed first: a crash mid-flight
+replays the write rather than losing it, the same guarantee an offline write has
+always had. The queue is per account and drained by one goroutine, so writes
+reach the provider in the order they were made — `m` after an auto-mark-read
+has to win. Writes whose answer the caller needs are not deferred and fall back
+to `Apply`: a send or a draft is only useful once its `RemoteID` is known, and
+IMAP mints new ids on a move, so its renames have to be in hand.
+
+The CLI still uses `Apply`: `mail trash` exits 0 or 6 by what happened, which
+means waiting to find out.
+
 ### 7.5 Scheduling
 
 - `emlcal sync` — one pass over all (or `--account`) accounts, then exit.
@@ -655,6 +692,10 @@ write crash-safe. Kinds: `send`, `draft`, `flags`, `mailboxes`, `trash`,
   sends `SIGUSR1` to trigger an immediate pass.
 - SQLite WAL + `busy_timeout` handles the two writers that do exist (sync
   process, CLI write commands patching optimistically). Readers never block.
+- Deferred writes (7.4.2) are serialised per account and counted, so
+  `Engine.WaitWrites` can drain them — the TUI waits a few seconds on the way
+  out so the last archive of a session lands now rather than on the daemon's
+  next pass.
 - Worker pools: Gmail 4 concurrent batch requests; JMAP 8 concurrent blob
   downloads. All provider calls go through a per-account rate limiter with
   retry-after awareness.
