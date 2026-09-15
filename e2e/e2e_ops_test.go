@@ -271,14 +271,19 @@ func TestSyncWatchPicksUpPushedMail(t *testing.T) {
 		<-done
 	}()
 
-	// The daemon writes its pid file before it starts watching.
+	// The daemon writes its pid file before it starts watching. The file names
+	// a process rather than a bare number -- the boot id and the process start
+	// time follow on their own lines, so a recycled pid cannot pass for the
+	// daemon -- and the pid is the first line precisely so a reader that wants
+	// only the number still gets it.
 	pidPath := e.pidFilePath()
 	if !waitFor(10*time.Second, func() bool {
 		b, err := os.ReadFile(pidPath)
 		if err != nil {
 			return false
 		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		first, _, _ := strings.Cut(strings.TrimSpace(string(b)), "\n")
+		pid, err := strconv.Atoi(strings.TrimSpace(first))
 		return err == nil && pid == cmd.Process.Pid
 	}) {
 		t.Fatalf("no pid file at %s after 10s\nstderr: %s", pidPath, stderr.String())
