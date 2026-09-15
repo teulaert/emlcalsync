@@ -117,6 +117,31 @@ func addDraftIn(t *testing.T, d Deps, mailbox, account, remote, thread, subject 
 	}
 }
 
+// addSentDraft indexes the copy Gmail leaves behind when a draft is sent: the
+// DRAFT label is still on it and TRASH has been added beside it, so the
+// message reads as filed under drafts *and* trash at once.
+func addSentDraft(t *testing.T, d Deps, account, remote, thread, subject string) {
+	t.Helper()
+	m := &model.Message{
+		AccountID:      account,
+		RemoteID:       remote,
+		ThreadID:       thread,
+		Subject:        subject,
+		From:           model.Address{Name: account, Email: account + "@example.com"},
+		To:             []model.Address{{Email: "anna@example.com"}},
+		Date:           testNow,
+		Received:       testNow,
+		Snippet:        subject + " body",
+		TextBody:       subject + " body",
+		Flags:          model.Flags{Draft: true},
+		MailboxRemotes: []string{"drafts", "trash"},
+		IndexedAt:      testNow,
+	}
+	if _, err := d.Store.UpsertMessage(context.Background(), m, nil); err != nil {
+		t.Fatalf("UpsertMessage %s: %v", remote, err)
+	}
+}
+
 // pump runs a screen's command chain until it stops producing messages, so a
 // test can assert on the state a load actually settled into.
 func pump(t *testing.T, s screen, cmd tea.Cmd, k keymap, w, h int) screen {

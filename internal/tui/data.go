@@ -512,9 +512,10 @@ func newestDraft(ctx context.Context, d Deps, accountID, threadID string) (*mode
 		return nil, err
 	}
 	drafts := roleRemote(ctx, d.Store, accountID, model.RoleDrafts)
+	trash := roleRemote(ctx, d.Store, accountID, model.RoleTrash)
 	// GetThread hands them back oldest first.
 	for i := len(msgs) - 1; i >= 0; i-- {
-		if liveDraft(&msgs[i], drafts) {
+		if liveDraft(&msgs[i], drafts, trash) {
 			return &msgs[i], nil
 		}
 	}
@@ -532,11 +533,25 @@ func newestDraft(ctx context.Context, d Deps, accountID, threadID string) (*mode
 // such a conversation reopens somebody's discarded draft: usually an empty
 // one, which is a blank screen where the quoted mail should have been.
 //
+// Being in the drafts mailbox is not enough either, because on Gmail the
+// mailboxes are labels and a spent draft keeps DRAFT while it gains TRASH.
+// That is the shape a draft has the moment it is sent: submit trashes the
+// draft it replaces, Gmail files the copy under both, and the next delta hands
+// it back saying drafts *and* trash. Reading that as "still being written" is
+// how `r` on a conversation you answered a minute ago reopens the answer you
+// already sent -- with no original quoted under it, since the composer was
+// told it was finishing a draft rather than writing a reply. The trash is the
+// half that settles it: whatever else a message is filed under, a message in
+// the trash is not one anybody is still writing.
+//
 // An account whose mailboxes have not been synced has no drafts mailbox to
 // check against, and then nothing counts: opening a fresh reply is the safe
 // end of that, since the words in a real draft are still on the server.
-func liveDraft(m *model.Message, draftsRemote string) bool {
+func liveDraft(m *model.Message, draftsRemote, trashRemote string) bool {
 	if !m.Flags.Draft || draftsRemote == "" {
+		return false
+	}
+	if trashRemote != "" && slices.Contains(m.MailboxRemotes, trashRemote) {
 		return false
 	}
 	return slices.Contains(m.MailboxRemotes, draftsRemote)

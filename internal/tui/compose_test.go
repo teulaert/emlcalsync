@@ -192,6 +192,33 @@ func TestReplyIgnoresADiscardedDraft(t *testing.T) {
 	}
 }
 
+// Gmail's mailboxes are labels, so a draft that was sent keeps DRAFT and gains
+// TRASH rather than moving out of the drafts mailbox. Asking only "is it in
+// drafts?" says yes to that, which is how `a` on a conversation answered a
+// minute ago reopened the answer that had already gone out -- and with no
+// original quoted under it, the composer having been told it was finishing a
+// draft rather than writing a reply.
+func TestReplyIgnoresADraftThatWasAlreadySent(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addConversation(t, d, "work", "w1", "t1")
+	addMessage(t, d, "work", "w2", "t1", "Re: offerte Q4", "bob", time.Minute, false)
+	addSentDraft(t, d, "work", "w3", "t1", "Re: offerte Q4")
+
+	r := newTestRoot(t, d)
+	send(t, r, "a")
+
+	c := composerOn(t, r)
+	if c.draftRemote != "" {
+		t.Errorf("opened the sent draft %q instead of a reply", c.draftRemote)
+	}
+	if c.orig == nil || c.orig.RemoteID != "w2" {
+		t.Fatalf("replying to %+v, want the newest sent message w2", c.orig)
+	}
+	if !strings.Contains(c.body.Value(), "Re: offerte Q4 body") {
+		t.Errorf("the quoted original is missing from the composer:\n%s", c.body.Value())
+	}
+}
+
 // The same for a draft the server filed away in the archive.
 func TestReplyIgnoresAnArchivedDraft(t *testing.T) {
 	d := newTestDeps(t, "work")

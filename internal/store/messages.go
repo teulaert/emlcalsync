@@ -1093,7 +1093,9 @@ type MessageFilter struct {
 	// Accounts limits the query to these account ids; empty means all.
 	Accounts []string
 	// MailboxRole matches mailboxes.role exactly (case-insensitive):
-	// "inbox", "sent", "category:promotions", …
+	// "inbox", "sent", "category:promotions", … With one exception, spelled
+	// out in where(): "drafts" also excludes anything in the trash, because a
+	// draft that was sent or discarded is one Gmail still labels DRAFT.
 	MailboxRole string
 	// MailboxName matches mailboxes.name exactly (case-insensitive).
 	MailboxName string
@@ -1129,10 +1131,30 @@ func (f MessageFilter) where() (string, []any) {
 		cond = append(cond, `m.deleted_at IS NULL`)
 	}
 	if f.MailboxRole != "" {
+		role := strings.ToLower(f.MailboxRole)
 		cond = append(cond, `EXISTS (SELECT 1 FROM message_mailboxes mm
 			JOIN mailboxes mb ON mb.id = mm.mailbox_id
 			WHERE mm.message_id = m.id AND lower(mb.role) = ?)`)
-		args = append(args, strings.ToLower(f.MailboxRole))
+		args = append(args, role)
+		// Asking for the drafts mailbox means asking what is still being
+		// written, and on Gmail that is not the same question. Its mailboxes
+		// are labels, so a draft that was sent or thrown away keeps DRAFT and
+		// gains TRASH: the membership is not stale, it is what Gmail reports,
+		// and one such row piles up per send. Gmail's own count of the label
+		// leaves them out -- it says zero drafts while three messages carry
+		// the label -- so a list that counts them disagrees with the server
+		// about a number the person can see. A message in the trash is not
+		// one anybody is still writing, whatever else it is filed under.
+		//
+		// Only the drafts role earns this. Every other mailbox is a place a
+		// message was put, and the trash view in particular has to go on
+		// showing the messages that are in it.
+		if role == string(model.RoleDrafts) {
+			cond = append(cond, `NOT EXISTS (SELECT 1 FROM message_mailboxes mmd
+				JOIN mailboxes mbd ON mbd.id = mmd.mailbox_id
+				WHERE mmd.message_id = m.id AND lower(mbd.role) = ?)`)
+			args = append(args, string(model.RoleTrash))
+		}
 	}
 	if f.MailboxName != "" {
 		cond = append(cond, `EXISTS (SELECT 1 FROM message_mailboxes mm2

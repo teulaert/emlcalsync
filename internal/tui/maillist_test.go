@@ -328,6 +328,38 @@ func TestMailListDraftsView(t *testing.T) {
 	}
 }
 
+// The drafts view is "what am I still writing", and a draft that went out is
+// not that. Gmail keeps DRAFT on it and adds TRASH, so one such row landed in
+// the drafts view after every single send and never left again.
+func TestMailListDraftsViewHidesASentDraft(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addDraft(t, d, "work", "w1", "t1", "Half written", 2*time.Hour)
+	addSentDraft(t, d, "work", "w2", "t2", "Re: already gone")
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	ml := pump(t, m, m.Init(), k, 100, 24).(*mailList)
+	for i := 0; i < 3; i++ { // inbox → all → flagged → drafts
+		s, cmd := ml.Update(keyPress("M"), k, 100, 24)
+		ml = pump(t, s, cmd, k, 100, 24).(*mailList)
+	}
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "Half written" {
+		t.Fatalf("drafts = %+v, want only the one still being written", ml.threads)
+	}
+
+	// It is in the trash, which is where it belongs and where it still shows.
+	for i := 0; i < 3; i++ { // drafts → sent → archive → trash
+		s, cmd := ml.Update(keyPress("M"), k, 100, 24)
+		ml = pump(t, s, cmd, k, 100, 24).(*mailList)
+	}
+	if got := mailboxCycle[ml.mailbox].label; got != "trash" {
+		t.Fatalf("landed on %q, want trash", got)
+	}
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "Re: already gone" {
+		t.Errorf("trash = %+v, want the sent draft", ml.threads)
+	}
+}
+
 // Trashed and spam mail is in the archive and always was in the "all" view,
 // mixed into everything else. The cycle now ends on the two views that isolate
 // it, so "what did I throw away" is a keypress rather than a search.

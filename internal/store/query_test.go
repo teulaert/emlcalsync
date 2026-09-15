@@ -708,3 +708,54 @@ func TestSenderName(t *testing.T) {
 		t.Errorf("name = %q", got)
 	}
 }
+
+// A draft the person is still writing is in the drafts mailbox. A draft that
+// was sent or thrown away is in the trash -- and on Gmail it is in both at
+// once, because the mailboxes there are labels and DRAFT stays on while TRASH
+// is added. Gmail's own count of the label leaves those out, so a drafts list
+// that counts them tells the person they have drafts the server says they do
+// not, one more after every send.
+func TestListMessagesDraftsExcludesTheTrash(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+	if err := s.ReplaceMailboxes(ctx, "work", []model.Mailbox{
+		{RemoteID: "mb-inbox", Name: "Inbox", Role: model.RoleInbox, SortOrder: 1},
+		{RemoteID: "mb-drafts", Name: "Drafts", Role: model.RoleDrafts, SortOrder: 2},
+		{RemoteID: "mb-trash", Name: "Trash", Role: model.RoleTrash, SortOrder: 3},
+	}); err != nil {
+		t.Fatalf("ReplaceMailboxes: %v", err)
+	}
+
+	put := func(remote string, boxes ...string) {
+		putMessage(t, s, &model.Message{
+			AccountID: "work", RemoteID: remote, ThreadID: "th-" + remote, Received: base,
+			Flags: model.Flags{Draft: true}, MailboxRemotes: boxes,
+		}, &mime.Parsed{
+			Subject: "Re: offerte Q4", From: addr("Me", "work@example.com"),
+			To: []model.Address{addr("Anna", "anna@example.com")}, Date: base,
+			TextBody: "half-written words",
+		})
+	}
+	put("live", "mb-drafts")
+	put("sent", "mb-drafts", "mb-trash") // the shape Gmail leaves behind
+	put("binned", "mb-trash")
+
+	msgs, err := s.ListMessages(ctx, MessageFilter{MailboxRole: "drafts"})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if got := remoteIDs(msgs); !equalStrings(got, []string{"live"}) {
+		t.Errorf("drafts = %v, want only the one still being written", got)
+	}
+
+	// The trash still shows everything that is in it: the rule is about what
+	// "drafts" means, not about hiding messages.
+	msgs, err = s.ListMessages(ctx, MessageFilter{MailboxRole: "trash"})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if got := remoteIDs(msgs); len(got) != 2 {
+		t.Errorf("trash = %v, want both trashed messages", got)
+	}
+}
