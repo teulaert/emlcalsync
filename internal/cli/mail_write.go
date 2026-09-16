@@ -806,7 +806,7 @@ type mailRespondOut struct {
 // REPLY itself and doing both would tell the organizer twice; by mail when no
 // calendar has it, which is the road `cal respond` had no way to take.
 func mailRespondCmd(app *App) *cobra.Command {
-	var accept, decline, tentative, dryRun bool
+	var accept, decline, tentative, dryRun, fileOnly bool
 	cmd := &cobra.Command{
 		Use:   "respond <message-id> --accept|--decline|--tentative",
 		Short: "RSVP to an invitation that arrived as mail",
@@ -817,8 +817,13 @@ The answer goes through whichever road reaches the organizer exactly once:
   calendar  the event is on a synced calendar, so the calendar server turns
             the changed PARTSTAT into the iTIP REPLY. Same as 'cal respond'.
   mail      no calendar holds it, so the REPLY is mailed to the organizer
-            directly (RFC 6047). The answer is recorded against the message,
-            because there is no event to carry it.
+            directly (RFC 6047), and the meeting is filed on the calendar so
+            that accepting it puts it on the agenda. A decline files nothing.
+
+--file-only files the meeting without answering, for an invitation already
+answered somewhere else — a webmail, a phone — where the organizer has the
+reply and the calendar has nothing. Say which answer was given, so the copy
+carries it: --accept or --tentative.
 
 --dry-run says which road it would take, and answers nothing.`,
 		Args: cobra.ExactArgs(1),
@@ -826,6 +831,10 @@ The answer goes through whichever road reaches the organizer exactly once:
 			resp, err := mailRSVPFlag(accept, decline, tentative)
 			if err != nil {
 				return err
+			}
+			if fileOnly && resp == model.PartDeclined {
+				return output.Errorf(output.ExitUsage,
+					"--file-only with --decline: a declined meeting is not put on the calendar")
 			}
 			ctx := cmd.Context()
 			account, msg, st, err := mailLoadMessage(ctx, app, args[0])
@@ -853,9 +862,21 @@ The answer goes through whichever road reaches the organizer exactly once:
 				ID: msg.PublicID(), Response: string(resp), Title: inv.Event.Title,
 				Route: "mail",
 			}
-			if local != nil {
+			if fileOnly {
+				out.Route = "calendar-only"
+			}
+			switch {
+			case local != nil && fileOnly:
+				// Already there. Nothing to file and nothing to answer, which
+				// is not a failure: it is the state the flag asks for.
+				out.Route, out.EventID = "calendar-only", local.PublicID()
+				return app.Printer().Print(out)
+			case local != nil:
 				out.Route, out.EventID = "calendar", local.PublicID()
-			} else {
+			case !fileOnly:
+				// Only the mail road names a recipient: --file-only sends
+				// nothing, and saying who it would have gone to invites the
+				// reader to think it did.
 				out.To = inv.Event.Organizer.Email
 			}
 			if dryRun {
@@ -866,7 +887,17 @@ The answer goes through whichever road reaches the organizer exactly once:
 			if err != nil {
 				return err
 			}
-			if local != nil {
+			switch {
+			case fileOnly:
+				ev, err := eng.FileInvitedEvent(ctx, account, msg.RemoteID, resp)
+				if err != nil {
+					return err
+				}
+				out.To = ""
+				if ev != nil {
+					out.EventID = ev.PublicID()
+				}
+			case local != nil:
 				res, err := eng.Apply(ctx, local.AccountID, sync.Op{
 					Kind:           sync.OpEventRespond,
 					CalendarRemote: local.CalendarRemote,
@@ -877,7 +908,7 @@ The answer goes through whichever road reaches the organizer exactly once:
 					return err
 				}
 				out.Queued = res.Queued
-			} else {
+			default:
 				res, err := eng.RespondByMail(ctx, account, msg.RemoteID, resp)
 				if err != nil {
 					return err
@@ -904,6 +935,8 @@ The answer goes through whichever road reaches the organizer exactly once:
 	f.BoolVar(&accept, "accept", false, "accept the invitation")
 	f.BoolVar(&decline, "decline", false, "decline the invitation")
 	f.BoolVar(&tentative, "tentative", false, "answer tentatively")
+	f.BoolVar(&fileOnly, "file-only", false,
+		"file the meeting on the calendar without answering (it was answered elsewhere)")
 	f.BoolVar(&dryRun, "dry-run", false, "print which road the answer would take, and answer nothing")
 	return cmd
 }

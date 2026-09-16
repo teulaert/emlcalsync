@@ -1315,3 +1315,92 @@ func TestMailRespondOnAMessageWithNoInvitation(t *testing.T) {
 		t.Errorf("exited %d, want 2", code)
 	}
 }
+
+// --file-only is for an invitation already answered somewhere else: the
+// organizer has the reply, the calendar has nothing. Answering again to get
+// the event would mail them a second identical REPLY.
+func TestMailRespondFileOnly(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	seedInviteEnv(t, env)
+
+	var out mailRespondOutput
+	raw := env.MustRun("mail", "respond", "work:m-invite", "--accept", "--file-only")
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	if out.Route != "calendar-only" {
+		t.Errorf("route = %q, want calendar-only", out.Route)
+	}
+	if out.EventID == "" {
+		t.Error("nothing was filed")
+	}
+	if n := len(env.Mail["work"].Sent()); n != 0 {
+		t.Errorf("%d messages went out — the point is that none does", n)
+	}
+
+	// The meeting is on the agenda, and the card agrees about the answer.
+	var agenda []struct {
+		Title string `json:"title"`
+	}
+	ag := env.MustRun("cal", "agenda", "--from", "2026-09-02", "--to", "2026-09-03")
+	if err := json.Unmarshal([]byte(ag), &agenda); err != nil {
+		t.Fatalf("decode agenda: %v\n%s", err, ag)
+	}
+	if len(agenda) != 1 || agenda[0].Title != "Momentum FO" {
+		t.Errorf("agenda = %+v", agenda)
+	}
+	var msg struct {
+		Invite *struct {
+			MyResponse  string `json:"my_response"`
+			NeedsAnswer bool   `json:"needs_answer"`
+			EventID     string `json:"event_id"`
+		} `json:"invite"`
+	}
+	read := env.MustRun("mail", "read", "work:m-invite")
+	if err := json.Unmarshal([]byte(read), &msg); err != nil {
+		t.Fatalf("decode: %v\n%s", err, read)
+	}
+	if msg.Invite == nil || msg.Invite.MyResponse != "accepted" ||
+		msg.Invite.NeedsAnswer || msg.Invite.EventID != out.EventID {
+		t.Errorf("after filing: %+v", msg.Invite)
+	}
+}
+
+// Filing what is already filed is the state the flag asks for, not a failure
+// — and it must still not send anything.
+func TestMailRespondFileOnlyWhenTheEventIsAlreadyThere(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	const uid = "040000008200E00074C5B7101A82E00800000000BB3DDF993738DD01000000000000000010000000D9B5581854DF3640B533A07A2B4B5089"
+	start := time.Date(2026, 9, 2, 8, 0, 0, 0, time.UTC)
+	env.Cal["work"].Put("primary", model.Event{
+		RemoteID: "ev-momentum", UID: uid, Title: "Momentum FO",
+		Start: start, End: start.Add(45 * time.Minute), Status: model.StatusConfirmed,
+		Organizer:  model.Address{Name: "Martijn Organiser", Email: "martijn@example.org"},
+		MyResponse: model.PartAccepted,
+	})
+	seedInviteEnv(t, env)
+
+	var out mailRespondOutput
+	raw := env.MustRun("mail", "respond", "work:m-invite", "--accept", "--file-only")
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	if out.Route != "calendar-only" || out.EventID != "work:c:primary:ev-momentum" {
+		t.Errorf("out = %+v", out)
+	}
+	if n := len(env.Mail["work"].Sent()); n != 0 {
+		t.Errorf("%d messages went out", n)
+	}
+}
+
+func TestMailRespondFileOnlyRefusesADecline(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	seedInviteEnv(t, env)
+
+	if _, _, code := env.Run("mail", "respond", "work:m-invite", "--decline", "--file-only"); code != 2 {
+		t.Errorf("exited %d, want 2 — a declined meeting is not put on the calendar", code)
+	}
+}

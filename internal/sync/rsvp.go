@@ -54,31 +54,8 @@ type RSVPResult struct {
 // what was said, there being no event to carry it.
 func (e *Engine) RespondByMail(ctx context.Context, account, messageRemote string,
 	resp model.Participation) (*RSVPResult, error) {
-	acct, ok := e.cfg.Account(account)
-	if !ok {
-		return nil, fmt.Errorf("sync: unknown account %q", account)
-	}
-	// The address, with no display name: an emlcal account has none, and
-	// `mail reply` sends the same way. itip.Reply answers under the name the
-	// organizer put on the attendee line, which is the better one anyway.
-	self := model.Address{Email: acct.Email}
-	if self.Email == "" {
-		return nil, fmt.Errorf("sync: account %q has no address to answer from", account)
-	}
-
-	msg, err := e.st.GetMessage(ctx, account, messageRemote)
+	msg, inv, self, err := e.invitationOf(ctx, account, messageRemote)
 	if err != nil {
-		return nil, err
-	}
-	raw, err := e.EnsureRaw(ctx, account, messageRemote)
-	if err != nil {
-		return nil, err
-	}
-	inv, err := itip.FromMessage(raw, self.Email)
-	if err != nil {
-		if errors.Is(err, itip.ErrNoInvite) {
-			return nil, fmt.Errorf("message %s carries no invitation", msg.PublicID())
-		}
 		return nil, err
 	}
 	reply, err := inv.Reply(self, resp, time.Now())
@@ -136,6 +113,74 @@ func (e *Engine) RespondByMail(ctx context.Context, account, messageRemote strin
 	return out, nil
 }
 
+// FileInvitedEvent puts an invitation's meeting on the calendar without
+// answering it, for one that has already been answered somewhere else.
+//
+// The obvious case is an invitation answered in a webmail or on a phone,
+// where the organizer has the reply and the calendar has nothing -- and the
+// one this was written for, an answer emlcal itself sent before it knew how
+// to file the meeting as well. Answering again to get the event would mail
+// the organizer a second identical REPLY, which is a poor way to ask one's
+// own calendar for something.
+//
+// resp is what was answered, because the copy has to carry a PARTSTAT and
+// this is the only place left that knows it. Declining files nothing, here as
+// everywhere.
+func (e *Engine) FileInvitedEvent(ctx context.Context, account, messageRemote string,
+	resp model.Participation) (*model.Event, error) {
+	_, inv, self, err := e.invitationOf(ctx, account, messageRemote)
+	if err != nil {
+		return nil, err
+	}
+	if inv.Method != itip.MethodRequest {
+		return nil, fmt.Errorf("%w: this is a %s", itip.ErrNotAnswerable, strings.ToLower(inv.Kind()))
+	}
+	ev, err := e.fileInvitedEvent(ctx, account, inv, self, resp)
+	if err != nil {
+		return nil, err
+	}
+	// The archive's record of the answer goes with it, so the card agrees
+	// with the calendar about what was said.
+	if err := e.st.SetITIPResponse(ctx, account, messageRemote, resp); err != nil {
+		e.log.Warn("record the RSVP", "account", account, "remote", messageRemote, "err", err)
+	}
+	return ev, nil
+}
+
+// invitationOf loads the message, its invitation and the address the account
+// answers as -- what both roads need before they can do anything.
+func (e *Engine) invitationOf(ctx context.Context, account, messageRemote string) (
+	*model.Message, *itip.Invite, model.Address, error) {
+	var self model.Address
+	acct, ok := e.cfg.Account(account)
+	if !ok {
+		return nil, nil, self, fmt.Errorf("sync: unknown account %q", account)
+	}
+	// The address, with no display name: an emlcal account has none, and
+	// `mail reply` sends the same way. itip.Reply answers under the name the
+	// organizer put on the attendee line, which is the better one anyway.
+	self = model.Address{Email: acct.Email}
+	if self.Email == "" {
+		return nil, nil, self, fmt.Errorf("sync: account %q has no address to answer from", account)
+	}
+	msg, err := e.st.GetMessage(ctx, account, messageRemote)
+	if err != nil {
+		return nil, nil, self, err
+	}
+	raw, err := e.EnsureRaw(ctx, account, messageRemote)
+	if err != nil {
+		return nil, nil, self, err
+	}
+	inv, err := itip.FromMessage(raw, self.Email)
+	if err != nil {
+		if errors.Is(err, itip.ErrNoInvite) {
+			return nil, nil, self, fmt.Errorf("message %s carries no invitation", msg.PublicID())
+		}
+		return nil, nil, self, err
+	}
+	return msg, inv, self, nil
+}
+
 // fileInvitedEvent puts the meeting on the calendar once its RSVP has gone
 // out, so that accepting something makes it appear on the agenda.
 //
@@ -154,7 +199,7 @@ func (e *Engine) fileInvitedEvent(ctx context.Context, account string, inv *itip
 	self model.Address, resp model.Participation) (*model.Event, error) {
 	// Declining is answered, not attended. Filing a meeting the person has
 	// just said no to would put it on the agenda as though they were going.
-	if resp == model.PartDeclined {
+	if resp == model.PartDeclined || resp == model.PartNeedsAction {
 		return nil, nil
 	}
 	cal, err := e.primaryCalendar(ctx, account)

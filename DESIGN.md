@@ -844,7 +844,11 @@ told, and that is the part that cannot be taken back.
 
 `mail respond <message-id>` picks between the two roads, so neither a person
 nor an agent has to know which applies; `cal respond <event-id>` is the same
-answer entered from the agenda side.
+answer entered from the agenda side. `--file-only` is the third case: an
+invitation answered somewhere else -- a webmail, a phone -- where the
+organizer has the reply and the calendar has nothing. It files the meeting
+and sends nothing, because answering again to get the event would mail the
+organizer a second identical REPLY.
 
 ---
 
@@ -913,10 +917,12 @@ emlcal mail draft  --account A --to .. [--cc ..] --subject .. (--body .. | --bod
                    [--reply <id> [--all]] [--attach f]         → draft id
 emlcal mail send   --draft <id>  |  (same flags as draft) [--dry-run]
 emlcal mail reply  <id> (--body .. | --body-file f) [--all] [--dry-run]
-emlcal mail respond <id> --accept|--decline|--tentative [--dry-run]
+emlcal mail respond <id> --accept|--decline|--tentative [--file-only] [--dry-run]
                    RSVP to a mailed invitation, by whichever road reaches the
-                   organizer once: the calendar when one holds the event,
-                   else an iTIP REPLY mailed to the organizer (§8.1)
+                   organizer once: the calendar when one holds the event, else
+                   an iTIP REPLY mailed to them and the meeting filed (§8.1).
+                   --file-only files it without answering, for one answered
+                   somewhere else
 
 CALENDAR — read
 emlcal cal calendars [--account A]
