@@ -248,3 +248,111 @@ func TestReexpandAll(t *testing.T) {
 		t.Fatalf("%d occurrences after re-expansion, want 3", got)
 	}
 }
+
+// A recurring event created here has to be expanded before the call returns.
+// The series is expanded by UID, and the UID is the provider's -- CalDAV
+// mints one when the caller supplies none, Google answers with its own -- so
+// a master indexed under the UID we sent has no occurrences at all until some
+// later full sync notices.
+func TestEventCreateRecurringIsExpandedUnderTheProvidersUID(t *testing.T) {
+	h := newHarness(t)
+	h.sync(SyncOptions{Calendar: true})
+	start := baseTime()
+
+	// No UID: the provider assigns one, which is the case that used to be
+	// silently unexpandable.
+	ev := &model.Event{
+		Title: "Weekly sync", CalendarRemote: "primary",
+		Start: start, End: start.Add(30 * time.Minute), Timezone: "UTC",
+		Status: model.StatusConfirmed,
+		RRule:  "FREQ=WEEKLY;COUNT=3",
+	}
+	res, err := h.eng.Apply(context.Background(), "work", Op{
+		Kind: OpEventCreate, Event: ev, CalendarRemote: "primary",
+	})
+	if err != nil {
+		t.Fatalf("Apply create: %v", err)
+	}
+
+	stored, err := h.st.GetEvent(context.Background(), "work", "primary", res.RemoteID)
+	if err != nil {
+		t.Fatalf("GetEvent: %v", err)
+	}
+	if stored.UID == "" {
+		t.Fatal("the stored master has no UID, so nothing can expand it")
+	}
+	provider, ok := h.cal.event("primary", res.RemoteID)
+	if !ok {
+		t.Fatal("the event never reached the provider")
+	}
+	if stored.UID != provider.UID {
+		t.Errorf("index holds uid %q, provider holds %q", stored.UID, provider.UID)
+	}
+	if stored.RRule != "FREQ=WEEKLY;COUNT=3" {
+		t.Errorf("stored rrule = %q", stored.RRule)
+	}
+
+	var n int
+	for _, o := range h.occurrences() {
+		if o.Event == res.RemoteID {
+			n++
+		}
+	}
+	if n != 3 {
+		t.Fatalf("the new series has %d occurrences, want 3 straight after the create", n)
+	}
+}
+
+// Clearing the rule on an update collapses the series back to one occurrence,
+// in the index as well as on the provider.
+func TestEventUpdateClearingRRuleCollapsesTheSeries(t *testing.T) {
+	h := newHarness(t)
+	h.sync(SyncOptions{Calendar: true})
+	start := baseTime()
+
+	ev := &model.Event{
+		Title: "Weekly sync", CalendarRemote: "primary",
+		Start: start, End: start.Add(30 * time.Minute), Timezone: "UTC",
+		Status: model.StatusConfirmed, RRule: "FREQ=WEEKLY;COUNT=3",
+	}
+	res, err := h.eng.Apply(context.Background(), "work", Op{
+		Kind: OpEventCreate, Event: ev, CalendarRemote: "primary",
+	})
+	if err != nil {
+		t.Fatalf("Apply create: %v", err)
+	}
+	stored, err := h.st.GetEvent(context.Background(), "work", "primary", res.RemoteID)
+	if err != nil {
+		t.Fatalf("GetEvent: %v", err)
+	}
+
+	cleared := *stored
+	cleared.RRule = ""
+	if _, err := h.eng.Apply(context.Background(), "work", Op{
+		Kind: OpEventUpdate, Event: &cleared, CalendarRemote: "primary",
+	}); err != nil {
+		t.Fatalf("Apply update: %v", err)
+	}
+
+	after, err := h.st.GetEvent(context.Background(), "work", "primary", res.RemoteID)
+	if err != nil {
+		t.Fatalf("GetEvent: %v", err)
+	}
+	if after.RRule != "" {
+		t.Errorf("index still holds rrule %q", after.RRule)
+	}
+	if got, ok := h.cal.event("primary", res.RemoteID); !ok {
+		t.Fatal("the event vanished from the provider")
+	} else if got.RRule != "" {
+		t.Errorf("the provider still holds rrule %q", got.RRule)
+	}
+	var n int
+	for _, o := range h.occurrences() {
+		if o.Event == res.RemoteID {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("the cleared event has %d occurrences, want 1", n)
+	}
+}

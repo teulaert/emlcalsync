@@ -91,8 +91,8 @@ emlcal mail reply <id> (--body .. | --body-file f) [--all] [--dry-run]
 emlcal mail forward <id> --to .. [--body ..] [--no-attachments] [--dry-run]
 emlcal mail respond <id> --accept|--decline|--tentative [--dry-run]
 emlcal cal create --title .. --start .. --end .. [--calendar C] [--attendees ..] \
-                  [--location ..] [--description ..] [--meet] [--dry-run]
-emlcal cal update <id> [same flags]
+                  [--location ..] [--description ..] [--rrule ..] [--meet] [--dry-run]
+emlcal cal update <id> [same flags]       --rrule "FREQ=WEEKLY;BYDAY=MO", "" removes it
 emlcal cal delete <id>
 emlcal cal respond <id> --accept|--decline|--tentative
 ```

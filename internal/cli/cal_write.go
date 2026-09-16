@@ -23,6 +23,7 @@ type calEventFlags struct {
 	attendees   []string
 	location    string
 	description string
+	rrule       string
 	meet        bool
 	dryRun      bool
 }
@@ -37,6 +38,9 @@ func (f *calEventFlags) bind(cmd *cobra.Command) {
 	fl.StringSliceVar(&f.attendees, "attendees", nil, "comma-separated attendee addresses")
 	fl.StringVar(&f.location, "location", "", "location")
 	fl.StringVar(&f.description, "description", "", "description")
+	fl.StringVar(&f.rrule, "rrule", "",
+		"recurrence rule, RFC 5545, with or without the RRULE: prefix "+
+			"(e.g. \"FREQ=WEEKLY;BYDAY=MO\"); on update, \"\" removes it")
 	fl.BoolVar(&f.meet, "meet", false, "attach a Google Meet link (Google Calendar accounts only)")
 	fl.BoolVar(&f.dryRun, "dry-run", false, "print what would be sent and exit 0 without touching the provider")
 }
@@ -122,10 +126,14 @@ func calTargetCalendar(app *App, account, name string) (*model.Calendar, error) 
 
 // calResultOut is what a create/update prints.
 type calResultOut struct {
-	ID       string      `json:"id"                table:"ID"`
-	Queued   bool        `json:"queued"            table:"QUEUED"`
-	Title    string      `json:"title"             table:"TITLE"`
-	Meet     string      `json:"meet_url,omitempty" table:"MEET"`
+	ID     string `json:"id"                table:"ID"`
+	Queued bool   `json:"queued"            table:"QUEUED"`
+	Title  string `json:"title"             table:"TITLE"`
+	Meet   string `json:"meet_url,omitempty" table:"MEET"`
+	// RRule echoes the stored recurrence, so a create or update that set one
+	// says what it set -- the value is normalised on the way in, and the
+	// caller should see the form that was kept rather than the one typed.
+	RRule    string      `json:"rrule,omitempty"   table:"REPEATS,max=28"`
 	When     string      `json:"-"                 table:"WHEN"`
 	Start    output.Time `json:"start"             table:"-"`
 	StartUTC int64       `json:"start_utc"`
@@ -142,6 +150,7 @@ func calResult(ev *model.Event, account, calRemote, remoteID string, queued bool
 		Queued:   queued,
 		Title:    ev.Title,
 		Meet:     ev.ConferenceURL,
+		RRule:    ev.RRule,
 		When:     calendar.FormatRange(ev.Start, ev.End, ev.AllDay, loc),
 		Start:    output.T(ev.Start),
 		StartUTC: ev.Start.Unix(),
@@ -199,6 +208,10 @@ command exits 6.`,
 			if err != nil {
 				return err
 			}
+			rule, err := calendar.ParseRRule(f.rrule)
+			if err != nil {
+				return output.Errorf(output.ExitUsage, "--rrule: %v", err)
+			}
 			ev := &model.Event{
 				AccountID:        acct.Name,
 				CalendarID:       cal.ID,
@@ -210,6 +223,7 @@ command exits 6.`,
 				End:              end,
 				AllDay:           f.allDay,
 				Timezone:         loc.String(),
+				RRule:            rule,
 				Attendees:        calAttendees(f.attendees),
 				Status:           model.StatusConfirmed,
 				CreateConference: f.meet,
@@ -352,6 +366,18 @@ supported — delete it and create it again.`,
 			}
 			if changed("all-day") {
 				ev.AllDay = f.allDay
+			}
+			if changed("rrule") {
+				// The empty value is the point of passing the flag at all:
+				// --rrule "" is how a series is turned back into a single
+				// event, and it has to reach the provider as a clearing
+				// write rather than as silence (see
+				// provider.CalendarProvider.UpdateEvent).
+				rule, err := calendar.ParseRRule(f.rrule)
+				if err != nil {
+					return output.Errorf(output.ExitUsage, "--rrule: %v", err)
+				}
+				ev.RRule = rule
 			}
 			if changed("start") {
 				t, err := calendar.ParseWhen(f.start, app.Now(), loc)

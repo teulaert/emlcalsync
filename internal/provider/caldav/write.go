@@ -363,12 +363,18 @@ func applyModel(ve *ical.Event, ev *model.Event, create bool) {
 		}
 	}
 
-	switch {
-	case ev.RRule != "":
+	// Recurrence is written on every path, including the empty one. The
+	// other fields above keep what the object already holds when the model
+	// says nothing, which is right for properties this package does not fully
+	// own -- but an RRULE it does own, and ev carries the whole desired state
+	// (see provider.CalendarProvider). Leaving the existing rule in place on
+	// an update was how `cal update --rrule ""` cleared the index and left the
+	// series running on the server, to be handed back by the next sync.
+	if ev.RRule != "" {
 		p := ical.NewProp(ical.PropRecurrenceRule)
 		p.Value = strings.TrimPrefix(strings.TrimSpace(ev.RRule), "RRULE:")
 		ve.Props.Set(p)
-	case create:
+	} else {
 		ve.Props.Del(ical.PropRecurrenceRule)
 	}
 

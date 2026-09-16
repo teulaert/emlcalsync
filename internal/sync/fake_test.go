@@ -650,6 +650,19 @@ func (f *fakeCalendar) Put(calRemote string, ev model.Event) {
 	f.putLocked(calRemote, ev)
 }
 
+// event returns the provider's own copy, so a test can check what actually
+// reached it rather than what the index believes.
+func (f *fakeCalendar) event(calRemote, remote string) (model.Event, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if in := f.events[calRemote]; in != nil {
+		if ev, ok := in[remote]; ok && ev != nil {
+			return *ev, true
+		}
+	}
+	return model.Event{}, false
+}
+
 func (f *fakeCalendar) putLocked(calRemote string, ev model.Event) {
 	if f.events[calRemote] == nil {
 		f.events[calRemote] = map[string]*model.Event{}
@@ -761,6 +774,13 @@ func (f *fakeCalendar) CreateEvent(ctx context.Context, calendarRemote string, e
 	out := *ev
 	out.RemoteID = fmt.Sprintf("ev-%d", f.nextID)
 	out.CalendarRemote = calendarRemote
+	// Backends mint the UID when the caller supplies none: CalDAV generates
+	// one for the object's href, Google answers with its own iCalUID. The
+	// fake does the same, because a caller that never sees a UID come back is
+	// a caller whose recurring events are expanded under the wrong key.
+	if out.UID == "" {
+		out.UID = "uid-" + out.RemoteID
+	}
 	f.putLocked(calendarRemote, out)
 	return &out, nil
 }
