@@ -40,6 +40,12 @@ type Invite struct {
 	// the recipient's own PARTSTAT as the sender wrote it, which for a fresh
 	// invitation is needs-action.
 	Event model.Event
+	// Raw is the iCalendar object the invitation was read from. Reply reads
+	// SEQUENCE and RECURRENCE-ID back out of it: the event model carries
+	// neither, and an RSVP that drops them is one the organizer files against
+	// the wrong version of the meeting, or against the whole series instead of
+	// the one occurrence that moved.
+	Raw []byte
 }
 
 // Parse reads an iCalendar object. selfEmail marks the recipient's own
@@ -52,7 +58,7 @@ func Parse(ics []byte, selfEmail string) (*Invite, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("itip: no VEVENT in the calendar part")
 	}
-	return &Invite{Method: method, Event: events[0]}, nil
+	return &Invite{Method: method, Event: events[0], Raw: ics}, nil
 }
 
 // FromMessage reads the invitation out of a raw RFC 822 message, or returns

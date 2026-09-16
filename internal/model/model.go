@@ -179,6 +179,12 @@ type Message struct {
 	Flags          Flags
 	MailboxRemotes []string // remote ids of mailboxes this message is in
 
+	// ITIPResponse is how this message's invitation was answered, when the
+	// answer went to the organizer by mail because no calendar held the
+	// event. An RSVP made through the calendar leaves its mark on the event
+	// instead, and this stays empty. See migrations/0008_itip_response.sql.
+	ITIPResponse Participation
+
 	DeletedAt *time.Time
 	IndexedAt time.Time
 }

@@ -66,18 +66,41 @@ type bodyLoaded struct {
 }
 
 // readerInvite is an invitation as the reader shows it: what the mail says,
-// and the calendar's own copy of the event when the index has one -- which
-// is what an answer goes through, and what enter opens.
+// the calendar's own copy of the event when the index has one -- which is
+// what enter opens -- and enough about the message to answer from here.
 type readerInvite struct {
 	inv     *itip.Invite
 	local   *model.Event
 	calName string
+	// account and remote name the message the invitation arrived in, which is
+	// what an answer mailed to the organizer is sent about. The event has no
+	// say in that: there may not be one.
+	account, remote string
+	// replied is what the archive recorded when an answer went out by mail.
+	// It is the only record of it, there being no event to carry it.
+	replied model.Participation
 }
 
-// answerable reports whether y/n/t mean anything here: an invitation, with a
-// synced calendar copy to answer on.
+// answerable reports whether y/n/t mean anything here.
+//
+// Both roads count. The calendar one is preferred and needs a synced copy of
+// the event; the mail one needs only an organizer to send to, which every
+// real invitation has. Requiring the calendar copy is what used to make an
+// invitation the server never filed unanswerable from here -- the keys were
+// not offered and the card said "not on a synced calendar yet", which reads
+// as "wait" for something that was never going to arrive.
 func (ri *readerInvite) answerable() bool {
-	return ri != nil && ri.local != nil && ri.inv.Method == itip.MethodRequest
+	if ri == nil || ri.inv.Method != itip.MethodRequest {
+		return false
+	}
+	return ri.local != nil || ri.byMail()
+}
+
+// byMail reports whether answering means mailing the organizer rather than
+// writing to the calendar: the road for an invitation no calendar holds.
+func (ri *readerInvite) byMail() bool {
+	return ri != nil && ri.local == nil &&
+		ri.inv.Event.Organizer.Email != "" && ri.account != "" && ri.remote != ""
 }
 
 type agendaLoaded struct {
@@ -125,7 +148,11 @@ func closeScreen() tea.Cmd { return func() tea.Msg { return screenClosed{} } }
 
 // applied reports the outcome of one Engine.Apply.
 type applied struct {
-	action  string
+	action string
+	// detail is appended to the status line after the action, for a write
+	// whose name does not say the whole of what happened -- an RSVP that went
+	// to the organizer by mail rather than through the calendar, say.
+	detail  string
 	account string
 	queued  bool
 	renames map[string]string
@@ -279,14 +306,19 @@ func (d Deps) loadInvite(ctx context.Context, m *model.Message, atts []model.Att
 		}
 		return nil
 	}
-	out := &readerInvite{inv: inv}
+	out := &readerInvite{
+		inv: inv, account: m.AccountID, remote: m.RemoteID, replied: m.ITIPResponse,
+	}
 	if evs, err := d.Store.FindEventsByUID(ctx, d.Accounts, inv.Event.UID); err == nil {
 		out.local = itip.Match(evs, m.AccountID)
 	}
-	if out.local != nil {
-		// The calendar knows the answer better than the mail does: an
-		// invitation accepted last week still says needs-action in the
-		// message.
+	// What was answered, best source first. The message itself is the worst:
+	// an invitation accepted last week still says needs-action in the bytes
+	// that arrived. The calendar's copy is live. In between is what the
+	// archive recorded when the answer was mailed to the organizer, which is
+	// all there is when no calendar ever filed the event.
+	switch {
+	case out.local != nil:
 		if out.local.MyResponse != "" {
 			inv.Event.MyResponse = out.local.MyResponse
 		}
@@ -294,6 +326,8 @@ func (d Deps) loadInvite(ctx context.Context, m *model.Message, atts []model.Att
 		if c, err := d.Store.GetCalendarByRemote(ctx, out.local.AccountID, out.local.CalendarRemote); err == nil && c.Name != "" {
 			out.calName = c.Name
 		}
+	case out.replied != "":
+		inv.Event.MyResponse = out.replied
 	}
 	return out
 }
@@ -917,4 +951,34 @@ func (d Deps) viewDir() string {
 		return d.ViewDir
 	}
 	return config.ViewDir()
+}
+
+// respondByMail answers an invitation no calendar holds, by mailing the
+// organizer the iTIP REPLY.
+//
+// It comes back as an ordinary `applied`, so the status line, the queued-while-
+// offline wording and the reload that follows an RSVP are the ones every other
+// write gets. The detail names the organizer: where a calendar RSVP is
+// self-evidently about the event on screen, this one put a message in
+// somebody's inbox, and the person pressing y should see that it did.
+func (d Deps) respondByMail(account, remote string, p model.Participation) tea.Cmd {
+	return func() tea.Msg {
+		out := applied{action: string(p), account: account}
+		if d.Engine == nil {
+			out.err = errors.New("no engine")
+			return out
+		}
+		// A send is a round trip to the provider, not an index write: the
+		// budget is the one a send gets.
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		res, err := d.Engine.RespondByMail(ctx, account, remote, p)
+		if err != nil {
+			out.err = err
+			return out
+		}
+		out.detail = " — mailed to " + res.To.Email
+		out.queued = res.Apply.Queued
+		return out
+	}
 }

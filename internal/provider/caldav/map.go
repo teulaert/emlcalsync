@@ -445,8 +445,11 @@ func mapPartStat(s string) model.Participation {
 	}
 }
 
-// partStatString is mapPartStat's inverse, for writes.
-func partStatString(p model.Participation) string {
+// PartStatString is mapPartStat's inverse, for writes. It is exported because
+// internal/itip builds an iTIP REPLY of its own -- the RSVP that goes to the
+// organizer by mail when no calendar holds the event -- and the PARTSTAT it
+// writes has to be the one a CalDAV write would have produced.
+func PartStatString(p model.Participation) string {
 	switch p {
 	case model.PartAccepted:
 		return "ACCEPTED"

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -1018,7 +1019,10 @@ func TestMailReadInvite(t *testing.T) {
 		"Where:      Microsoft Teams-vergadering",
 		"Organizer:  Martijn Organiser <martijn@example.org>",
 		"You:        not answered",
-		"Answer:     emlcal cal respond work:c:primary:ev-momentum --accept|--decline|--tentative",
+		// `mail respond` is offered whether or not a calendar holds it: it is
+		// the command that picks the road, so the card need not.
+		"Answer:     emlcal mail respond work:m-invite --accept|--decline|--tentative",
+		"Event:      work:c:primary:ev-momentum",
 		"Microsoft Teams meeting",
 	} {
 		if !strings.Contains(human, want) {
@@ -1054,9 +1058,11 @@ func TestMailReadInvite(t *testing.T) {
 	}
 }
 
-// TestMailReadInviteWithoutCalendarCopy is the invitation the calendar has
-// not synced (or an account with no calendar): the card still shows, and
-// says there is nothing to answer on yet.
+// TestMailReadInviteWithoutCalendarCopy is the invitation no calendar holds
+// -- not synced, never filed by the server, or an account with no calendar at
+// all. It is still answerable: `mail respond` mails the organizer the reply
+// directly. The card has to say so, because "not on a synced calendar" on its
+// own reads as a dead end, which is what it used to be.
 func TestMailReadInviteWithoutCalendarCopy(t *testing.T) {
 	env := newTestEnv(t)
 	raw, err := os.ReadFile(filepath.Join("..", "mime", "testdata", "invite.eml"))
@@ -1079,7 +1085,175 @@ func TestMailReadInviteWithoutCalendarCopy(t *testing.T) {
 		t.Errorf("invite = %+v", msg.Invite)
 	}
 	human := env.MustRun("mail", "read", "work:m-invite", "-o", "table")
-	if !strings.Contains(human, "Event:      not on a synced calendar yet") {
-		t.Errorf("human output:\n%s", human)
+	if !strings.Contains(human, "Answer:     emlcal mail respond work:m-invite --accept|--decline|--tentative") {
+		t.Errorf("the card offers no way to answer:\n%s", human)
+	}
+}
+
+// mailRespondOutput is what `mail respond` prints.
+type mailRespondOutput struct {
+	ID       string `json:"id"`
+	Response string `json:"response"`
+	Route    string `json:"route"`
+	Queued   bool   `json:"queued"`
+	Title    string `json:"title"`
+	To       string `json:"to"`
+	EventID  string `json:"event_id"`
+}
+
+func seedInviteEnv(t *testing.T, env *testEnv) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "mime", "testdata", "invite.eml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.Seed("work", fake.NewMsg("m-invite", raw).WithReceived(env.Now.Add(-time.Hour)))
+}
+
+// An invitation no calendar holds is answered by mailing the organizer an
+// iTIP REPLY. This is the case `cal respond` could not reach at all: there is
+// no event id to name, so there was nothing to type.
+func TestMailRespondByMail(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	seedInviteEnv(t, env)
+
+	var out mailRespondOutput
+	raw := env.MustRun("mail", "respond", "work:m-invite", "--accept")
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	if out.Route != "mail" {
+		t.Errorf("route = %q, want mail", out.Route)
+	}
+	if out.Response != "accepted" || out.To != "martijn@example.org" || out.Title != "Momentum FO" {
+		t.Errorf("out = %+v", out)
+	}
+	if out.EventID != "" {
+		t.Errorf("event_id = %q, want none", out.EventID)
+	}
+
+	sent := env.Mail["work"].Sent()
+	if len(sent) != 1 {
+		t.Fatalf("%d messages went out, want 1", len(sent))
+	}
+	if !bytes.Contains(sent[0], []byte("method=REPLY")) {
+		t.Errorf("what went out is not an iTIP reply:\n%s", sent[0])
+	}
+	if !bytes.Contains(sent[0], []byte("Subject: Accepted: Momentum FO")) {
+		t.Errorf("subject:\n%s", sent[0])
+	}
+
+	// And the card stops asking, because nothing else remembers.
+	var msg struct {
+		Invite *struct {
+			MyResponse    string `json:"my_response"`
+			NeedsAnswer   bool   `json:"needs_answer"`
+			RepliedByMail bool   `json:"replied_by_mail"`
+		} `json:"invite"`
+	}
+	read := env.MustRun("mail", "read", "work:m-invite")
+	if err := json.Unmarshal([]byte(read), &msg); err != nil {
+		t.Fatalf("decode: %v\n%s", err, read)
+	}
+	if msg.Invite == nil || msg.Invite.MyResponse != "accepted" ||
+		msg.Invite.NeedsAnswer || !msg.Invite.RepliedByMail {
+		t.Errorf("after answering: %+v", msg.Invite)
+	}
+	if !strings.Contains(env.MustRun("mail", "read", "work:m-invite", "-o", "table"),
+		"Event:      answered by mail to the organizer") {
+		t.Error("the card does not say the answer went by mail")
+	}
+}
+
+// When a calendar does hold the event, the answer goes through it instead:
+// the calendar server sends the REPLY, and sending one here as well would
+// tell the organizer twice.
+func TestMailRespondPrefersTheCalendar(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	const uid = "040000008200E00074C5B7101A82E00800000000BB3DDF993738DD01000000000000000010000000D9B5581854DF3640B533A07A2B4B5089"
+	start := time.Date(2026, 9, 2, 8, 0, 0, 0, time.UTC)
+	env.Cal["work"].Put("primary", model.Event{
+		RemoteID: "ev-momentum", UID: uid, Title: "Momentum FO",
+		Start: start, End: start.Add(45 * time.Minute), Status: model.StatusConfirmed,
+		Organizer:  model.Address{Name: "Martijn Organiser", Email: "martijn@example.org"},
+		Attendees:  []model.Attendee{{Email: "lennert@example.com", Response: model.PartNeedsAction, Self: true}},
+		MyResponse: model.PartNeedsAction,
+	})
+	seedInviteEnv(t, env)
+
+	var out mailRespondOutput
+	raw := env.MustRun("mail", "respond", "work:m-invite", "--decline")
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	if out.Route != "calendar" || out.EventID != "work:c:primary:ev-momentum" {
+		t.Errorf("out = %+v, want the calendar road", out)
+	}
+	if n := len(env.Mail["work"].Sent()); n != 0 {
+		t.Errorf("%d messages went out as well as the calendar write", n)
+	}
+
+	var msg struct {
+		Invite *struct {
+			MyResponse  string `json:"my_response"`
+			NeedsAnswer bool   `json:"needs_answer"`
+		} `json:"invite"`
+	}
+	read := env.MustRun("mail", "read", "work:m-invite")
+	if err := json.Unmarshal([]byte(read), &msg); err != nil {
+		t.Fatalf("decode: %v\n%s", err, read)
+	}
+	if msg.Invite == nil || msg.Invite.MyResponse != "declined" || msg.Invite.NeedsAnswer {
+		t.Errorf("after declining: %+v", msg.Invite)
+	}
+}
+
+// --dry-run says which road it would take and answers nothing, so an agent
+// can look before it tells somebody's organizer anything.
+func TestMailRespondDryRun(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	seedInviteEnv(t, env)
+
+	var out mailRespondOutput
+	raw := env.MustRun("mail", "respond", "work:m-invite", "--tentative", "--dry-run")
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	if out.Route != "mail" || out.Response != "tentative" {
+		t.Errorf("out = %+v", out)
+	}
+	if n := len(env.Mail["work"].Sent()); n != 0 {
+		t.Errorf("--dry-run sent %d messages", n)
+	}
+}
+
+func TestMailRespondNeedsExactlyOneAnswer(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	seedInviteEnv(t, env)
+
+	// 2 is the usage exit, the same one every other misuse gets.
+	for _, args := range [][]string{
+		{"mail", "respond", "work:m-invite"},
+		{"mail", "respond", "work:m-invite", "--accept", "--decline"},
+	} {
+		if _, _, code := env.Run(args...); code != 2 {
+			t.Errorf("%v exited %d, want 2", args, code)
+		}
+	}
+}
+
+func TestMailRespondOnAMessageWithNoInvitation(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	env.Seed("work", fake.NewMsg("m-plain", []byte(
+		"From: a@example.org\r\nSubject: Note\r\n\r\nNothing to answer.\r\n")).
+		WithReceived(env.Now.Add(-time.Hour)))
+
+	if _, _, code := env.Run("mail", "respond", "work:m-plain", "--accept"); code != 2 {
+		t.Errorf("exited %d, want 2", code)
 	}
 }

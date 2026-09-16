@@ -40,6 +40,10 @@ type Draft struct {
 	// recipient can read. Set it only when the transport needs the header
 	// (some JMAP/Gmail submission paths) or for a copy filed in Sent.
 	IncludeBcc bool
+
+	// Calendar makes this an iTIP message: an RSVP, in practice. See
+	// DraftCalendar.
+	Calendar *DraftCalendar
 }
 
 // DraftAttachment is a file to attach.
@@ -47,6 +51,25 @@ type DraftAttachment struct {
 	Filename    string
 	ContentType string // defaults to application/octet-stream
 	Data        []byte
+}
+
+// DraftCalendar is a scheduling payload the message carries as its body
+// rather than as a file clipped to it -- the difference between a mail about
+// a meeting and a mail that *is* an answer to one.
+//
+// It goes out as text/calendar with a method parameter, inside a
+// multipart/alternative next to the plain text. That shape is what RFC 6047
+// asks for and what the schedulers in the field read: the method on the part
+// is what tells a receiving Exchange or Google that the body is an RSVP to
+// process rather than an attachment to show, and the text alternative is what
+// a client that schedules nothing falls back to.
+type DraftCalendar struct {
+	// Method is REPLY, REQUEST or CANCEL. It is written both into the
+	// Content-Type parameter and, by whoever built Content, into the payload;
+	// a receiver may read either.
+	Method string
+	// Content is the iCalendar object.
+	Content []byte
 }
 
 const (
@@ -116,7 +139,7 @@ func Build(d *Draft) ([]byte, error) {
 	}
 
 	var out bytes.Buffer
-	if len(d.Attachments) == 0 {
+	if len(d.Attachments) == 0 && d.Calendar == nil {
 		writeHeader(&h, "Content-Type", "text/plain; charset=utf-8")
 		writeHeader(&h, "Content-Transfer-Encoding", "quoted-printable")
 		out.Write(h.Bytes())
@@ -125,6 +148,27 @@ func Build(d *Draft) ([]byte, error) {
 			return nil, err
 		}
 		return out.Bytes(), nil
+	}
+
+	// The body of an iTIP message is the text and the calendar object saying
+	// the same thing two ways, which is a multipart/alternative. Files clipped
+	// to a message are something else again, so when there are both the
+	// alternative becomes the first part of the mixed -- the nesting RFC 2046
+	// §5.1.7 describes, and the one a reader has to see to show the text
+	// rather than the ics.
+	if d.Calendar != nil {
+		alt, ctype, err := buildAlternative(body, d.Calendar)
+		if err != nil {
+			return nil, err
+		}
+		if len(d.Attachments) == 0 {
+			writeHeader(&h, "Content-Type", ctype)
+			out.Write(h.Bytes())
+			out.WriteString("\r\n")
+			out.Write(alt)
+			return out.Bytes(), nil
+		}
+		return buildMixed(&h, &out, ctype, alt, d.Attachments)
 	}
 
 	var parts bytes.Buffer
@@ -144,7 +188,23 @@ func Build(d *Draft) ([]byte, error) {
 		return nil, err
 	}
 
-	for _, a := range d.Attachments {
+	if err := writeAttachments(mw, d.Attachments); err != nil {
+		return nil, err
+	}
+	if err := mw.Close(); err != nil {
+		return nil, err
+	}
+
+	writeHeader(&h, "Content-Type", "multipart/mixed; boundary="+mw.Boundary())
+	out.Write(h.Bytes())
+	out.WriteString("\r\n")
+	out.Write(parts.Bytes())
+	return out.Bytes(), nil
+}
+
+// writeAttachments adds one base64 part per file.
+func writeAttachments(mw *multipart.Writer, atts []DraftAttachment) error {
+	for _, a := range atts {
 		ct := strings.TrimSpace(a.ContentType)
 		if ct == "" {
 			ct = "application/octet-stream"
@@ -162,20 +222,88 @@ func Build(d *Draft) ([]byte, error) {
 		}
 		pw, err := mw.CreatePart(hdr)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if err := writeBase64(pw, a.Data); err != nil {
-			return nil, err
+			return err
 		}
+	}
+	return nil
+}
+
+// buildAlternative renders the text/plain and text/calendar halves of an iTIP
+// message, and returns them with the Content-Type the enclosing header needs.
+//
+// The text comes first. A multipart/alternative is ordered worst-to-best, and
+// "best" here is the machine-readable half: a client that schedules shows the
+// invitation, one that does not shows the sentence.
+func buildAlternative(body string, cal *DraftCalendar) (parts []byte, contentType string, err error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.SetBoundary(randomBoundary()); err != nil {
+		return nil, "", err
+	}
+	tp, err := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {"text/plain; charset=utf-8"},
+		"Content-Transfer-Encoding": {"quoted-printable"},
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if err := writeQP(tp, body); err != nil {
+		return nil, "", err
+	}
+
+	ctype := "text/calendar; charset=utf-8"
+	if m := strings.ToUpper(strings.TrimSpace(cal.Method)); m != "" {
+		ctype += "; method=" + m
+	}
+	// base64, not quoted-printable: an iCalendar object folds its own long
+	// lines at 75 octets and a quoted-printable re-wrap would fold them again
+	// somewhere else, which some parsers unfold wrongly. base64 hands the
+	// bytes over exactly as they were written.
+	cp, err := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type":              {ctype},
+		"Content-Transfer-Encoding": {"base64"},
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	if err := writeBase64(cp, cal.Content); err != nil {
+		return nil, "", err
+	}
+	if err := mw.Close(); err != nil {
+		return nil, "", err
+	}
+	return buf.Bytes(), "multipart/alternative; boundary=" + mw.Boundary(), nil
+}
+
+// buildMixed wraps an already-rendered body part and the attachments in a
+// multipart/mixed, and writes the whole message into out.
+func buildMixed(h *bytes.Buffer, out *bytes.Buffer, innerType string, inner []byte,
+	atts []DraftAttachment) ([]byte, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.SetBoundary(randomBoundary()); err != nil {
+		return nil, err
+	}
+	bp, err := mw.CreatePart(textproto.MIMEHeader{"Content-Type": {innerType}})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := bp.Write(inner); err != nil {
+		return nil, err
+	}
+	if err := writeAttachments(mw, atts); err != nil {
+		return nil, err
 	}
 	if err := mw.Close(); err != nil {
 		return nil, err
 	}
-
-	writeHeader(&h, "Content-Type", "multipart/mixed; boundary="+mw.Boundary())
+	writeHeader(h, "Content-Type", "multipart/mixed; boundary="+mw.Boundary())
 	out.Write(h.Bytes())
 	out.WriteString("\r\n")
-	out.Write(parts.Bytes())
+	out.Write(buf.Bytes())
 	return out.Bytes(), nil
 }
 

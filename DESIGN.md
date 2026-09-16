@@ -775,6 +775,55 @@ the message that should go the other way. When pictures are left out the
 references stay in the page, so a broken image says "there was one here", and
 the header block says which way the page was rendered.
 
+### 8.1 Invitations and RSVPs (`internal/itip`)
+
+A message that carries a `text/calendar` part carries an iTIP object (RFC
+5546): an invitation, an update, a cancellation, or somebody else's answer.
+`internal/itip` reads it out of the raw bytes on demand -- the index only
+records that the part is there -- and builds the card the reader and `mail
+read` show.
+
+Answering one has two roads, and the whole of the difficulty is that taking
+both tells the organizer twice.
+
+- **Through the calendar.** Where a server holds the event, changing the
+  account's own `PARTSTAT` is the answer: the calendar server turns it into
+  the REPLY and mails the organizer itself (RFC 6638 scheduling). This is
+  `OpEventRespond`, what `cal respond` does, and what the TUI's `y`/`n`/`t`
+  did exclusively. It is preferred, because the answer then also lives where
+  the agenda can see it.
+- **By mail.** Where no calendar holds the event, `itip.Invite.Reply` builds
+  the REPLY itself and `Engine.RespondByMail` sends it to the organizer as
+  `text/calendar; method=REPLY` inside a `multipart/alternative` (RFC 6047).
+
+The second road exists because the first is not always available, and the
+cases where it is not are exactly the ones that need answering. A server that
+processes iMIP normally files an invitation on the calendar as the mail
+arrives -- but not always, and an account may sync mail and no calendar at
+all. Before this, such an invitation could not be answered from emlcal in any
+way: the card said the event was "not on a synced calendar yet", which reads
+as "wait" for something that was never going to arrive.
+
+The reply is built rather than edited from the request, since a REPLY is a
+different object and carrying the difference by deletion is how one forgets
+something. It carries the one attendee who answered, the UID, the ORGANIZER,
+and `SEQUENCE` / `RECURRENCE-ID` read back off the original bytes (`Invite.Raw`)
+-- the event model carries neither, and without them the organizer files the
+answer against the wrong revision, or against the series instead of the one
+occurrence. Times go out in UTC: the request states them against a VTIMEZONE
+it carries, and copying a time without the zone that defines it would move the
+meeting.
+
+What is answered that way is recorded on the message
+(`messages.itip_response`, migration 0008) rather than anywhere else, because
+there is no event to carry it -- that being the premise. The column is absent
+from `UpsertMessage`'s list, so a re-sync leaves it alone: the provider has no
+opinion about it and would only overwrite it with nothing.
+
+`mail respond <message-id>` picks between the two roads, so neither a person
+nor an agent has to know which applies; `cal respond <event-id>` is the same
+answer entered from the agenda side.
+
 ---
 
 ## 9. CLI surface
@@ -842,6 +891,10 @@ emlcal mail draft  --account A --to .. [--cc ..] --subject .. (--body .. | --bod
                    [--reply <id> [--all]] [--attach f]         → draft id
 emlcal mail send   --draft <id>  |  (same flags as draft) [--dry-run]
 emlcal mail reply  <id> (--body .. | --body-file f) [--all] [--dry-run]
+emlcal mail respond <id> --accept|--decline|--tentative [--dry-run]
+                   RSVP to a mailed invitation, by whichever road reaches the
+                   organizer once: the calendar when one holds the event,
+                   else an iTIP REPLY mailed to the organizer (§8.1)
 
 CALENDAR — read
 emlcal cal calendars [--account A]

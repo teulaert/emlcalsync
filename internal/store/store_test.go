@@ -1245,3 +1245,52 @@ func TestConcurrentReadersAndWriter(t *testing.T) {
 		t.Fatalf("IntegrityCheck = %q %v", report, err)
 	}
 }
+
+// The answer to an invitation the calendar never filed lives on the message,
+// because there is no event to carry it. What makes the column worth having
+// is that a re-sync leaves it alone: the provider has no opinion about it, so
+// UpsertMessage must not write over it with nothing.
+func TestITIPResponseSurvivesAResync(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+
+	msg := &model.Message{
+		AccountID: "work", RemoteID: "m1", ThreadID: "t1", Received: base,
+		Subject: "AI & LPMW groep", MailboxRemotes: []string{"mb-inbox"},
+	}
+	putMessage(t, s, msg, nil)
+
+	if err := s.SetITIPResponse(ctx, "work", "m1", model.PartAccepted); err != nil {
+		t.Fatalf("SetITIPResponse: %v", err)
+	}
+	got, err := s.GetMessage(ctx, "work", "m1")
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if got.ITIPResponse != model.PartAccepted {
+		t.Fatalf("response = %q, want accepted", got.ITIPResponse)
+	}
+
+	// The delta fetches the message again, knowing nothing about the answer.
+	putMessage(t, s, &model.Message{
+		AccountID: "work", RemoteID: "m1", ThreadID: "t1", Received: base,
+		Subject: "AI & LPMW groep", MailboxRemotes: []string{"mb-inbox"},
+	}, nil)
+	got, err = s.GetMessage(ctx, "work", "m1")
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	if got.ITIPResponse != model.PartAccepted {
+		t.Errorf("a re-sync wiped the answer: %q", got.ITIPResponse)
+	}
+}
+
+func TestITIPResponseOnAMessageThatIsNotThere(t *testing.T) {
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+	err := s.SetITIPResponse(context.Background(), "work", "nope", model.PartAccepted)
+	if !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}

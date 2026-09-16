@@ -89,6 +89,7 @@ emlcal mail draft --account A --to .. [--cc ..] --subject .. (--body .. | --body
 emlcal mail send --draft <id> | (same flags as draft) [--dry-run]
 emlcal mail reply <id> (--body .. | --body-file f) [--all] [--dry-run]
 emlcal mail forward <id> --to .. [--body ..] [--no-attachments] [--dry-run]
+emlcal mail respond <id> --accept|--decline|--tentative [--dry-run]
 emlcal cal create --title .. --start .. --end .. [--calendar C] [--attendees ..] \
                   [--location ..] [--description ..] [--meet] [--dry-run]
 emlcal cal update <id> [same flags]
@@ -102,7 +103,7 @@ Examples:
 emlcal mail reply work:18f3a2b9c1d4e5f6 --body "Works for me — see you Tuesday." --dry-run
 emlcal mail archive work:18f3a2b9c1d4e5f6
 emlcal cal create --title "Design review" --start "2026-09-01T14:00" --end "2026-09-01T15:00" --dry-run
-emlcal cal respond home:c:primary:abc123 --accept
+emlcal mail respond work:18f3a2b9c1d4e5f6 --accept --dry-run
 ```
 
 `--dry-run` prints exactly what would be sent (full RFC 822 for mail) and exits
@@ -142,9 +143,9 @@ under `attachments` as `invite.ics`) also has `invite`:
 ```
 
 `kind` is `invitation`, `cancellation`, `reply` or `event`. `event_id` is the
-calendar's own copy of the event and is what `cal respond` takes; when it is
-missing the calendar has not synced the event yet (run `emlcal sync`) or the
-account has no calendar, and the invite cannot be answered from here.
+calendar's copy of the event; missing means no calendar holds it. `mail
+respond` answers either way. `replied_by_mail` marks one answered by mailing
+the organizer, where `my_response` is what emlcal recorded, not a calendar.
 
 `cal agenda` — an array of:
 
@@ -183,9 +184,10 @@ account has no calendar, and the invite cannot be answered from here.
 - Never `trash`, `delete` or `move` anything unless the user asked for it.
   Archiving is not deleting, but it still needs their say-so.
 - Quote the message id when you report a finding, so the user can jump to it.
-- An invitation is answered on the calendar, not by mail: read the message,
-  then `cal respond <invite.event_id> --accept|--decline|--tentative`. Do not
-  reply to the organizer's mail instead.
+- Answer an invitation with `mail respond <id> --accept|--decline|--tentative`,
+  which picks its road: the calendar when one holds the event, else an iTIP
+  reply mailed to the organizer. Never send prose instead — a scheduler reads
+  the calendar part, not words. `cal respond <event-id>` answers from the agenda.
 - If results look stale or a message the user mentions is missing, run
   `emlcal status` to see the last sync and whether the daemon runs, then
   `emlcal sync` once.

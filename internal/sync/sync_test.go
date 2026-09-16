@@ -573,3 +573,10 @@ func TestUnknownMailboxTriggersARefresh(t *testing.T) {
 		t.Fatalf("mailbox list not refreshed: %+v", boxes)
 	}
 }
+
+// sentMessages is the raw bytes of everything the provider was asked to send.
+func (h *harness) sentMessages() [][]byte {
+	h.mail.mu.Lock()
+	defer h.mail.mu.Unlock()
+	return append([][]byte(nil), h.mail.sentRaw...)
+}

@@ -1,0 +1,15 @@
+-- The answer to an invitation no calendar holds.
+--
+-- An RSVP normally goes through the calendar: the server that holds the event
+-- turns a changed PARTSTAT into the iTIP REPLY, and the answer is then simply
+-- the event's my_response. But an invitation the calendar never filed -- the
+-- mail arrived, the server did not process it -- has no event to carry the
+-- answer, and mailing the organizer a REPLY leaves nothing behind that says
+-- so. The card would go on asking a question that has been answered.
+--
+-- itip_response is that answer: the participation this message's invitation
+-- was replied to with, set when the reply was mailed rather than filed. It is
+-- deliberately absent from UpsertMessage's column list, so a re-sync of the
+-- message leaves it alone -- the provider has no opinion about it and would
+-- only overwrite it with nothing.
+ALTER TABLE messages ADD COLUMN itip_response TEXT;

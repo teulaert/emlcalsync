@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	stdmime "mime"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/teulaert/emlcalsync/internal/compose"
 	"github.com/teulaert/emlcalsync/internal/config"
+	"github.com/teulaert/emlcalsync/internal/itip"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
@@ -769,4 +771,149 @@ once the reply has actually gone out.`,
 	f.register(cmd, false, false)
 	cmd.Flags().BoolVar(&f.all, "all", false, "reply to all recipients")
 	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// mail respond
+
+// mailRespondOut is what `mail respond` prints. Route says how the answer
+// reached the organizer, which is the one thing about an RSVP that is not
+// obvious from having asked for it.
+type mailRespondOut struct {
+	ID       string `json:"id"                 table:"ID"`
+	Response string `json:"response"           table:"RESPONSE"`
+	Route    string `json:"route"              table:"ROUTE"`
+	Queued   bool   `json:"queued"             table:"QUEUED"`
+	Title    string `json:"title"              table:"TITLE,max=40"`
+	// To is the organizer, on the mail route. On the calendar route the
+	// server decides who hears, so there is nobody here to name.
+	To      string `json:"to,omitempty"       table:"TO,max=30"`
+	EventID string `json:"event_id,omitempty"`
+}
+
+// mailRespondCmd is the RSVP that starts from the mail rather than from the
+// calendar.
+//
+// `cal respond` needs an event id, which assumes the invitation was filed --
+// and the ones that most need answering are exactly the ones that were not.
+// This takes the message and works out how to answer it: through the calendar
+// when a copy of the event is there, because a server that holds it sends the
+// REPLY itself and doing both would tell the organizer twice; by mail when no
+// calendar has it, which is the road `cal respond` had no way to take.
+func mailRespondCmd(app *App) *cobra.Command {
+	var accept, decline, tentative, dryRun bool
+	cmd := &cobra.Command{
+		Use:   "respond <message-id> --accept|--decline|--tentative",
+		Short: "RSVP to an invitation that arrived as mail",
+		Long: `RSVP to an invitation that arrived as mail.
+
+The answer goes through whichever road reaches the organizer exactly once:
+
+  calendar  the event is on a synced calendar, so the calendar server turns
+            the changed PARTSTAT into the iTIP REPLY. Same as 'cal respond'.
+  mail      no calendar holds it, so the REPLY is mailed to the organizer
+            directly (RFC 6047). The answer is recorded against the message,
+            because there is no event to carry it.
+
+--dry-run says which road it would take, and answers nothing.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resp, err := mailRSVPFlag(accept, decline, tentative)
+			if err != nil {
+				return err
+			}
+			ctx := cmd.Context()
+			account, msg, st, err := mailLoadMessage(ctx, app, args[0])
+			if err != nil {
+				return err
+			}
+			raw, err := mailRawBytes(ctx, app, msg)
+			if err != nil {
+				return err
+			}
+			inv, err := itip.FromMessage(raw, mailSelfEmail(ctx, app, st, account))
+			if err != nil {
+				if errors.Is(err, itip.ErrNoInvite) {
+					return output.Errorf(output.ExitUsage,
+						"message %s carries no invitation", msg.PublicID())
+				}
+				return err
+			}
+
+			var local *model.Event
+			if evs, err := st.FindEventsByUID(ctx, nil, inv.Event.UID); err == nil {
+				local = itip.Match(evs, account)
+			}
+			out := mailRespondOut{
+				ID: msg.PublicID(), Response: string(resp), Title: inv.Event.Title,
+				Route: "mail",
+			}
+			if local != nil {
+				out.Route, out.EventID = "calendar", local.PublicID()
+			} else {
+				out.To = inv.Event.Organizer.Email
+			}
+			if dryRun {
+				return app.Printer().Print(out)
+			}
+
+			eng, err := app.Engine()
+			if err != nil {
+				return err
+			}
+			if local != nil {
+				res, err := eng.Apply(ctx, local.AccountID, sync.Op{
+					Kind:           sync.OpEventRespond,
+					CalendarRemote: local.CalendarRemote,
+					IDs:            []string{local.RemoteID},
+					Response:       resp,
+				})
+				if err != nil {
+					return err
+				}
+				out.Queued = res.Queued
+			} else {
+				res, err := eng.RespondByMail(ctx, account, msg.RemoteID, resp)
+				if err != nil {
+					return err
+				}
+				out.Queued = res.Apply.Queued
+				out.To = res.To.Email
+			}
+			if err := app.Printer().Print(out); err != nil {
+				return err
+			}
+			if out.Queued {
+				return Queued(1)
+			}
+			return nil
+		},
+	}
+	f := cmd.Flags()
+	f.BoolVar(&accept, "accept", false, "accept the invitation")
+	f.BoolVar(&decline, "decline", false, "decline the invitation")
+	f.BoolVar(&tentative, "tentative", false, "answer tentatively")
+	f.BoolVar(&dryRun, "dry-run", false, "print which road the answer would take, and answer nothing")
+	return cmd
+}
+
+// mailRSVPFlag turns the three booleans into the one answer, or says that
+// exactly one of them is the point.
+func mailRSVPFlag(accept, decline, tentative bool) (model.Participation, error) {
+	var resp model.Participation
+	n := 0
+	for _, c := range []struct {
+		on bool
+		p  model.Participation
+	}{{accept, model.PartAccepted}, {decline, model.PartDeclined}, {tentative, model.PartTentative}} {
+		if c.on {
+			resp = c.p
+			n++
+		}
+	}
+	if n != 1 {
+		return "", output.Errorf(output.ExitUsage,
+			"mail respond needs exactly one of --accept, --decline, --tentative")
+	}
+	return resp, nil
 }

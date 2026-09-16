@@ -384,6 +384,11 @@ type mailInviteOut struct {
 	MyResponse  string           `json:"my_response,omitempty"`
 	NeedsAnswer bool             `json:"needs_answer"`
 	EventID     string           `json:"event_id,omitempty"`
+	// RepliedByMail is set when the answer went to the organizer as an iTIP
+	// REPLY because no calendar held the event. There is no EventID then, and
+	// MyResponse comes from what the archive recorded rather than from a
+	// calendar -- see store migration 0008.
+	RepliedByMail bool `json:"replied_by_mail,omitempty"`
 	// fields is the human card, built alongside for mailPrintReadable.
 	fields []itip.Field
 }
@@ -419,16 +424,26 @@ func mailInviteOf(ctx context.Context, app *App, st *store.Store, msg *model.Mes
 	if evs, err := st.FindEventsByUID(ctx, nil, inv.Event.UID); err == nil {
 		local = itip.Match(evs, msg.AccountID)
 	}
-	return mailInviteRow(inv, local, app.Location())
+	return mailInviteRow(inv, local, msg.ITIPResponse, app.Location())
 }
 
-// mailInviteRow builds the card. The calendar's copy, when there is one,
-// knows the answer better than the mail does: an invitation accepted last
-// week still says needs-action in the message.
-func mailInviteRow(inv *itip.Invite, local *model.Event, loc *time.Location) *mailInviteOut {
+// mailInviteRow builds the card.
+//
+// The message is the worst of the three sources for what was answered: an
+// invitation accepted last week still says needs-action in the bytes that
+// arrived. The calendar's copy is the best, being live. In between is what
+// the archive recorded when the answer was mailed to the organizer instead --
+// which is all there is for an invitation no calendar ever filed.
+func mailInviteRow(inv *itip.Invite, local *model.Event, recorded model.Participation,
+	loc *time.Location) *mailInviteOut {
 	ev := &inv.Event
-	if local != nil && local.MyResponse != "" {
+	repliedByMail := false
+	switch {
+	case local != nil && local.MyResponse != "":
 		ev.MyResponse = local.MyResponse
+	case recorded != "":
+		ev.MyResponse = recorded
+		repliedByMail = true
 	}
 	out := &mailInviteOut{
 		Kind:        inv.Kind(),
@@ -448,6 +463,7 @@ func mailInviteRow(inv *itip.Invite, local *model.Event, loc *time.Location) *ma
 		NeedsAnswer: inv.NeedsAnswer(),
 		fields:      inv.Fields(loc),
 	}
+	out.RepliedByMail = repliedByMail
 	if ev.Organizer.Email != "" || ev.Organizer.Name != "" {
 		org := ev.Organizer
 		out.Organizer = &org
@@ -523,13 +539,23 @@ func mailPrintReadable(w io.Writer, out mailReadOut) error {
 		for _, f := range inv.fields {
 			fmt.Fprintf(&b, "%-11s %s\n", f.Key+":", f.Value)
 		}
+		// An invitation is answered through the calendar when a calendar
+		// holds it, and by mail when none does -- and `mail respond` picks
+		// between the two itself, so it is the one to offer either way. The
+		// event id is still named when there is one: it is what `cal show`
+		// and the agenda call the same meeting.
 		switch {
-		case inv.EventID != "" && inv.NeedsAnswer:
-			fmt.Fprintf(&b, "%-11s emlcal cal respond %s --accept|--decline|--tentative\n", "Answer:", inv.EventID)
+		case inv.NeedsAnswer && inv.Kind == "invitation":
+			fmt.Fprintf(&b, "%-11s emlcal mail respond %s --accept|--decline|--tentative\n", "Answer:", out.ID)
+			if inv.EventID != "" {
+				fmt.Fprintf(&b, "%-11s %s\n", "Event:", inv.EventID)
+			}
 		case inv.EventID != "":
 			fmt.Fprintf(&b, "%-11s %s\n", "Event:", inv.EventID)
+		case inv.RepliedByMail:
+			fmt.Fprintf(&b, "%-11s answered by mail to the organizer\n", "Event:")
 		case inv.Kind == "invitation":
-			fmt.Fprintf(&b, "%-11s not on a synced calendar yet\n", "Event:")
+			fmt.Fprintf(&b, "%-11s not on a synced calendar\n", "Event:")
 		}
 	}
 	b.WriteString("\n")

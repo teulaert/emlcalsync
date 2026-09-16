@@ -2,6 +2,7 @@ package mime
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -342,5 +343,95 @@ func TestBuildLongBodyLineWraps(t *testing.T) {
 	}
 	if p.TextBody != body {
 		t.Errorf("5000-byte body line did not round-trip (%d bytes back)", len(p.TextBody))
+	}
+}
+
+// An RSVP is a message whose body *is* the calendar object. The shape has to
+// survive the archive's own reader, because that reader is what decides a
+// message carries an invitation at all -- and it is the same parser shape the
+// organizer's scheduler is looking for.
+func TestBuildCalendarPart(t *testing.T) {
+	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\n" +
+		"UID:u1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	raw, err := Build(&Draft{
+		From:     model.Address{Email: "me@example.com"},
+		To:       []model.Address{{Email: "organizer@example.org"}},
+		Subject:  "Accepted: Standup",
+		TextBody: "I have accepted the invitation.",
+		Calendar: &DraftCalendar{Method: "REPLY", Content: []byte(ics)},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if !bytes.Contains(raw, []byte("Content-Type: multipart/alternative")) {
+		t.Errorf("the message is not a multipart/alternative:\n%s", raw)
+	}
+	if !bytes.Contains(raw, []byte("method=REPLY")) {
+		t.Errorf("the calendar part does not name its method:\n%s", raw)
+	}
+
+	p, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if p.Calendar == nil {
+		t.Fatal("the reader does not see a calendar part")
+	}
+	if p.Calendar.Method != "REPLY" {
+		t.Errorf("method = %q, want REPLY", p.Calendar.Method)
+	}
+	if p.TextBody != "I have accepted the invitation." {
+		t.Errorf("text body = %q", p.TextBody)
+	}
+	got, _, _, err := PartContent(raw, p.Calendar.Path)
+	if err != nil {
+		t.Fatalf("PartContent: %v", err)
+	}
+	if string(got) != ics {
+		t.Errorf("the calendar object came back changed:\n%q\nwant\n%q", got, ics)
+	}
+}
+
+// Files clipped to an iTIP message are a different thing from the two halves
+// of its body, so the alternative nests inside the mixed rather than the
+// parts being flattened together -- which would leave a reader showing the
+// ics where the text belongs.
+func TestBuildCalendarPartWithAttachments(t *testing.T) {
+	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\nUID:u1\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	raw, err := Build(&Draft{
+		From:        model.Address{Email: "me@example.com"},
+		To:          []model.Address{{Email: "organizer@example.org"}},
+		Subject:     "Accepted: Standup",
+		TextBody:    "Yes.",
+		Calendar:    &DraftCalendar{Method: "REPLY", Content: []byte(ics)},
+		Attachments: []DraftAttachment{{Filename: "note.txt", ContentType: "text/plain", Data: []byte("hello")}},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if !bytes.Contains(raw, []byte("Content-Type: multipart/mixed")) {
+		t.Errorf("the message is not a multipart/mixed:\n%s", raw)
+	}
+
+	p, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if p.Calendar == nil || p.Calendar.Method != "REPLY" {
+		t.Errorf("calendar part = %+v", p.Calendar)
+	}
+	if p.TextBody != "Yes." {
+		t.Errorf("text body = %q", p.TextBody)
+	}
+	// The reader counts the calendar part among the attachments, the same as
+	// it does on an invitation that arrives -- what matters here is that the
+	// clipped file is still there beside it.
+	var files []string
+	for _, a := range p.Attachments {
+		files = append(files, a.Filename)
+	}
+	if !slices.Contains(files, "note.txt") {
+		t.Errorf("attachments = %v, want the clipped file among them", files)
 	}
 }

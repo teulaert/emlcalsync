@@ -146,7 +146,7 @@ func (c *Calendar) DeleteEvent(ctx context.Context, calendarRemote, remoteID str
 // PUTs it back, which is how a CalDAV client sends an RSVP: the server turns
 // the changed attendee line into the iTIP REPLY.
 func (c *Calendar) Respond(ctx context.Context, calendarRemote, remoteID string, resp model.Participation) error {
-	partstat := partStatString(resp)
+	partstat := PartStatString(resp)
 	if partstat == "" {
 		return fmt.Errorf("caldav: unknown participation status %q", resp)
 	}
@@ -340,7 +340,7 @@ func applyModel(ve *ical.Event, ev *model.Event, create bool) {
 				role = "OPT-PARTICIPANT"
 			}
 			p.Params.Set(ical.ParamRole, role)
-			ps := partStatString(a.Response)
+			ps := PartStatString(a.Response)
 			if ps == "" {
 				ps = "NEEDS-ACTION"
 			}

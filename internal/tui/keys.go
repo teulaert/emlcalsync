@@ -154,6 +154,7 @@ func (k keymap) helpLines() [][2]string {
 		{"v", "the files attached: enter opens one on the desktop, w saves it to the downloads folder"},
 		{"F", "show the quoted part a message hides — the reply it answers, the original it forwards"},
 		{"y / n / t", "on an event, or the mail inviting to one: accept / decline / tentative"},
+		{"", "  through the calendar when it holds the event, else mailed to the organizer"},
 		{"enter", "on an invitation: open the event on the calendar"},
 		{"  r", "on the summary: reply to the conversation"},
 		{"", ""},

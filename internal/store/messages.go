@@ -19,7 +19,7 @@ const messageCols = `m.id, m.account_id, m.remote_id, m.thread_id, m.blob_sha256
 	m.message_id_hdr, m.in_reply_to, m.references_json, m.subject, m.from_addr, m.from_name,
 	m.to_json, m.cc_json, m.bcc_json, m.reply_to_json, m.date_utc, m.received_utc, m.size,
 	m.snippet, m.has_attachments, m.is_unread, m.is_flagged, m.is_draft, m.is_answered,
-	m.deleted_at, m.indexed_at`
+	m.itip_response, m.deleted_at, m.indexed_at`
 
 // messageColsBody adds text_body; used by the single-message getters.
 const messageColsBody = messageCols + `, m.text_body`
@@ -34,7 +34,7 @@ type messageRow struct {
 	blob, msgID, inReplyTo, refs, subject                 sql.NullString
 	fromAddr, fromName                                    sql.NullString
 	toJSON, ccJSON, bccJSON, replyToJSON                  sql.NullString
-	snippet, textBody                                     sql.NullString
+	snippet, textBody, itipResponse                       sql.NullString
 	size, deletedAt                                       sql.NullInt64
 	dateUTC, receivedUTC, indexedAt                       int64
 	rawComplete, hasAtt, unread, flagged, draft, answered int64
@@ -48,7 +48,7 @@ func (r *messageRow) dest(withBody bool) []any {
 		&r.msgID, &r.inReplyTo, &r.refs, &r.subject, &r.fromAddr, &r.fromName,
 		&r.toJSON, &r.ccJSON, &r.bccJSON, &r.replyToJSON, &r.dateUTC, &r.receivedUTC, &r.size,
 		&r.snippet, &r.hasAtt, &r.unread, &r.flagged, &r.draft, &r.answered,
-		&r.deletedAt, &r.indexedAt,
+		&r.itipResponse, &r.deletedAt, &r.indexedAt,
 	}
 	if withBody {
 		d = append(d, &r.textBody)
@@ -83,6 +83,7 @@ func (r *messageRow) message() model.Message {
 		Draft:    r.draft != 0,
 		Answered: r.answered != 0,
 	}
+	m.ITIPResponse = model.Participation(r.itipResponse.String)
 	m.DeletedAt = timePtr(r.deletedAt)
 	m.IndexedAt = timeOf(r.indexedAt)
 	return m
@@ -465,6 +466,25 @@ func (s *Store) SetAttachmentRemoteRef(ctx context.Context, attachmentID int64, 
 	_, err := s.db.ExecContext(ctx, `UPDATE attachments SET remote_ref = ? WHERE id = ?`, nullStr(ref), attachmentID)
 	if err != nil {
 		return fmt.Errorf("store: set attachment ref: %w", err)
+	}
+	return nil
+}
+
+// SetITIPResponse records how an invitation was answered when the answer went
+// to the organizer by mail rather than through a calendar. See
+// migrations/0008_itip_response.sql for why the column exists and why
+// UpsertMessage does not touch it.
+//
+// Returns model.ErrNotFound if the message is not indexed.
+func (s *Store) SetITIPResponse(ctx context.Context, accountID, remote string, resp model.Participation) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE messages SET itip_response = ? WHERE account_id = ? AND remote_id = ?`,
+		nullStr(string(resp)), accountID, remote)
+	if err != nil {
+		return fmt.Errorf("store: set itip response: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return notFound("message %s:%s", accountID, remote)
 	}
 	return nil
 }

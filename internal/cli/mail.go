@@ -64,6 +64,7 @@ Examples:
 		mailDraftCmd(app),
 		mailSendCmd(app),
 		mailReplyCmd(app),
+		mailRespondCmd(app),
 		mailForwardCmd(app),
 	)
 	return cmd

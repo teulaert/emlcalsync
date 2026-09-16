@@ -298,15 +298,11 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case *reader:
 		if p, ok := s.rsvp(msg.String()); ok {
-			ev := s.invite.local
-			r.note("sending RSVP…")
-			return r, r.d.apply(string(p), respondOp(ev.AccountID, ev.CalendarRemote, ev.RemoteID, p), nil)
+			return r, r.answerInvite(s.invite, p)
 		}
 	case *threadView:
 		if p, ok := s.rsvp(msg.String()); ok {
-			ev := s.invite().local
-			r.note("sending RSVP…")
-			return r, r.d.apply(string(p), respondOp(ev.AccountID, ev.CalendarRemote, ev.RemoteID, p), nil)
+			return r, r.answerInvite(s.invite(), p)
 		}
 	}
 
@@ -474,6 +470,29 @@ func (r *root) open() tea.Cmd {
 			return nil
 		}
 		return r.push(newEventView(r.d, o.AccountID, o.CalendarRemote, o.CalendarName, o.EventRemoteID))
+	}
+	return nil
+}
+
+// answerInvite sends the RSVP by whichever road reaches the organizer exactly
+// once.
+//
+// A calendar that holds the event is the road: changing the PARTSTAT there is
+// what makes the calendar server send the iTIP REPLY, and it leaves the
+// answer where the agenda can see it. Only when no calendar has the event is
+// the reply mailed to the organizer directly -- doing both would tell them
+// twice, once from the server and once from here.
+func (r *root) answerInvite(ri *readerInvite, p model.Participation) tea.Cmd {
+	switch {
+	case ri == nil:
+		return nil
+	case ri.local != nil:
+		ev := ri.local
+		r.note("sending RSVP…")
+		return r.d.apply(string(p), respondOp(ev.AccountID, ev.CalendarRemote, ev.RemoteID, p), nil)
+	case ri.byMail():
+		r.note("mailing the RSVP to " + ri.inv.Event.Organizer.Email + "…")
+		return r.d.respondByMail(ri.account, ri.remote, p)
 	}
 	return nil
 }
@@ -988,7 +1007,7 @@ func (r *root) onApplied(a applied) tea.Cmd {
 	}
 	switch {
 	case a.queued:
-		r.note(a.action + " queued — offline, it will go out on the next sync")
+		r.note(a.action + a.detail + " queued — offline, it will go out on the next sync")
 	case a.undo != nil:
 		r.undo = a.undo
 		r.note(a.action + " · z to undo")
@@ -996,7 +1015,7 @@ func (r *root) onApplied(a applied) tea.Cmd {
 		// The mark-read that comes with landing on the next message must not
 		// wipe the undo offer the trash before it just put up.
 	default:
-		r.note(a.action)
+		r.note(a.action + a.detail)
 	}
 	return reload
 }

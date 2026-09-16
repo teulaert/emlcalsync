@@ -258,13 +258,23 @@ func inviteCard(ri *readerInvite, loc *time.Location, w int) []string {
 	for _, f := range ri.inv.Fields(loc) {
 		lines = append(lines, truncCells(padCells(f.Key+":", 12)+f.Value, w))
 	}
+	// The closing line says what pressing a key will do, and where the answer
+	// will go -- an RSVP that leaves by mail puts a message in the
+	// organizer's inbox, which is not what "accept" looks like it does.
+	faint := func(k, v string) {
+		lines = append(lines, styleFaint.Render(truncCells(padCells(k+":", 12)+v, w)))
+	}
 	switch {
+	case ri.answerable() && ri.inv.NeedsAnswer() && ri.byMail():
+		faint("Answer", "y accept · n decline · t tentative — replies to "+ri.inv.Event.Organizer.Email)
 	case ri.answerable() && ri.inv.NeedsAnswer():
-		lines = append(lines, styleFaint.Render(truncCells(padCells("Answer:", 12)+"y accept · n decline · t tentative", w)))
+		faint("Answer", "y accept · n decline · t tentative")
 	case ri.local != nil:
-		lines = append(lines, styleFaint.Render(truncCells(padCells("Calendar:", 12)+ri.calName+" · y/n/t changes the answer", w)))
+		faint("Calendar", ri.calName+" · y/n/t changes the answer")
+	case ri.replied != "":
+		faint("Calendar", "not on a calendar · answered to "+ri.inv.Event.Organizer.Email+" · y/n/t answers again")
 	case ri.inv.Method == itip.MethodRequest:
-		lines = append(lines, styleFaint.Render(truncCells(padCells("Calendar:", 12)+"not on a synced calendar yet", w)))
+		faint("Calendar", "not on a calendar, and the invitation names no organizer to reply to")
 	}
 	lines = append(lines, "")
 	return lines
@@ -317,7 +327,12 @@ func (r *reader) footer(w int) string {
 		f = "-"
 	}
 	if r.invite.answerable() {
-		return fmt.Sprintf("y accept · n decline · t tentative · %s · %d%%", f, int(r.vp.ScrollPercent()*100))
+		how := ""
+		if r.invite.byMail() {
+			how = " (by mail)"
+		}
+		return fmt.Sprintf("y accept · n decline · t tentative%s · %s · %d%%",
+			how, f, int(r.vp.ScrollPercent()*100))
 	}
 	return fmt.Sprintf("%s · %s · %d%%", r.msg.PublicID(), f, int(r.vp.ScrollPercent()*100))
 }
