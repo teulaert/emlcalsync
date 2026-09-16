@@ -314,8 +314,18 @@ func toAPIPatch(ev *model.Event) *calendarapi.Event {
 	if !ev.End.IsZero() {
 		patch.End = toAPITime(ev.End, ev.AllDay, ev.Timezone)
 	}
+	// Recurrence is the one field a patch cannot express by omission. Every
+	// other field here means "leave it alone" when it is empty, but an event
+	// that has just had its rule cleared is indistinguishable from one that
+	// never had a flag passed -- and Google keeps what it already holds. So
+	// the empty case is sent explicitly, as an empty array forced onto the
+	// wire: without ForceSendFields the JSON encoder drops it and the series
+	// survives the write that was meant to end it.
 	if ev.RRule != "" {
 		patch.Recurrence = []string{"RRULE:" + ev.RRule}
+	} else {
+		patch.Recurrence = []string{}
+		patch.ForceSendFields = append(patch.ForceSendFields, "Recurrence")
 	}
 	if ev.Status != "" {
 		patch.Status = string(ev.Status)

@@ -44,6 +44,10 @@ type fakeCalendar struct {
 	deleteQueries []url.Values
 	importQueries []url.Values
 	lastPatch     *calendarapi.Event
+	// lastPatchBody is the raw JSON. Clearing a repeated field is expressed
+	// by sending an empty array rather than omitting it, and only the bytes
+	// on the wire tell the two apart.
+	lastPatchBody []byte
 	lastInsert    *calendarapi.Event
 	lastImport    *calendarapi.Event
 	patchedID     string
@@ -168,14 +172,20 @@ func (f *fakeCalendar) handleInsert(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeCalendar) handlePatch(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
 	var patch calendarapi.Event
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+	if err := json.Unmarshal(body, &patch); err != nil {
 		apiError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lastPatch = &patch
+	f.lastPatchBody = body
 	f.patchQueries = append(f.patchQueries, r.URL.Query())
 	f.patchedID = r.PathValue("eid")
 
@@ -193,6 +203,11 @@ func (f *fakeCalendar) handlePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	if patch.Start != nil {
 		merged.Start = patch.Start
+	}
+	// Google's own patch semantics for a repeated field: an absent key leaves
+	// it alone, an empty array clears it.
+	if patch.Recurrence != nil {
+		merged.Recurrence = patch.Recurrence
 	}
 	f.events[f.patchedID] = &merged
 	f.writeJSON(w, &merged)
@@ -1008,5 +1023,83 @@ func TestImportEventNeedsAUIDAndAnOrganizer(t *testing.T) {
 	noOrganizer.UID = "u1"
 	if _, err := c.ImportEvent(context.Background(), "cal-1", &noOrganizer); err == nil {
 		t.Error("imported an event with no organizer — Google requires one")
+	}
+}
+
+// A created series carries its rule in the insert body, prefixed the way
+// Google's RECURRENCE field expects.
+func TestCreateEventSendsRecurrence(t *testing.T) {
+	f := newFakeCalendar(t)
+	c := newCal(t, f)
+	if _, err := c.CreateEvent(context.Background(), "cal-1", &model.Event{
+		Title:    "Weekly sync",
+		Start:    time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC),
+		End:      time.Date(2026, 9, 7, 10, 30, 0, 0, time.UTC),
+		Timezone: "UTC",
+		RRule:    "FREQ=WEEKLY;BYDAY=MO",
+	}); err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	f.mu.Lock()
+	ins := f.lastInsert
+	f.mu.Unlock()
+	if len(ins.Recurrence) != 1 || ins.Recurrence[0] != "RRULE:FREQ=WEEKLY;BYDAY=MO" {
+		t.Errorf("insert recurrence = %v", ins.Recurrence)
+	}
+}
+
+func TestUpdateEventChangesRecurrence(t *testing.T) {
+	f := newFakeCalendar(t)
+	c := newCal(t, f)
+	f.events["ev-r"] = &calendarapi.Event{
+		Id: "ev-r", Summary: "Weekly sync", Status: statusConfirmed,
+		Recurrence: []string{"RRULE:FREQ=WEEKLY"},
+	}
+	if _, err := c.UpdateEvent(context.Background(), &model.Event{
+		CalendarRemote: "cal-1", RemoteID: "ev-r", Title: "Weekly sync",
+		RRule: "FREQ=DAILY;COUNT=2",
+	}); err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+	f.mu.Lock()
+	stored := f.events["ev-r"]
+	f.mu.Unlock()
+	if len(stored.Recurrence) != 1 || stored.Recurrence[0] != "RRULE:FREQ=DAILY;COUNT=2" {
+		t.Errorf("recurrence after update = %v", stored.Recurrence)
+	}
+}
+
+// Clearing is the case a patch cannot express by omission: Google keeps what
+// it holds unless told otherwise, so an empty array has to reach the wire.
+// Omitting the field is how `cal update --rrule ""` used to clear the index
+// and leave the series running on the server, to be handed straight back by
+// the next sync.
+func TestUpdateEventClearsRecurrenceWithAnEmptyArray(t *testing.T) {
+	f := newFakeCalendar(t)
+	c := newCal(t, f)
+	f.events["ev-r"] = &calendarapi.Event{
+		Id: "ev-r", Summary: "Weekly sync", Status: statusConfirmed,
+		Recurrence: []string{"RRULE:FREQ=WEEKLY"},
+	}
+	if _, err := c.UpdateEvent(context.Background(), &model.Event{
+		CalendarRemote: "cal-1", RemoteID: "ev-r", Title: "Weekly sync", RRule: "",
+	}); err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+
+	f.mu.Lock()
+	body, patch, stored := string(f.lastPatchBody), f.lastPatch, f.events["ev-r"]
+	f.mu.Unlock()
+
+	// On the wire, not merely in the struct: without ForceSendFields the
+	// encoder drops an empty slice and the server is told nothing at all.
+	if !strings.Contains(body, `"recurrence":[]`) {
+		t.Errorf("the patch body does not clear recurrence:\n%s", body)
+	}
+	if patch.Recurrence == nil {
+		t.Error("recurrence arrived as absent rather than as empty")
+	}
+	if len(stored.Recurrence) != 0 {
+		t.Errorf("the server still holds recurrence %v", stored.Recurrence)
 	}
 }

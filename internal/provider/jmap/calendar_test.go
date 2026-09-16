@@ -1455,3 +1455,47 @@ func TestWritesRefuseOverrideInstances(t *testing.T) {
 		t.Errorf("%d writes reached the server", n)
 	}
 }
+
+// JMAP clears by patching the rules away, which it already did — this pins
+// it, because the same clearing write on the other two backends needed
+// fixing and nothing said which of the three was right.
+func TestUpdateEventClearsRecurrence(t *testing.T) {
+	f := newFakeServer(t)
+	seedCalendars(f)
+	seedEvents(f, weeklyWithOverridesEvent())
+	cal := f.client(t).Calendar()
+	ctx := testCtx(t)
+
+	ch, err := cal.EventChanges(ctx, "cal-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var master model.Event
+	for _, ev := range ch.Upserted {
+		if ev.RemoteID == "ev-weekly" {
+			master = ev
+		}
+	}
+	if master.RRule == "" {
+		t.Fatal("the fixture master has no rule to clear")
+	}
+	master.RRule = ""
+	if _, err := cal.UpdateEvent(ctx, &master); err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+
+	sets := f.captured("CalendarEvent/set")
+	if len(sets) != 1 {
+		t.Fatalf("got %d CalendarEvent/set calls", len(sets))
+	}
+	patch := sets[0]["update"].(map[string]any)["ev-weekly"].(map[string]any)
+	rules, ok := patch["recurrenceRules"]
+	if !ok {
+		t.Fatal("the patch does not mention recurrenceRules, so the series survives it")
+	}
+	if rules != nil {
+		if l, isList := rules.([]any); !isList || len(l) != 0 {
+			t.Errorf("recurrenceRules = %v, want it cleared", rules)
+		}
+	}
+}

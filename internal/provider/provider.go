@@ -138,6 +138,16 @@ type CalendarProvider interface {
 	EventChanges(ctx context.Context, calendarRemote, since string) (*EventChanges, error)
 
 	CreateEvent(ctx context.Context, calendarRemote string, ev *model.Event) (*model.Event, error)
+	// UpdateEvent writes ev as the whole desired state of everything the
+	// event model covers, not a sparse patch of it. A field left empty means
+	// "empty", not "unchanged": `cal update` reads the event out of the index
+	// and changes only what the flags named, so what arrives here is complete.
+	//
+	// It matters most for recurrence, which is the one field whose absence a
+	// backend cannot guess at. Clearing an RRULE and never mentioning it look
+	// identical on the wire unless the backend says so explicitly, and a
+	// series that survives the write meant to end it keeps generating
+	// occurrences nobody asked for.
 	UpdateEvent(ctx context.Context, ev *model.Event) (*model.Event, error)
 	DeleteEvent(ctx context.Context, calendarRemote, remoteID string) error
 	// Respond sets the user's own participation status.

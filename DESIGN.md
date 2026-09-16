@@ -932,8 +932,8 @@ emlcal cal free --from .. --to .. [--duration 30m] [--hours 09:00-18:00]
 
 CALENDAR — write
 emlcal cal create --title .. --start .. --end .. [--calendar C] [--attendees ..]
-                  [--location ..] [--description ..] [--meet] [--dry-run]
-emlcal cal update <id> [same flags]
+                  [--location ..] [--description ..] [--rrule ..] [--meet] [--dry-run]
+emlcal cal update <id> [same flags]      --rrule "" removes the recurrence
 emlcal cal delete <id>
 emlcal cal respond <id> --accept|--decline|--tentative
 
@@ -963,6 +963,36 @@ mail) and exits 0 without touching the outbox.
 Google Meet room; the link is printed and indexed as `conference_url`. Google
 Calendar accounts only — CalDAV and JMAP have no way to request one, so the
 flag is a usage error there.
+
+### 9.3 Recurrence on the write path
+
+`--rrule` takes an RFC 5545 RECUR value with or without the `RRULE:` prefix,
+because both spellings are in circulation -- iCalendar writes the property,
+JSCalendar and Google clients think in the value -- and normalises to the bare
+value, which is what `model.Event.RRule` holds and what `calendar.Expand`
+runs. `calendar.ParseRRule` is the one gate: it requires a FREQ, refuses
+anything rrule-go cannot parse (a rule stored but not expandable is a series
+that silently has no occurrences), and refuses a value carrying a line break
+or any other control character. That last one is not tidiness. The value
+reaches the wire inside an iCalendar property, one per line, so a newline
+ends that property and starts whatever follows -- an ORGANIZER, an ATTENDEE, a
+whole VEVENT -- on the calendars of everybody the event is shared with.
+
+`cal update --rrule ""` has to be a clearing write rather than silence, which
+is why `provider.CalendarProvider.UpdateEvent` takes the whole desired state
+rather than a sparse patch. Each backend expresses the empty case its own way:
+CalDAV deletes the RRULE property, Google sends an empty `recurrence` array
+forced onto the wire (an omitted field means "unchanged" there, and the
+encoder drops an empty slice without `ForceSendFields`), JMAP patches the
+rules away. All three are asserted in the provider tests, because the three
+disagree and nothing else says which is right.
+
+A created series is expanded before the call returns. That needs the
+provider's UID, not the one the caller sent: `calRun.expandSeries` keys on
+UID, CalDAV mints one when the caller supplies none and Google answers with
+its own `iCalUID`, so a master indexed under the wrong UID -- or under none --
+has no occurrences at all until a later full sync notices. `executeEvent`
+copies the UID back off the create response for exactly that reason.
 
 ---
 

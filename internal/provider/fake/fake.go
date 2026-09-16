@@ -730,6 +730,13 @@ func (f *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev *m
 	out := *ev
 	out.RemoteID = fmt.Sprintf("ev-%d", f.nextID)
 	out.CalendarRemote = calendarRemote
+	// Backends mint the UID when the caller supplies none: CalDAV generates
+	// one for the object's href, Google answers with its own iCalUID. The
+	// fake does the same, because a caller that never sees a UID come back is
+	// a caller whose recurring events are expanded under the wrong key.
+	if out.UID == "" {
+		out.UID = "uid-" + out.RemoteID
+	}
 	if out.CreateConference {
 		// Stand in for Google minting a Meet room on request.
 		out.ConferenceURL = "https://meet.example/" + out.RemoteID

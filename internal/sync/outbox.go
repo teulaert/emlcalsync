@@ -867,6 +867,16 @@ func (e *Engine) executeEvent(ctx context.Context, acct config.Account, cp provi
 			if created.ConferenceURL != "" {
 				op.Event.ConferenceURL = created.ConferenceURL
 			}
+			// So does the UID, on every backend that mints one -- CalDAV
+			// generates it when the caller supplies none, Google answers with
+			// its own iCalUID. It is not cosmetic: a series is expanded by
+			// UID (calRun.expandSeries), and a master indexed under the wrong
+			// one, or under none, has no occurrences at all until some later
+			// full sync notices. A recurring event created here and absent
+			// from the agenda afterwards is exactly that bug.
+			if created.UID != "" {
+				op.Event.UID = created.UID
+			}
 			return created.RemoteID, nil
 		}
 		return "", nil

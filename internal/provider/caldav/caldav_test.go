@@ -934,3 +934,95 @@ func TestCreateEventStillSchedules(t *testing.T) {
 func unfoldLines(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n ", ""), "\r\n\t", "")
 }
+
+// eventOnServer reads back the object the fake stored, so a test can check
+// what the server actually holds rather than what the model believes.
+func putBodies(srv *caldavfake.Server) []string {
+	var out []string
+	for _, r := range srv.Requests() {
+		if r.Method == http.MethodPut {
+			out = append(out, unfoldLines(r.Body))
+		}
+	}
+	return out
+}
+
+func TestCreateEventWritesRRule(t *testing.T) {
+	c, srv, calPath := newFixture(t)
+	if _, err := c.CreateEvent(context.Background(), calPath, &model.Event{
+		UID: "series-1", Title: "Weekly sync",
+		Start: time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 9, 7, 10, 30, 0, 0, time.UTC),
+		RRule: "FREQ=WEEKLY;BYDAY=MO",
+	}); err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	bodies := putBodies(srv)
+	if len(bodies) != 1 {
+		t.Fatalf("%d PUTs, want 1", len(bodies))
+	}
+	if !strings.Contains(bodies[0], "RRULE:FREQ=WEEKLY;BYDAY=MO") {
+		t.Errorf("the object carries no rule:\n%s", bodies[0])
+	}
+}
+
+func TestUpdateEventChangesRRule(t *testing.T) {
+	c, srv, calPath := newFixture(t)
+	created, err := c.CreateEvent(context.Background(), calPath, &model.Event{
+		UID: "series-1", Title: "Weekly sync",
+		Start: time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 9, 7, 10, 30, 0, 0, time.UTC),
+		RRule: "FREQ=WEEKLY",
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+
+	next := *created
+	next.RRule = "FREQ=DAILY;COUNT=2"
+	updated, err := c.UpdateEvent(context.Background(), &next)
+	if err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+	if updated.RRule != "FREQ=DAILY;COUNT=2" {
+		t.Errorf("read back rrule = %q", updated.RRule)
+	}
+	last := putBodies(srv)
+	if !strings.Contains(last[len(last)-1], "RRULE:FREQ=DAILY;COUNT=2") {
+		t.Errorf("the update did not write the new rule:\n%s", last[len(last)-1])
+	}
+}
+
+// An update whose RRule is empty has to remove the property. Leaving it in
+// place was how `cal update --rrule ""` cleared the index and left the series
+// running on the server, to be handed straight back by the next sync.
+func TestUpdateEventClearsRRule(t *testing.T) {
+	c, srv, calPath := newFixture(t)
+	created, err := c.CreateEvent(context.Background(), calPath, &model.Event{
+		UID: "series-1", Title: "Weekly sync",
+		Start: time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 9, 7, 10, 30, 0, 0, time.UTC),
+		RRule: "FREQ=WEEKLY;COUNT=4",
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+
+	next := *created
+	next.RRule = ""
+	updated, err := c.UpdateEvent(context.Background(), &next)
+	if err != nil {
+		t.Fatalf("UpdateEvent: %v", err)
+	}
+	if updated.RRule != "" {
+		t.Errorf("read back rrule = %q, want none", updated.RRule)
+	}
+	last := putBodies(srv)
+	if strings.Contains(last[len(last)-1], "RRULE") {
+		t.Errorf("the object still carries a rule:\n%s", last[len(last)-1])
+	}
+	// And the rest of the event survived the removal.
+	if updated.Title != "Weekly sync" {
+		t.Errorf("title = %q", updated.Title)
+	}
+}

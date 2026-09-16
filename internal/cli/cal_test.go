@@ -546,3 +546,196 @@ func TestCalCreateMeet(t *testing.T) {
 		t.Fatalf("conference_url = %q, want %q", ev.ConferenceURL, res.MeetURL)
 	}
 }
+
+// calRRuleOf reads the rule the provider actually holds for an event.
+func calRRuleOf(t *testing.T, env *testEnv, account, calRemote, title string) (string, bool) {
+	t.Helper()
+	for _, ev := range env.Cal[account].Events(calRemote) {
+		if ev.Title == title {
+			return ev.RRule, true
+		}
+	}
+	return "", false
+}
+
+type calWriteResult struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	RRule  string `json:"rrule"`
+	Queued bool   `json:"queued"`
+}
+
+func calDecodeWrite(t *testing.T, out string) calWriteResult {
+	t.Helper()
+	var res calWriteResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out)
+	}
+	return res
+}
+
+// A created series is expanded straight away: the agenda is what the person
+// looks at next, and "it will appear after the next sync" is not an answer.
+func TestCalCreateRecurring(t *testing.T) {
+	env := calSeed(t)
+	out := env.MustRun("cal", "create", "-a", "work",
+		"--title", "Weekly sync", "--start", "2026-09-07 10:00", "--end", "2026-09-07 10:30",
+		"--rrule", "FREQ=WEEKLY;BYDAY=MO;COUNT=3")
+	res := calDecodeWrite(t, out)
+	if res.Queued || res.RRule != "FREQ=WEEKLY;BYDAY=MO;COUNT=3" {
+		t.Fatalf("create result = %+v", res)
+	}
+
+	if got, ok := calRRuleOf(t, env, "work", "primary", "Weekly sync"); !ok {
+		t.Fatal("the event never reached the provider")
+	} else if got != "FREQ=WEEKLY;BYDAY=MO;COUNT=3" {
+		t.Errorf("the provider holds rrule %q", got)
+	}
+
+	rows := calDecodeAgenda(t, env.MustRun("cal", "agenda", "--from", "2026-09-07", "--to", "2026-09-28"))
+	var when []string
+	for _, r := range rows {
+		if r.Title == "Weekly sync" {
+			when = append(when, r.Start)
+		}
+	}
+	if len(when) != 3 {
+		t.Fatalf("agenda shows %d occurrences of the new series, want 3: %+v", len(when), rows)
+	}
+	for i, w := range []string{"2026-09-07", "2026-09-14", "2026-09-21"} {
+		if !strings.HasPrefix(when[i], w) {
+			t.Errorf("occurrence %d starts %q, want %s", i, when[i], w)
+		}
+	}
+}
+
+// Both spellings are in circulation, and the stored form is the bare value.
+func TestCalCreateRecurringAcceptsThePrefix(t *testing.T) {
+	env := calSeed(t)
+	res := calDecodeWrite(t, env.MustRun("cal", "create", "-a", "work",
+		"--title", "Prefixed", "--start", "2026-09-07 10:00",
+		"--rrule", "RRULE:FREQ=DAILY;COUNT=2"))
+	if res.RRule != "FREQ=DAILY;COUNT=2" {
+		t.Errorf("stored rrule = %q, want the value without the prefix", res.RRule)
+	}
+	if got, _ := calRRuleOf(t, env, "work", "primary", "Prefixed"); got != "FREQ=DAILY;COUNT=2" {
+		t.Errorf("the provider holds %q", got)
+	}
+}
+
+// A rule that cannot be expanded is refused where it is typed, rather than
+// stored to produce a series with no occurrences.
+func TestCalCreateRecurringRejectsBadRules(t *testing.T) {
+	env := calSeed(t)
+	for _, rule := range []string{
+		"BYDAY=MO",                            // no FREQ
+		"FREQ=FORTNIGHTLY",                    // not a frequency
+		"FREQ=DAILY\nSUMMARY:Injected",        // a second property
+		"FREQ=DAILY\r\nATTENDEE:mailto:x@y.z", // the same, CRLF
+		"nonsense",
+	} {
+		_, _, code := env.Run("cal", "create", "-a", "work",
+			"--title", "Bad", "--start", "2026-09-07 10:00", "--rrule", rule)
+		if code != 2 {
+			t.Errorf("--rrule %q exited %d, want 2", rule, code)
+		}
+	}
+	// Nothing was written on any of those attempts.
+	for _, ev := range env.Cal["work"].Events("primary") {
+		if ev.Title == "Bad" {
+			t.Fatal("a refused rule still created an event")
+		}
+	}
+}
+
+func TestCalUpdateRecurrence(t *testing.T) {
+	env := calSeed(t)
+	id := "work:c:primary:e1" // Standup, FREQ=WEEKLY;COUNT=4
+
+	res := calDecodeWrite(t, env.MustRun("cal", "update", id, "--rrule", "FREQ=DAILY;COUNT=2"))
+	if res.RRule != "FREQ=DAILY;COUNT=2" {
+		t.Errorf("update result rrule = %q", res.RRule)
+	}
+	if got, _ := calRRuleOf(t, env, "work", "primary", "Standup"); got != "FREQ=DAILY;COUNT=2" {
+		t.Errorf("the provider holds %q after the update", got)
+	}
+	rows := calDecodeAgenda(t, env.MustRun("cal", "agenda", "--from", "2026-08-26", "--to", "2026-09-30"))
+	n := 0
+	for _, r := range rows {
+		if r.Title == "Standup" {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("agenda shows %d occurrences after re-ruling, want 2", n)
+	}
+}
+
+// --rrule "" is the whole point of the flag being settable to empty: a series
+// turned back into one event, on the provider as well as in the index.
+func TestCalUpdateClearsRecurrence(t *testing.T) {
+	env := calSeed(t)
+	id := "work:c:primary:e1"
+
+	res := calDecodeWrite(t, env.MustRun("cal", "update", id, "--rrule", ""))
+	if res.RRule != "" {
+		t.Errorf("update result still carries rrule %q", res.RRule)
+	}
+	if got, ok := calRRuleOf(t, env, "work", "primary", "Standup"); !ok {
+		t.Fatal("the event vanished from the provider")
+	} else if got != "" {
+		t.Errorf("the provider still holds rrule %q — the series outlived the write", got)
+	}
+
+	rows := calDecodeAgenda(t, env.MustRun("cal", "agenda", "--from", "2026-08-26", "--to", "2026-09-30"))
+	n := 0
+	for _, r := range rows {
+		if r.Title == "Standup" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("agenda shows %d occurrences after clearing, want the one event", n)
+	}
+}
+
+// Not passing the flag leaves the rule alone: an update is only what the
+// flags named.
+func TestCalUpdateLeavesRecurrenceAloneWhenNotAsked(t *testing.T) {
+	env := calSeed(t)
+	env.MustRun("cal", "update", "work:c:primary:e1", "--location", "Room 9")
+	if got, _ := calRRuleOf(t, env, "work", "primary", "Standup"); got != "FREQ=WEEKLY;COUNT=4" {
+		t.Errorf("rrule = %q after an unrelated update, want it untouched", got)
+	}
+}
+
+func TestCalUpdateRejectsBadRule(t *testing.T) {
+	env := calSeed(t)
+	if _, _, code := env.Run("cal", "update", "work:c:primary:e1", "--rrule", "FREQ=NEVER"); code != 2 {
+		t.Errorf("exited %d, want 2", code)
+	}
+	if got, _ := calRRuleOf(t, env, "work", "primary", "Standup"); got != "FREQ=WEEKLY;COUNT=4" {
+		t.Errorf("a refused rule changed the stored one to %q", got)
+	}
+}
+
+func TestCalCreateRecurringDryRun(t *testing.T) {
+	env := calSeed(t)
+	out := env.MustRun("cal", "create", "-a", "work", "--title", "Planned",
+		"--start", "2026-09-07 10:00", "--rrule", "rrule:freq=weekly", "--dry-run")
+	var detail struct {
+		Title string `json:"title"`
+		RRule string `json:"rrule"`
+	}
+	if err := json.Unmarshal([]byte(out), &detail); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out)
+	}
+	if detail.RRule != "FREQ=WEEKLY" {
+		t.Errorf("dry run shows rrule %q, want the normalised form", detail.RRule)
+	}
+	for _, ev := range env.Cal["work"].Events("primary") {
+		if ev.Title == "Planned" {
+			t.Fatal("--dry-run created an event")
+		}
+	}
+}
