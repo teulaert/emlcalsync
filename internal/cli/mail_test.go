@@ -1092,13 +1092,14 @@ func TestMailReadInviteWithoutCalendarCopy(t *testing.T) {
 
 // mailRespondOutput is what `mail respond` prints.
 type mailRespondOutput struct {
-	ID       string `json:"id"`
-	Response string `json:"response"`
-	Route    string `json:"route"`
-	Queued   bool   `json:"queued"`
-	Title    string `json:"title"`
-	To       string `json:"to"`
-	EventID  string `json:"event_id"`
+	ID         string `json:"id"`
+	Response   string `json:"response"`
+	Route      string `json:"route"`
+	Queued     bool   `json:"queued"`
+	Title      string `json:"title"`
+	To         string `json:"to"`
+	EventID    string `json:"event_id"`
+	EventError string `json:"event_error"`
 }
 
 func seedInviteEnv(t *testing.T, env *testEnv) {
@@ -1129,8 +1130,13 @@ func TestMailRespondByMail(t *testing.T) {
 	if out.Response != "accepted" || out.To != "martijn@example.org" || out.Title != "Momentum FO" {
 		t.Errorf("out = %+v", out)
 	}
-	if out.EventID != "" {
-		t.Errorf("event_id = %q, want none", out.EventID)
+	// Accepting files the meeting on the calendar, carrying the invitation's
+	// UID, so the answer and the agenda agree about what was accepted.
+	if out.EventID == "" {
+		t.Error("nothing was filed on the calendar")
+	}
+	if out.EventError != "" {
+		t.Errorf("event_error = %q", out.EventError)
 	}
 
 	sent := env.Mail["work"].Sent()
@@ -1144,7 +1150,59 @@ func TestMailRespondByMail(t *testing.T) {
 		t.Errorf("subject:\n%s", sent[0])
 	}
 
-	// And the card stops asking, because nothing else remembers.
+	// The card stops asking, and now names the event -- the invitation ends
+	// up in exactly the state one the server had filed would be in.
+	var msg struct {
+		Invite *struct {
+			MyResponse  string `json:"my_response"`
+			NeedsAnswer bool   `json:"needs_answer"`
+			EventID     string `json:"event_id"`
+		} `json:"invite"`
+	}
+	read := env.MustRun("mail", "read", "work:m-invite")
+	if err := json.Unmarshal([]byte(read), &msg); err != nil {
+		t.Fatalf("decode: %v\n%s", err, read)
+	}
+	if msg.Invite == nil || msg.Invite.MyResponse != "accepted" || msg.Invite.NeedsAnswer {
+		t.Errorf("after answering: %+v", msg.Invite)
+	}
+	if msg.Invite.EventID != out.EventID {
+		t.Errorf("the card names %q, want the event just filed (%q)", msg.Invite.EventID, out.EventID)
+	}
+
+	// And it is on the agenda, which is the whole point of filing it.
+	var agenda []struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	raw = env.MustRun("cal", "agenda", "--from", "2026-09-02", "--to", "2026-09-03")
+	if err := json.Unmarshal([]byte(raw), &agenda); err != nil {
+		t.Fatalf("decode agenda: %v\n%s", err, raw)
+	}
+	if len(agenda) != 1 || agenda[0].Title != "Momentum FO" {
+		t.Errorf("agenda = %+v, want the accepted meeting", agenda)
+	}
+}
+
+// Declining is answered, not attended: nothing is filed, and the card then
+// says where the answer went, there being no event to name.
+func TestMailRespondDeclineFilesNothing(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	seedInviteEnv(t, env)
+
+	var out mailRespondOutput
+	raw := env.MustRun("mail", "respond", "work:m-invite", "--decline")
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, raw)
+	}
+	if out.EventID != "" {
+		t.Errorf("a declined meeting was filed as %q", out.EventID)
+	}
+	if len(env.Mail["work"].Sent()) != 1 {
+		t.Error("the decline did not go out")
+	}
+
 	var msg struct {
 		Invite *struct {
 			MyResponse    string `json:"my_response"`
@@ -1156,13 +1214,13 @@ func TestMailRespondByMail(t *testing.T) {
 	if err := json.Unmarshal([]byte(read), &msg); err != nil {
 		t.Fatalf("decode: %v\n%s", err, read)
 	}
-	if msg.Invite == nil || msg.Invite.MyResponse != "accepted" ||
+	if msg.Invite == nil || msg.Invite.MyResponse != "declined" ||
 		msg.Invite.NeedsAnswer || !msg.Invite.RepliedByMail {
-		t.Errorf("after answering: %+v", msg.Invite)
+		t.Errorf("after declining: %+v", msg.Invite)
 	}
 	if !strings.Contains(env.MustRun("mail", "read", "work:m-invite", "-o", "table"),
 		"Event:      answered by mail to the organizer") {
-		t.Error("the card does not say the answer went by mail")
+		t.Error("the card does not say where the answer went")
 	}
 }
 

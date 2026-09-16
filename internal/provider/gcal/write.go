@@ -73,6 +73,49 @@ func (c *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev *m
 	return &out, nil
 }
 
+// ImportEvent files an event the account was invited to, without notifying
+// anybody. See provider.EventImporter.
+//
+// events.import is Google's own name for exactly this: "add a private copy of
+// an existing event to a calendar". It notifies nobody -- there is no
+// sendUpdates on the call, because an import is not a change to anybody else's
+// meeting -- and it takes the iCalUID, which is the whole point. Insert would
+// mint a new one and the copy would no longer be the invitation's event.
+//
+// Google requires an organizer on an imported event; it is the property that
+// says whose meeting this is a copy of, and the invitation always names one.
+func (c *Calendar) ImportEvent(ctx context.Context, calendarRemote string, ev *model.Event) (*model.Event, error) {
+	if calendarRemote == "" || ev == nil {
+		return nil, errors.New("gcal: ImportEvent needs a calendar id and an event")
+	}
+	if strings.TrimSpace(ev.UID) == "" {
+		return nil, errors.New("gcal: ImportEvent needs the invitation's UID")
+	}
+	if ev.Organizer.Email == "" {
+		return nil, errors.New("gcal: ImportEvent needs the invitation's organizer")
+	}
+	in := toAPIEvent(ev)
+	in.ICalUID = ev.UID
+	in.Organizer = &calendarapi.EventOrganizer{
+		Email:       ev.Organizer.Email,
+		DisplayName: ev.Organizer.Name,
+	}
+	var created *calendarapi.Event
+	err := c.do(ctx, "events.import", func() error {
+		var err error
+		created, err = c.svc.Events.Import(calendarRemote, in).Context(ctx).Do()
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	out, err := mapEvent(calendarRemote, created, ev.Timezone, c.opts.Email)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // UpdateEvent patches an existing event with only the fields that are set on
 // ev, so a caller can change a title without resending the whole object.
 func (c *Calendar) UpdateEvent(ctx context.Context, ev *model.Event) (*model.Event, error) {

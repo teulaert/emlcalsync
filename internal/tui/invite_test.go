@@ -160,8 +160,8 @@ func TestReaderInvitationWithoutCalendarCopyAnswersByMail(t *testing.T) {
 		t.Errorf("status = %q, want it to name where the answer went", r.status)
 	}
 
-	// The archive remembers, because nothing else does: the card stops
-	// asking, and the keys stay so the answer can be changed.
+	// The archive remembers what was said, the card stops asking, and the
+	// keys stay so the answer can be changed.
 	msg, err := d.Store.GetMessage(context.Background(), "work", "inv-1")
 	if err != nil {
 		t.Fatal(err)
@@ -177,10 +177,26 @@ func TestReaderInvitationWithoutCalendarCopyAnswersByMail(t *testing.T) {
 		t.Errorf("footer dropped the RSVP keys after the answer: %q", f)
 	}
 
-	// And enter still has no event to open.
+	// Accepting also filed the meeting, so the status says so and the
+	// invitation is now in the state one the server had filed would be in:
+	// enter opens the event, under the invitation's own UID.
+	if !strings.Contains(r.status, "calendar") {
+		t.Errorf("status = %q, want it to say the meeting was filed too", r.status)
+	}
+	evs, err := d.Store.FindEventsByUID(context.Background(), []string{"work"}, inviteUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("the index holds %d events for the invitation's uid, want 1", len(evs))
+	}
 	send(t, r, "enter")
-	if _, ok := r.top().(*reader); !ok {
-		t.Errorf("enter left the reader for %T", r.top())
+	ev, ok := r.top().(*eventView)
+	if !ok {
+		t.Fatalf("enter opened %T, want the event the accept filed", r.top())
+	}
+	if ev.remote != evs[0].RemoteID {
+		t.Errorf("event view is on %q, want %q", ev.remote, evs[0].RemoteID)
 	}
 }
 

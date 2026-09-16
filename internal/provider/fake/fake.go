@@ -5,6 +5,7 @@ package fake
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	stdsync "sync"
@@ -585,6 +586,10 @@ type Calendar struct {
 	changes map[string][]CalChange
 	expire  map[string]bool
 
+	// imported records the events filed through ImportEvent, which a real
+	// backend files without mailing the organizer about it.
+	imported []model.Event
+
 	failNext int
 	nextID   int
 }
@@ -732,6 +737,36 @@ func (f *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev *m
 	}
 	f.putLocked(calendarRemote, out)
 	return &out, nil
+}
+
+// ImportEvent files an event the account was invited to, the way a real
+// backend does it: silently. The fake records that it was an import so a test
+// can tell the two calls apart -- the difference between them is whether the
+// organizer gets a second REPLY, which is the whole point and is otherwise
+// invisible from here.
+func (f *Calendar) ImportEvent(ctx context.Context, calendarRemote string, ev *model.Event) (*model.Event, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return nil, err
+	}
+	if ev.UID == "" {
+		return nil, errors.New("fake: ImportEvent needs a UID")
+	}
+	f.nextID++
+	out := *ev
+	out.RemoteID = fmt.Sprintf("ev-%d", f.nextID)
+	out.CalendarRemote = calendarRemote
+	f.imported = append(f.imported, out)
+	f.putLocked(calendarRemote, out)
+	return &out, nil
+}
+
+// Imported is every event filed through ImportEvent rather than created.
+func (f *Calendar) Imported() []model.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]model.Event(nil), f.imported...)
 }
 
 func (f *Calendar) UpdateEvent(ctx context.Context, ev *model.Event) (*model.Event, error) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -848,4 +849,88 @@ func TestCalendarsFollowsTheDiscoveredHomeSet(t *testing.T) {
 	if len(paths) != 3 || paths[1] != srv.PrincipalPath() || paths[2] != "/dav/elsewhere/mycals/" {
 		t.Errorf("PROPFIND chain = %v, want root -> principal -> calendar home", paths)
 	}
+}
+
+// Filing an invited event must not make the server reply to the organizer:
+// the RSVP has already gone to them by mail, and a second answer from the
+// calendar tells them twice. RFC 6638 §8.1's Schedule-Reply: F is what says
+// so, and it has to actually be on the wire — a header that is merely
+// intended suppresses nothing.
+func TestImportEventSuppressesScheduling(t *testing.T) {
+	c, srv, calPath := newFixture(t)
+
+	ev := &model.Event{
+		UID:       "invited-uid-1",
+		Title:     "AI & LPMW groep",
+		Start:     time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC),
+		End:       time.Date(2026, 9, 18, 10, 30, 0, 0, time.UTC),
+		Location:  "Barendrecht",
+		Status:    model.StatusConfirmed,
+		Organizer: model.Address{Name: "Gert Eilander", Email: "gert@example.org"},
+		Attendees: []model.Attendee{
+			{Email: testEmail, Response: model.PartAccepted, Self: true},
+		},
+		MyResponse: model.PartAccepted,
+	}
+	got, err := c.ImportEvent(context.Background(), calPath, ev)
+	if err != nil {
+		t.Fatalf("ImportEvent: %v", err)
+	}
+	if got.UID != "invited-uid-1" {
+		t.Errorf("uid = %q, want the invitation's — that is what links it to the mail", got.UID)
+	}
+
+	var put *caldavfake.Request
+	for i, r := range srv.Requests() {
+		if r.Method == http.MethodPut {
+			put = &srv.Requests()[i]
+		}
+	}
+	if put == nil {
+		t.Fatal("nothing was PUT")
+	}
+	if v := put.Header.Get("Schedule-Reply"); v != "F" {
+		t.Errorf("Schedule-Reply = %q, want F — without it the server mails the organizer", v)
+	}
+	// It still refuses to clobber an object already at the href.
+	if v := put.Header.Get("If-None-Match"); v != "*" {
+		t.Errorf("If-None-Match = %q, want *", v)
+	}
+	// The body carries who organises it and what the account answered, or the
+	// copy is a meeting with no sign of either.
+	for _, want := range []string{
+		"UID:invited-uid-1",
+		"ORGANIZER;CN=Gert Eilander:mailto:gert@example.org",
+		"PARTSTAT=ACCEPTED",
+	} {
+		if !strings.Contains(unfoldLines(put.Body), want) {
+			t.Errorf("the object does not carry %q:\n%s", want, put.Body)
+		}
+	}
+}
+
+// An ordinary create is the one that schedules, and must go on doing so: it
+// is how an event with attendees invites them.
+func TestCreateEventStillSchedules(t *testing.T) {
+	c, srv, calPath := newFixture(t)
+	_, err := c.CreateEvent(context.Background(), calPath, &model.Event{
+		Title: "Standup",
+		Start: time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 9, 18, 9, 15, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("CreateEvent: %v", err)
+	}
+	for _, r := range srv.Requests() {
+		if r.Method == http.MethodPut && r.Header.Get("Schedule-Reply") != "" {
+			t.Errorf("a plain create suppressed scheduling: Schedule-Reply=%q",
+				r.Header.Get("Schedule-Reply"))
+		}
+	}
+}
+
+// unfoldLines undoes iCalendar's 75-octet folding, so a test can look for a
+// whole property on one line the way a reader of it thinks of it.
+func unfoldLines(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n ", ""), "\r\n\t", "")
 }

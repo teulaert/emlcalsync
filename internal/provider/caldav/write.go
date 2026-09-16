@@ -62,6 +62,69 @@ func (c *Calendar) CreateEvent(ctx context.Context, calendarRemote string, ev *m
 	return c.readBack(ctx, calendarRemote, href, ics)
 }
 
+// ImportEvent files an event the account was invited to, without letting the
+// server send a REPLY about it. See provider.EventImporter.
+//
+// RFC 6638 §8.1 is what makes this possible: Schedule-Reply: F on an
+// attendee's write tells the server not to generate the scheduling message it
+// otherwise would. The answer has already reached the organizer by mail, and
+// this write is only the archive catching up with it.
+//
+// Everything else is CreateEvent: the same object, at an href derived from the
+// invitation's UID, refusing to clobber anything already there. If the event
+// does turn out to be there -- the server filed it after all, between the
+// reply going out and this write -- that is a 412, and an event that is
+// already on the calendar is not a failure worth reporting as one.
+func (c *Calendar) ImportEvent(ctx context.Context, calendarRemote string, ev *model.Event) (*model.Event, error) {
+	if calendarRemote == "" || ev == nil {
+		return nil, errors.New("caldav: ImportEvent needs a calendar path and an event")
+	}
+	if strings.TrimSpace(ev.UID) == "" {
+		return nil, errors.New("caldav: ImportEvent needs the invitation's UID")
+	}
+	if err := c.discover(ctx); err != nil {
+		return nil, err
+	}
+	href := strings.TrimSuffix(calendarRemote, "/") + "/" + objectFilename(ev.UID)
+
+	cal := ical.NewCalendar()
+	cal.Props.SetText(ical.PropProductID, prodID)
+	cal.Props.SetText(ical.PropVersion, "2.0")
+	cal.Props.SetText(ical.PropMethod, "REQUEST")
+	vevent := ical.NewEvent()
+	vevent.Props.SetText(ical.PropUID, ev.UID)
+	setStamp(vevent, c.now())
+	vevent.Props.Set(intProp(ical.PropSequence, 0))
+	applyModel(vevent, ev, true)
+	cal.Children = append(cal.Children, vevent.Component)
+
+	ics, err := encodeICS(cal)
+	if err != nil {
+		return nil, wrapErr("import event", err)
+	}
+	if err := c.putSilently(ctx, href, ics); err != nil {
+		if statusOf(err) == http.StatusPreconditionFailed {
+			// Already there. Read it back rather than insisting.
+			return c.readBack(ctx, calendarRemote, href, ics)
+		}
+		return nil, wrapErr("import event "+href, err)
+	}
+	return c.readBack(ctx, calendarRemote, href, ics)
+}
+
+// putSilently is put with the scheduling suppressed: the write lands on the
+// calendar and nobody is mailed about it.
+func (c *Calendar) putSilently(ctx context.Context, href, ics string) error {
+	hdr := map[string]string{
+		"Content-Type":   "text/calendar; charset=utf-8",
+		"If-None-Match":  "*",
+		"Schedule-Reply": "F",
+	}
+	c.log.Debug("caldav put (no scheduling)", "href", href, "bytes", len(ics))
+	_, err := c.dav.do(ctx, http.MethodPut, href, []byte(ics), hdr)
+	return err
+}
+
 // UpdateEvent rewrites the object's master VEVENT from ev, preserving every
 // property this package does not model (alarms, colours, attachments,
 // scheduling state) and every exception VEVENT in the same object.

@@ -184,10 +184,10 @@ the organizer, where `my_response` is what emlcal recorded, not a calendar.
 - Never `trash`, `delete` or `move` anything unless the user asked for it.
   Archiving is not deleting, but it still needs their say-so.
 - Quote the message id when you report a finding, so the user can jump to it.
-- Answer an invitation with `mail respond <id> --accept|--decline|--tentative`,
-  which picks its road: the calendar when one holds the event, else an iTIP
-  reply mailed to the organizer. Never send prose instead — a scheduler reads
-  the calendar part, not words. `cal respond <event-id>` answers from the agenda.
+- Answer an invitation with `mail respond <id> --accept|--decline|--tentative`:
+  it answers through the calendar when one holds the event, else mails the
+  organizer an iTIP reply and files the meeting (a decline files nothing).
+  Never send prose — a scheduler reads the calendar part, not words.
 - If results look stale or a message the user mentions is missing, run
   `emlcal status` to see the last sync and whether the daemon runs, then
   `emlcal sync` once.

@@ -144,6 +144,28 @@ type CalendarProvider interface {
 	Respond(ctx context.Context, calendarRemote, remoteID string, resp model.Participation) error
 }
 
+// EventImporter is implemented by a calendar backend that can file somebody
+// else's event onto the calendar without announcing that it did.
+//
+// CreateEvent is the wrong call for that. A backend that schedules -- and both
+// of these do -- reads an object carrying an ORGANIZER who is not the account
+// and an ATTENDEE who is, and helpfully mails the organizer a REPLY. That is
+// exactly right when the calendar is how the RSVP is being sent, and exactly
+// wrong here: the answer has already gone to the organizer by mail (see
+// internal/itip), and a second one arriving from the calendar server tells
+// them twice.
+//
+// So an import is a create that is explicitly silent. The event keeps the
+// invitation's UID, which is what ties the calendar's copy back to the mail it
+// came from -- store.FindEventsByUID matches on it, and that is what makes the
+// card offer the event and later answers go the calendar road.
+//
+// A backend that cannot promise silence must not implement this. Falling back
+// to CreateEvent would be the duplicate REPLY it exists to prevent.
+type EventImporter interface {
+	ImportEvent(ctx context.Context, calendarRemote string, ev *model.Event) (*model.Event, error)
+}
+
 // Remapper is implemented by providers whose writes move a message's remote id.
 //
 // On IMAP a message is (folder, uidvalidity, uid), so COPY and MOVE mint a new

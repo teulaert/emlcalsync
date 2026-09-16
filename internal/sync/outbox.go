@@ -61,6 +61,15 @@ type Op struct {
 	Event          *model.Event        `json:"event,omitempty"`
 	CalendarRemote string              `json:"calendar_remote,omitempty"`
 	Response       model.Participation `json:"response,omitempty"`
+
+	// Import turns OpEventCreate into a silent one: the event is filed on the
+	// calendar and the provider tells nobody. It is for a meeting somebody
+	// else organises, whose RSVP has already gone to them by mail -- letting
+	// the calendar server send its own REPLY as well would tell them twice.
+	// See provider.EventImporter, which a backend must implement for this to
+	// be honoured at all; falling back to an ordinary create would be the
+	// duplicate the flag exists to prevent.
+	Import bool `json:"import,omitempty"`
 }
 
 // ApplyResult reports what happened to a write.
@@ -838,7 +847,16 @@ func (e *Engine) executeEvent(ctx context.Context, acct config.Account, cp provi
 		if strings.HasPrefix(ev.RemoteID, pendingPrefix) {
 			ev.RemoteID = ""
 		}
-		created, err := cp.CreateEvent(ctx, op.calendarRemote(), &ev)
+		create := cp.CreateEvent
+		if op.Import {
+			im, ok := cp.(provider.EventImporter)
+			if !ok {
+				return "", fmt.Errorf("sync: %s: this calendar backend cannot file an "+
+					"invited event without replying to the organizer a second time", acct.Name)
+			}
+			create = im.ImportEvent
+		}
+		created, err := create(ctx, op.calendarRemote(), &ev)
 		if err != nil {
 			return "", err
 		}

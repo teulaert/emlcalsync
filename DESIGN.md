@@ -816,9 +816,31 @@ meeting.
 
 What is answered that way is recorded on the message
 (`messages.itip_response`, migration 0008) rather than anywhere else, because
-there is no event to carry it -- that being the premise. The column is absent
-from `UpsertMessage`'s list, so a re-sync leaves it alone: the provider has no
-opinion about it and would only overwrite it with nothing.
+at the moment of answering there is no event to carry it -- that being the
+premise. The column is absent from `UpsertMessage`'s list, so a re-sync leaves
+it alone: the provider has no opinion about it and would only overwrite it
+with nothing.
+
+**Filing the meeting.** An accepted invitation that does not then appear on
+the agenda has not been accepted in any sense the person meant, so a
+successful mail RSVP files the event too (`Engine.fileInvitedEvent`). The copy
+carries the invitation's UID, which is the whole of what "linked" means here:
+`FindEventsByUID` matches it, so the card names the event, `enter` opens it,
+and a later change of mind goes the calendar road like any other answered
+invitation. It carries the organizer and the attendee list as well, with the
+account's own PARTSTAT set to what was just sent. A decline files nothing --
+that is an answer, not an attendance.
+
+It cannot be an ordinary create. A backend that schedules reads an object
+carrying an ORGANIZER who is not the account and an ATTENDEE who is, and mails
+the organizer a REPLY about it -- which is right when the calendar *is* how
+the RSVP is being sent, and here would be the second answer this design exists
+to prevent. So it goes through `provider.EventImporter`: CalDAV PUTs with
+`Schedule-Reply: F` (RFC 6638 §8.1), Google calls `events.import`, which is
+that API's own name for "add a private copy of an existing event" and notifies
+nobody. A backend that implements neither refuses rather than falling back,
+and the refusal is reported without touching the RSVP: the organizer has been
+told, and that is the part that cannot be taken back.
 
 `mail respond <message-id>` picks between the two roads, so neither a person
 nor an agent has to know which applies; `cal respond <event-id>` is the same

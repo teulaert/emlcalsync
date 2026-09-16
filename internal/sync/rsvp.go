@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/teulaert/emlcalsync/internal/itip"
@@ -22,6 +23,15 @@ type RSVPResult struct {
 	// Subject is the reply's subject line, which is the one thing the
 	// organizer sees before their scheduler opens it.
 	Subject string
+	// Event is the copy filed on the calendar, when one was. Accepting a
+	// meeting that then does not appear on the agenda is not accepting it in
+	// any sense the person meant.
+	Event *model.Event
+	// EventErr is why no copy was filed, when that is worth saying: a backend
+	// that cannot file one silently, an account with no calendar. It is never
+	// a reason to call the RSVP itself failed -- the organizer has been told,
+	// and that is the part that cannot be taken back.
+	EventErr error
 }
 
 // RespondByMail answers an invitation by mailing the organizer an iTIP REPLY,
@@ -121,5 +131,91 @@ func (e *Engine) RespondByMail(ctx context.Context, account, messageRemote strin
 		e.log.Warn("mark the invitation answered", "id", msg.PublicID(), "err", err)
 	}
 
-	return &RSVPResult{Apply: res, To: reply.To, Response: resp, Subject: reply.Subject}, nil
+	out := &RSVPResult{Apply: res, To: reply.To, Response: resp, Subject: reply.Subject}
+	out.Event, out.EventErr = e.fileInvitedEvent(ctx, account, inv, self, resp)
+	return out, nil
+}
+
+// fileInvitedEvent puts the meeting on the calendar once its RSVP has gone
+// out, so that accepting something makes it appear on the agenda.
+//
+// The copy carries the invitation's UID, which is what ties it back to the
+// mail: store.FindEventsByUID matches on it, so the card then names the event,
+// enter opens it, and a change of mind later goes the calendar road like any
+// other answered invitation. It carries the organizer and the attendee list
+// too, with the account's own PARTSTAT already set to what was just sent.
+//
+// It goes through the outbox as an import rather than a create, so the
+// calendar server files it and tells nobody -- the organizer has had the
+// answer already. A backend with no way to promise that refuses rather than
+// sending a second REPLY, and the refusal comes back as EventErr: the RSVP
+// stands either way.
+func (e *Engine) fileInvitedEvent(ctx context.Context, account string, inv *itip.Invite,
+	self model.Address, resp model.Participation) (*model.Event, error) {
+	// Declining is answered, not attended. Filing a meeting the person has
+	// just said no to would put it on the agenda as though they were going.
+	if resp == model.PartDeclined {
+		return nil, nil
+	}
+	cal, err := e.primaryCalendar(ctx, account)
+	if err != nil {
+		return nil, err
+	}
+
+	ev := inv.Event
+	ev.AccountID = account
+	ev.CalendarRemote = cal.RemoteID
+	ev.RemoteID = ""
+	ev.MyResponse = resp
+	ev.Attendees = append([]model.Attendee(nil), inv.Event.Attendees...)
+	found := false
+	for i := range ev.Attendees {
+		if ev.Attendees[i].Self || strings.EqualFold(ev.Attendees[i].Email, self.Email) {
+			ev.Attendees[i].Self = true
+			ev.Attendees[i].Response = resp
+			found = true
+		}
+	}
+	if !found {
+		// Invited at an address the attendee list does not spell, an alias
+		// most likely. The copy still needs a line saying who is going, or
+		// the calendar holds a meeting with no sign the account is on it.
+		ev.Attendees = append(ev.Attendees, model.Attendee{
+			Email: self.Email, Response: resp, Self: true,
+		})
+	}
+
+	res, err := e.Apply(ctx, account, Op{
+		Kind: OpEventCreate, Import: true, CalendarRemote: cal.RemoteID, Event: &ev,
+	})
+	if err != nil {
+		e.log.Warn("file the invited event", "account", account, "uid", ev.UID, "err", err)
+		return nil, err
+	}
+	if res.RemoteID != "" {
+		ev.RemoteID = res.RemoteID
+	}
+	return &ev, nil
+}
+
+// primaryCalendar is where an invited event is filed: the account's primary
+// calendar, else its only one.
+func (e *Engine) primaryCalendar(ctx context.Context, account string) (*model.Calendar, error) {
+	cals, err := e.st.ListCalendars(ctx, []string{account})
+	if err != nil {
+		return nil, err
+	}
+	var first *model.Calendar
+	for i := range cals {
+		if cals[i].Primary {
+			return &cals[i], nil
+		}
+		if first == nil && cals[i].AccessRole != "reader" {
+			first = &cals[i]
+		}
+	}
+	if first != nil {
+		return first, nil
+	}
+	return nil, fmt.Errorf("account %s has no calendar to file the event on", account)
 }

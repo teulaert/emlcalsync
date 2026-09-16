@@ -978,6 +978,15 @@ func (d Deps) respondByMail(account, remote string, p model.Participation) tea.C
 			return out
 		}
 		out.detail = " — mailed to " + res.To.Email
+		switch {
+		case res.Event != nil:
+			out.detail += ", and on the calendar"
+		case res.EventErr != nil:
+			// The answer went; the calendar did not take the copy. Saying so
+			// matters more than it would for any other write, because the
+			// person pressed accept and will go looking for it on the agenda.
+			out.detail += ", but not put on the calendar: " + res.EventErr.Error()
+		}
 		out.queued = res.Apply.Queued
 		return out
 	}

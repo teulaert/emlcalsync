@@ -787,8 +787,13 @@ type mailRespondOut struct {
 	Title    string `json:"title"              table:"TITLE,max=40"`
 	// To is the organizer, on the mail route. On the calendar route the
 	// server decides who hears, so there is nobody here to name.
-	To      string `json:"to,omitempty"       table:"TO,max=30"`
+	To string `json:"to,omitempty"       table:"TO,max=30"`
+	// EventID is the calendar's copy: the one the answer went through on the
+	// calendar route, or the one just filed on the mail route.
 	EventID string `json:"event_id,omitempty"`
+	// EventError says why an accepted meeting is not on the calendar, on the
+	// mail route. The RSVP went either way; this is the part that did not.
+	EventError string `json:"event_error,omitempty" table:"EVENT-ERROR,max=40"`
 }
 
 // mailRespondCmd is the RSVP that starts from the mail rather than from the
@@ -879,6 +884,12 @@ The answer goes through whichever road reaches the organizer exactly once:
 				}
 				out.Queued = res.Apply.Queued
 				out.To = res.To.Email
+				if res.Event != nil {
+					out.EventID = res.Event.PublicID()
+				}
+				if res.EventErr != nil {
+					out.EventError = res.EventErr.Error()
+				}
 			}
 			if err := app.Printer().Print(out); err != nil {
 				return err

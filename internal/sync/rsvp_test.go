@@ -10,6 +10,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/itip"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // inviteFixture is the Exchange invitation the mime and itip tests share,
@@ -203,5 +204,143 @@ func TestRespondByMailThreadsUnderTheInvitation(t *testing.T) {
 	_, raw := sentInvite(t, h)
 	if !strings.Contains(string(raw), "In-Reply-To: <"+msg.MessageIDHeader+">") {
 		t.Errorf("the reply does not answer the invitation:\n%s", raw)
+	}
+}
+
+// Accepting a meeting that then does not appear on the agenda is not
+// accepting it in any sense the person meant. The copy is filed with the
+// invitation's UID, which is what ties it back to the mail it came from.
+func TestRespondByMailFilesTheEventOnTheCalendar(t *testing.T) {
+	h := newHarness(t)
+	seedInvitation(t, h)
+
+	res, err := h.eng.RespondByMail(context.Background(), "work", "inv-1", model.PartAccepted)
+	if err != nil {
+		t.Fatalf("RespondByMail: %v", err)
+	}
+	if res.EventErr != nil {
+		t.Fatalf("no event was filed: %v", res.EventErr)
+	}
+	if res.Event == nil {
+		t.Fatal("no event came back")
+	}
+
+	// Filed silently. A plain create is what would have made the calendar
+	// server send a second REPLY, on top of the one already mailed.
+	imported := h.cal.importedEvents()
+	if len(imported) != 1 {
+		t.Fatalf("%d events imported, want 1 (a create would reply twice)", len(imported))
+	}
+	got := imported[0]
+	if got.UID != res.Event.UID || got.UID == "" {
+		t.Errorf("filed under uid %q, want the invitation's", got.UID)
+	}
+	if got.Title != "Momentum FO" {
+		t.Errorf("title = %q", got.Title)
+	}
+	if got.Organizer.Email != "martijn@example.org" {
+		t.Errorf("organizer = %+v, want the one who invited", got.Organizer)
+	}
+	if got.MyResponse != model.PartAccepted {
+		t.Errorf("my response on the filed copy = %q", got.MyResponse)
+	}
+	var self *model.Attendee
+	for i := range got.Attendees {
+		if got.Attendees[i].Self {
+			self = &got.Attendees[i]
+		}
+	}
+	if self == nil || self.Response != model.PartAccepted {
+		t.Errorf("attendees = %+v, want the account marked self and accepted", got.Attendees)
+	}
+
+	// And the index knows it, which is what makes the card name the event and
+	// a later change of mind go the calendar road.
+	evs, err := h.st.FindEventsByUID(context.Background(), []string{"work"}, got.UID)
+	if err != nil {
+		t.Fatalf("FindEventsByUID: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("the index holds %d events for the invitation's uid, want 1", len(evs))
+	}
+}
+
+// Declining is answered, not attended. Filing a meeting somebody has just
+// said no to would put it on the agenda as though they were going.
+func TestRespondByMailDoesNotFileADeclinedMeeting(t *testing.T) {
+	h := newHarness(t)
+	seedInvitation(t, h)
+
+	res, err := h.eng.RespondByMail(context.Background(), "work", "inv-1", model.PartDeclined)
+	if err != nil {
+		t.Fatalf("RespondByMail: %v", err)
+	}
+	if res.Event != nil || res.EventErr != nil {
+		t.Errorf("a declined meeting was filed: %+v / %v", res.Event, res.EventErr)
+	}
+	if n := len(h.cal.importedEvents()); n != 0 {
+		t.Errorf("%d events filed for a decline", n)
+	}
+	// The reply still went.
+	if len(h.sentMessages()) != 1 {
+		t.Error("the decline did not go out")
+	}
+}
+
+// A tentative answer is an answer, and the meeting still wants to be on the
+// agenda — that is what "maybe" means about a slot.
+func TestRespondByMailFilesATentativeMeeting(t *testing.T) {
+	h := newHarness(t)
+	seedInvitation(t, h)
+
+	res, err := h.eng.RespondByMail(context.Background(), "work", "inv-1", model.PartTentative)
+	if err != nil {
+		t.Fatalf("RespondByMail: %v", err)
+	}
+	if res.Event == nil || res.Event.MyResponse != model.PartTentative {
+		t.Errorf("event = %+v", res.Event)
+	}
+}
+
+// noImportCalendar is a backend with no way to file an event silently. It
+// embeds the interface rather than the fake, so ImportEvent is not in its
+// method set and the type assertion in executeEvent fails the way it would
+// against a real backend that does not implement provider.EventImporter.
+type noImportCalendar struct{ provider.CalendarProvider }
+
+// Such a backend must refuse rather than fall back to CreateEvent: a create
+// is what makes the calendar server mail the organizer a REPLY, and one has
+// already gone to them. Two answers to one invitation is the bug this whole
+// road exists to avoid.
+func TestRespondByMailRefusesToFileWhereItWouldReplyTwice(t *testing.T) {
+	h := newHarness(t)
+	h.fact.cal = noImportCalendar{h.cal}
+	seedInvitation(t, h)
+
+	res, err := h.eng.RespondByMail(context.Background(), "work", "inv-1", model.PartAccepted)
+	if err != nil {
+		t.Fatalf("RespondByMail: %v", err)
+	}
+	if res.EventErr == nil {
+		t.Fatal("a backend that cannot file silently was not refused")
+	}
+	if res.Event != nil {
+		t.Errorf("event = %+v, want none", res.Event)
+	}
+	if n := len(h.cal.importedEvents()); n != 0 {
+		t.Errorf("%d events filed anyway", n)
+	}
+
+	// The RSVP is the part that cannot be taken back, and it stands: the
+	// organizer was told, and the archive recorded what was said.
+	if len(h.sentMessages()) != 1 {
+		t.Fatal("the reply did not go out")
+	}
+	msg, err := h.st.GetMessage(context.Background(), "work", "inv-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.ITIPResponse != model.PartAccepted {
+		t.Errorf("recorded %q", msg.ITIPResponse)
 	}
 }

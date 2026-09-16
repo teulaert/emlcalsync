@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	stdsync "sync"
@@ -615,6 +616,11 @@ type fakeCalendar struct {
 	changes map[string][]calChange
 	expire  map[string]bool
 
+	// imported records what ImportEvent filed, which a real backend files
+	// without mailing the organizer about it. It is the only way from here to
+	// tell a silent write from a create that would have replied twice.
+	imported []model.Event
+
 	failNext int
 	nextID   int
 }
@@ -757,6 +763,31 @@ func (f *fakeCalendar) CreateEvent(ctx context.Context, calendarRemote string, e
 	out.CalendarRemote = calendarRemote
 	f.putLocked(calendarRemote, out)
 	return &out, nil
+}
+
+func (f *fakeCalendar) ImportEvent(ctx context.Context, calendarRemote string, ev *model.Event) (*model.Event, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return nil, err
+	}
+	if ev.UID == "" {
+		return nil, errors.New("fake: ImportEvent needs a UID")
+	}
+	f.nextID++
+	out := *ev
+	out.RemoteID = fmt.Sprintf("ev-%d", f.nextID)
+	out.CalendarRemote = calendarRemote
+	f.imported = append(f.imported, out)
+	f.putLocked(calendarRemote, out)
+	return &out, nil
+}
+
+// importedEvents is what was filed silently rather than created.
+func (f *fakeCalendar) importedEvents() []model.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]model.Event(nil), f.imported...)
 }
 
 func (f *fakeCalendar) UpdateEvent(ctx context.Context, ev *model.Event) (*model.Event, error) {

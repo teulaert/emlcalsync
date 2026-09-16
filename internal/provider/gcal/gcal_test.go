@@ -42,8 +42,10 @@ type fakeCalendar struct {
 	insertQueries []url.Values
 	patchQueries  []url.Values
 	deleteQueries []url.Values
+	importQueries []url.Values
 	lastPatch     *calendarapi.Event
 	lastInsert    *calendarapi.Event
+	lastImport    *calendarapi.Event
 	patchedID     string
 	deleted       []string
 }
@@ -56,6 +58,7 @@ func newFakeCalendar(t *testing.T) *fakeCalendar {
 	mux.HandleFunc("GET /calendar/v3/users/me/calendarList", f.handleCalendarList)
 	mux.HandleFunc("GET /calendar/v3/calendars/{cid}/events", f.handleEventsList)
 	mux.HandleFunc("POST /calendar/v3/calendars/{cid}/events", f.handleInsert)
+	mux.HandleFunc("POST /calendar/v3/calendars/{cid}/events/import", f.handleImport)
 	mux.HandleFunc("GET /calendar/v3/calendars/{cid}/events/{eid}", f.handleGet)
 	mux.HandleFunc("PATCH /calendar/v3/calendars/{cid}/events/{eid}", f.handlePatch)
 	mux.HandleFunc("DELETE /calendar/v3/calendars/{cid}/events/{eid}", f.handleDelete)
@@ -124,6 +127,23 @@ func (f *fakeCalendar) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.writeJSON(w, ev)
+}
+
+func (f *fakeCalendar) handleImport(w http.ResponseWriter, r *http.Request) {
+	var ev calendarapi.Event
+	if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
+		apiError(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	f.mu.Lock()
+	f.lastImport = &ev
+	f.importQueries = append(f.importQueries, r.URL.Query())
+	f.mu.Unlock()
+	stored := ev
+	stored.Id = "imported-1"
+	stored.Status = statusConfirmed
+	stored.Updated = "2026-08-25T10:00:00Z"
+	f.writeJSON(w, &stored)
 }
 
 func (f *fakeCalendar) handleInsert(w http.ResponseWriter, r *http.Request) {
@@ -905,5 +925,88 @@ func TestCancelledInstanceWithoutTimes(t *testing.T) {
 	}
 	if ev.Timezone != "Europe/Amsterdam" {
 		t.Errorf("Timezone = %q, want the original start's zone", ev.Timezone)
+	}
+}
+
+// Filing an invited event goes through events.import, which is Google's own
+// "add a private copy of an existing event" and notifies nobody. Insert would
+// both mint a fresh iCalUID -- severing the copy from the invitation it came
+// from -- and, with attendees on it, mail them about a meeting that is not
+// the caller's to invite anyone to.
+func TestImportEventUsesImportAndKeepsTheUID(t *testing.T) {
+	f := newFakeCalendar(t)
+	c := newCal(t, f)
+
+	got, err := c.ImportEvent(context.Background(), "cal-1", &model.Event{
+		UID:       "040000008200E000-invited",
+		Title:     "AI & LPMW groep",
+		Start:     time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC),
+		End:       time.Date(2026, 9, 18, 10, 30, 0, 0, time.UTC),
+		Timezone:  "UTC",
+		Organizer: model.Address{Name: "Gert Eilander", Email: "gert@example.org"},
+		Attendees: []model.Attendee{
+			{Email: "me@example.com", Response: model.PartAccepted, Self: true},
+			{Email: "arjen@example.org", Response: model.PartNeedsAction},
+		},
+		MyResponse: model.PartAccepted,
+	})
+	if err != nil {
+		t.Fatalf("ImportEvent: %v", err)
+	}
+	if got.RemoteID != "imported-1" {
+		t.Errorf("remote id = %q, want the imported event's", got.RemoteID)
+	}
+
+	f.mu.Lock()
+	imp, ins, queries := f.lastImport, f.lastInsert, f.importQueries
+	f.mu.Unlock()
+	if ins != nil {
+		t.Error("events.insert was called — that notifies the attendees")
+	}
+	if imp == nil {
+		t.Fatal("events.import was not called")
+	}
+	if imp.ICalUID != "040000008200E000-invited" {
+		t.Errorf("iCalUID = %q, want the invitation's — that is what links the copy to the mail", imp.ICalUID)
+	}
+	if imp.Organizer == nil || imp.Organizer.Email != "gert@example.org" {
+		t.Errorf("organizer = %+v, want the one who invited (import requires it)", imp.Organizer)
+	}
+	// No sendUpdates: an import is not a change to anybody else's meeting.
+	for _, q := range queries {
+		if v := q.Get("sendUpdates"); v != "" {
+			t.Errorf("import sent sendUpdates=%q", v)
+		}
+	}
+	var self *calendarapi.EventAttendee
+	for _, a := range imp.Attendees {
+		if a.Email == "me@example.com" {
+			self = a
+		}
+	}
+	if self == nil || self.ResponseStatus != "accepted" {
+		t.Errorf("attendees = %+v, want the account's answer on its own line", imp.Attendees)
+	}
+}
+
+func TestImportEventNeedsAUIDAndAnOrganizer(t *testing.T) {
+	f := newFakeCalendar(t)
+	c := newCal(t, f)
+	base := model.Event{
+		Title: "Thing",
+		Start: time.Date(2026, 9, 18, 9, 0, 0, 0, time.UTC),
+		End:   time.Date(2026, 9, 18, 10, 0, 0, 0, time.UTC),
+	}
+
+	noUID := base
+	noUID.Organizer = model.Address{Email: "gert@example.org"}
+	if _, err := c.ImportEvent(context.Background(), "cal-1", &noUID); err == nil {
+		t.Error("imported an event with no UID — the copy would not be the invitation's")
+	}
+
+	noOrganizer := base
+	noOrganizer.UID = "u1"
+	if _, err := c.ImportEvent(context.Background(), "cal-1", &noOrganizer); err == nil {
+		t.Error("imported an event with no organizer — Google requires one")
 	}
 }
