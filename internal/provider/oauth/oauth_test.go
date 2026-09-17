@@ -336,6 +336,38 @@ func TestPersistingTokenSourceSavesRefresh(t *testing.T) {
 	}
 }
 
+// A provider is built once and then outlives the call that built it: the TUI
+// warms its providers under a context with a deadline and cancels it a moment
+// later. The token is still good then, so nothing shows — until it expires and
+// the refresh has to go out.
+func TestRefreshOutlivesTheContextTheClientWasBuiltUnder(t *testing.T) {
+	fake := newFakeGoogle(t)
+	store := &MemoryTokenStore{}
+	if err := store.Save("work.gmail", &oauth2.Token{
+		AccessToken:  "stale",
+		RefreshToken: "refresh-0",
+		TokenType:    "Bearer",
+		Expiry:       time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	src, err := TokenSource(ctx, fake.config(), store, "work.gmail")
+	if err != nil {
+		t.Fatalf("TokenSource: %v", err)
+	}
+	cancel()
+
+	tok, err := src.Token()
+	if err != nil {
+		t.Fatalf("Token after the building context was cancelled: %v", err)
+	}
+	if tok.AccessToken != "access-1" {
+		t.Errorf("refreshed access token = %q, want access-1", tok.AccessToken)
+	}
+}
+
 func TestPersistingTokenSourceReauth(t *testing.T) {
 	fake := newFakeGoogle(t)
 	fake.failWith = "invalid_grant"

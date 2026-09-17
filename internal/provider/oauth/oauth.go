@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -140,13 +141,56 @@ func IsReauthRequired(err error) bool {
 	return errors.As(err, &e)
 }
 
+// refreshTimeout bounds one trip to the token endpoint.
+const refreshTimeout = 30 * time.Second
+
+// refresher trades the refresh token for a new access token. It is what sits
+// under the ReuseTokenSource, so it is only asked once the cached token has
+// expired.
+//
+// It keeps the values of the context the source was built under (x/oauth2
+// finds its HTTP client there) but not its cancellation. A provider is built
+// once and cached, and whoever builds it is usually on a short leash: the TUI
+// warms its providers under a 60-second context. Had the refresh inherited
+// that, everything would work until the token ran out — up to an hour — and
+// then every call would fail with "context canceled" until the process was
+// restarted.
+type refresher struct {
+	ctx     context.Context
+	cfg     *oauth2.Config
+	refresh string // the current refresh token; Google rotates it now and then
+}
+
+func (r *refresher) Token() (*oauth2.Token, error) {
+	ctx, cancel := context.WithTimeout(r.ctx, refreshTimeout)
+	defer cancel()
+	tok, err := r.cfg.TokenSource(ctx, &oauth2.Token{RefreshToken: r.refresh}).Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok.RefreshToken != "" {
+		r.refresh = tok.RefreshToken
+	}
+	return tok, nil
+}
+
+// tokenSource serves tok for as long as it is valid and refreshes it after.
+// ReuseTokenSource serialises the calls to the refresher.
+func (c Config) tokenSource(ctx context.Context, tok *oauth2.Token) oauth2.TokenSource {
+	return oauth2.ReuseTokenSource(tok, &refresher{
+		ctx:     context.WithoutCancel(ctx),
+		cfg:     c.oauth2Config(""),
+		refresh: tok.RefreshToken,
+	})
+}
+
 // HTTPClient returns an *http.Client that authenticates every request with the
 // token stored under key, refreshing it when it expires and writing refreshed
 // tokens back to the store. Pass it to gmail.NewService /
 // calendar.NewService via option.WithHTTPClient.
 //
-// ctx governs the lifetime of the refresh requests, so it should be the
-// long-lived context of the sync process, not a per-call one.
+// ctx only lends its values: refreshes outlive its cancellation (see
+// refresher), so a per-call context is fine here.
 func HTTPClient(ctx context.Context, cfg Config, store TokenStore, key string) (*http.Client, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -161,9 +205,8 @@ func HTTPClient(ctx context.Context, cfg Config, store TokenStore, key string) (
 	if tok.RefreshToken == "" && !tok.Valid() {
 		return nil, &ErrReauthRequired{Key: key, Err: errors.New("stored token is expired and has no refresh token")}
 	}
-	src := cfg.oauth2Config("").TokenSource(ctx, tok)
 	return oauth2.NewClient(ctx, &persistingSource{
-		src:   src,
+		src:   cfg.tokenSource(ctx, tok),
 		store: store,
 		key:   key,
 		last:  tok.AccessToken,
@@ -181,7 +224,7 @@ func TokenSource(ctx context.Context, cfg Config, store TokenStore, key string) 
 		return nil, err
 	}
 	return &persistingSource{
-		src:   cfg.oauth2Config("").TokenSource(ctx, tok),
+		src:   cfg.tokenSource(ctx, tok),
 		store: store,
 		key:   key,
 		last:  tok.AccessToken,
