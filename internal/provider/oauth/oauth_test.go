@@ -24,6 +24,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 func TestFileTokenStoreRoundTrip(t *testing.T) {
@@ -658,5 +659,93 @@ func TestMemoryTokenStoreConcurrent(t *testing.T) {
 	}
 	if err := store.Save("k", nil); err == nil {
 		t.Error("Save of a nil token succeeded, want an error instead of a panic")
+	}
+}
+
+// A refresh that cannot reach the token endpoint has to read as a pre-request
+// failure, not merely as "offline". oauth2.Transport asks for a token before
+// it hands the request to the base transport, so a refresh that never
+// connected means the request it would have signed never left the machine —
+// and the outbox may hold a queued send instead of retiring it as
+// possibly-half-sent. The message text alone cannot carry that: the outbox
+// reads the error chain.
+func TestRefreshThatCannotConnectIsQueueable(t *testing.T) {
+	fake := newFakeGoogle(t)
+	cfg := fake.config()
+	fake.srv.Close() // nothing listens on that port now: the dial is refused
+
+	store := &MemoryTokenStore{}
+	if err := store.Save("work.gmail", &oauth2.Token{
+		AccessToken: "stale", RefreshToken: "refresh-0", TokenType: "Bearer",
+		Expiry: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	src, err := TokenSource(context.Background(), cfg, store, "work.gmail")
+	if err != nil {
+		t.Fatalf("TokenSource: %v", err)
+	}
+	if _, err := src.Token(); err == nil {
+		t.Fatal("Token succeeded against a closed token endpoint")
+	} else {
+		if !provider.IsOffline(err) {
+			t.Errorf("IsOffline(%v) = false, want true", err)
+		}
+		if !provider.IsPreRequestFailure(err) {
+			t.Errorf("IsPreRequestFailure(%v) = false, want true: nothing was sent", err)
+		}
+		if IsReauthRequired(err) {
+			t.Errorf("a refused dial must not ask the user to log in again: %v", err)
+		}
+	}
+}
+
+// The same holds for a token endpoint that accepts the connection and then
+// says nothing until the refresh's own deadline runs out. Elsewhere a timeout
+// is ambiguous — the request may have arrived and the answer been lost — but
+// the answer that went missing here is a token, and without one the write was
+// never signed, let alone sent.
+func TestRefreshThatTimesOutIsQueueable(t *testing.T) {
+	// The handler holds the request open past the refresh deadline, but never
+	// past the test: httptest.Server.Close waits for its handlers to return.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer srv.Close()
+
+	restore := refreshTimeout
+	refreshTimeout = 50 * time.Millisecond
+	defer func() { refreshTimeout = restore }()
+
+	store := &MemoryTokenStore{}
+	if err := store.Save("work.gmail", &oauth2.Token{
+		AccessToken: "stale", RefreshToken: "refresh-0", TokenType: "Bearer",
+		Expiry: time.Now().Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		Endpoint:     oauth2.Endpoint{TokenURL: srv.URL + "/token"},
+	}
+
+	src, err := TokenSource(context.Background(), cfg, store, "work.gmail")
+	if err != nil {
+		t.Fatalf("TokenSource: %v", err)
+	}
+	if _, err := src.Token(); err == nil {
+		t.Fatal("Token succeeded against a token endpoint that never answered")
+	} else {
+		if !provider.IsOffline(err) {
+			t.Errorf("IsOffline(%v) = false, want true", err)
+		}
+		if !provider.IsPreRequestFailure(err) {
+			t.Errorf("IsPreRequestFailure(%v) = false, want true: no token, no request", err)
+		}
 	}
 }

@@ -19,6 +19,7 @@ import (
 	gmail "google.golang.org/api/gmail/v1"
 
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // DefaultScopes is what emlcal asks for: gmail.modify covers read, label
@@ -141,8 +142,9 @@ func IsReauthRequired(err error) bool {
 	return errors.As(err, &e)
 }
 
-// refreshTimeout bounds one trip to the token endpoint.
-const refreshTimeout = 30 * time.Second
+// refreshTimeout bounds one trip to the token endpoint. It is a var only so
+// that tests need not wait out the real thing.
+var refreshTimeout = 30 * time.Second
 
 // refresher trades the refresh token for a new access token. It is what sits
 // under the ReuseTokenSource, so it is only asked once the cached token has
@@ -297,12 +299,30 @@ func (p *persistingSource) classify(err error) error {
 }
 
 // wrapOffline tags transport-level failures with model.ErrOffline so the sync
-// engine can distinguish "no network" from "the server said no" (§12).
+// engine can distinguish "no network" from "the server said no" (§12), and
+// with provider.ErrNotConnected so that a write which must not run twice can
+// still be queued and retried.
+//
+// Everything that lands here is a pre-request failure, and — unlike the other
+// providers, which only dare say that of a refused dial — that holds even for
+// a timeout or a reset. A refresh is a prerequisite request to Google's token
+// endpoint, and oauth2.Transport asks the source for a token before it
+// touches the base transport: when the token never arrives it returns there
+// and then, so the request it would have signed cannot have reached anyone,
+// however the trip to the token endpoint went wrong. Nothing was sent twice
+// because nothing was sent at all, which is what lets the outbox hold on to a
+// queued send instead of retiring it as possibly-half-sent (retryable in
+// internal/sync/outbox.go).
 func wrapOffline(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	// A refresh does not inherit the caller's cancellation any more (see
+	// refresher), so a deadline reaching this point is the refresher's own
+	// 30 seconds running out — a token endpoint that would not answer, not a
+	// caller that lost interest. Cancellation can no longer arrive at all;
+	// should that ever change, it still means the caller and not the network.
+	if errors.Is(err, context.Canceled) {
 		return err
 	}
 	var dnsErr *net.DNSError
@@ -310,12 +330,12 @@ func wrapOffline(err error) error {
 	var urlErr *url.Error
 	var netErr net.Error
 	switch {
-	case errors.As(err, &dnsErr), errors.As(err, &opErr), errors.As(err, &netErr):
-		return fmt.Errorf("%w: %v", model.ErrOffline, err)
-	case errors.As(err, &urlErr):
-		return fmt.Errorf("%w: %v", model.ErrOffline, err)
-	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return fmt.Errorf("%w: %v", model.ErrOffline, err)
+	case errors.As(err, &dnsErr), errors.As(err, &opErr), errors.As(err, &netErr),
+		errors.As(err, &urlErr):
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF),
+		errors.Is(err, context.DeadlineExceeded):
+	default:
+		return err
 	}
-	return err
+	return fmt.Errorf("%w: %w: %v", model.ErrOffline, provider.ErrNotConnected, err)
 }

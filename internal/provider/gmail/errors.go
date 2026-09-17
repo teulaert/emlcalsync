@@ -17,6 +17,7 @@ import (
 	"google.golang.org/api/googleapi"
 
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 const (
@@ -208,7 +209,15 @@ func wrapErr(name string, err error) error {
 }
 
 // offlineErr returns a model.ErrOffline-wrapped error when err is a
-// transport-level failure, or nil when the server answered.
+// transport-level failure, or nil when the server answered. A failure that
+// demonstrably never left the machine also carries provider.ErrNotConnected,
+// which is what lets the outbox keep a queued send rather than retire it as
+// possibly-half-sent — composing offline and sending when the network returns
+// is the point of the outbox (DESIGN §12).
+//
+// The cause is still formatted with %v, so the sentinels have to be put in the
+// chain here: IsPreRequestFailure reads the chain and cannot be told anything
+// by the message text.
 func offlineErr(err error) error {
 	if err == nil {
 		return nil
@@ -226,11 +235,17 @@ func offlineErr(err error) error {
 	var netErr net.Error
 	switch {
 	case errors.As(err, &dnsErr), errors.As(err, &opErr), errors.As(err, &netErr), errors.As(err, &urlErr):
-		return fmt.Errorf("%w: %v", model.ErrOffline, err)
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return fmt.Errorf("%w: %v", model.ErrOffline, err)
+	default:
+		return nil
 	}
-	return nil
+	// A refresh that never connected counts too: oauth.wrapOffline has
+	// already said so, and the token it failed to fetch was needed before any
+	// of this request could go out.
+	if provider.IsPreRequestFailure(err) {
+		return fmt.Errorf("%w: %w: %v", model.ErrOffline, provider.ErrNotConnected, err)
+	}
+	return fmt.Errorf("%w: %v", model.ErrOffline, err)
 }
 
 // decodeBase64URL decodes Gmail's base64url payloads, tolerating both padded
