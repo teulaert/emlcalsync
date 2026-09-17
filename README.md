@@ -310,7 +310,10 @@ a second one, and `ctrl+x` in the composer deletes the draft being edited.
 `f` forwards the message in focus, attachments and all — they are fetched
 with it, shown in the composer, and any that could not be got are named there
 rather than quietly left off — and `c` writes a new one from the account the
-list is filtered to; both open with the cursor in To. `v` lists the files a
+list is filtered to; both open with the cursor in To. In any composer
+`ctrl+o` attaches a file from the disk — type a path, paste one, or drop the
+file on the terminal; `tab` completes it — and `ctrl+r` takes the last file
+off again. `v` lists the files a
 message carries, where `enter` opens one on the desktop and `w` saves it. `emlcal mail forward <id>
 --to ..` is the same thing from the shell, files and all. The keys are Gmail's
 over vim's (`e` archive, `s` star, `d` trash, `i` back to the inbox,

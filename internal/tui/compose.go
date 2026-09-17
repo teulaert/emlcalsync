@@ -89,6 +89,14 @@ type composeView struct {
 	// next keystroke clears.
 	files     []mime.DraftAttachment
 	filesNote string
+	// filesEdited is set once ctrl+o or ctrl+r has changed the row, so esc
+	// counts a file put on the message as work, the way it counts a word.
+	filesEdited bool
+
+	// attaching is the path prompt ctrl+o opens on the status line; path is
+	// what has been typed into it. See compose_attach.go.
+	attaching bool
+	path      string
 
 	// quote is the quoted original the reply opened with, so the AI draft
 	// can tell the person's own text from what sits under it. Empty on a
@@ -382,6 +390,10 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 		}
 		return c, nil
 	}
+	if paste, ok := msg.(tea.PasteMsg); ok && c.attaching {
+		c.attachPaste(paste.Content)
+		return c, nil
+	}
 	press, isKey := msg.(tea.KeyPressMsg)
 	if !isKey {
 		return c, c.toFocused(msg)
@@ -400,6 +412,10 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 	if c.asking {
 		return c, c.askKey(press)
 	}
+	if c.attaching {
+		c.attachKey(press)
+		return c, nil
+	}
 
 	switch {
 	// ctrl+c never reaches here: the root takes it as quit, ahead of the
@@ -417,6 +433,12 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 		return c, c.delete()
 	case key.Matches(press, k.AI):
 		return c, c.startAsk()
+	case key.Matches(press, k.Attach):
+		c.startAttach()
+		return c, nil
+	case key.Matches(press, k.Detach):
+		c.detach()
+		return c, nil
 	case key.Matches(press, k.NextField):
 		c.moveFocus(1)
 		return c, nil
@@ -587,7 +609,7 @@ func (c *composeView) delete() tea.Cmd {
 // draft -- so comparing against what it opened with is what tells work from an
 // untouched screen, and an untouched screen closes on the first esc.
 func (c *composeView) edited() bool {
-	return c.seed != composeSeed{
+	return c.filesEdited || c.seed != composeSeed{
 		to:   c.to.Value(),
 		cc:   c.cc.Value(),
 		bcc:  c.bcc.Value(),
@@ -778,6 +800,8 @@ func (c *composeView) footer(w int) string {
 		return "sending…"
 	case c.assist != nil:
 		return c.assistFooter()
+	case c.attaching:
+		return c.attachFooter(w)
 	case c.asking:
 		return padCells("ai · instructions, or enter alone to just answer it: "+c.instr+"█", w)
 	case c.err != nil:
@@ -806,6 +830,7 @@ func (c *composeView) footer(w int) string {
 	} else {
 		hints = append(hints, "ctrl+s save as draft")
 	}
+	hints = append(hints, "ctrl+o attach")
 	if c.threadID != "" {
 		hints = append(hints, "ctrl+g ai draft")
 	}

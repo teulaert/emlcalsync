@@ -52,6 +52,8 @@ type keymap struct {
 	Send        key.Binding
 	SaveDraft   key.Binding
 	DeleteDraft key.Binding
+	Attach      key.Binding
+	Detach      key.Binding
 	NextField   key.Binding
 	PrevField   key.Binding
 	// The From row: which account a new message or a forward goes out from.
@@ -113,6 +115,8 @@ func defaultKeys() keymap {
 		Send:        key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "send")),
 		SaveDraft:   key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save as a draft")),
 		DeleteDraft: key.NewBinding(key.WithKeys("ctrl+x"), key.WithHelp("ctrl+x", "delete the draft")),
+		Attach:      key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "attach a file")),
+		Detach:      key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "take the last file off")),
 		NextField:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next field")),
 		PrevField:   key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "previous field")),
 		NextAccount: key.NewBinding(key.WithKeys("right", "space"),
@@ -165,6 +169,8 @@ func (k keymap) helpLines() [][2]string {
 		{"  ctrl+d", "send it"},
 		{"  ctrl+s", "save it as a draft on the server"},
 		{"  ctrl+x", "delete the draft being edited (twice)"},
+		{"  ctrl+o", "attach a file from the disk: type or paste a path, tab completes it"},
+		{"  ctrl+r", "take the last attached file off again"},
 		{"  ctrl+g", "draft it with the AI model: asks for instructions, enter alone just answers"},
 		{"  tab / shift+tab", "next / previous field (shift+tab from To reaches From)"},
 		{"  ← / → , space", "on the From row: the account it goes out from (a new message or a forward)"},

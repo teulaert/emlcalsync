@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
-	stdmime "mime"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -266,15 +264,11 @@ func (f *mailComposeFlags) bodyText(cmd *cobra.Command, app *App, optional bool)
 func (f *mailComposeFlags) attachments() ([]mime.DraftAttachment, error) {
 	var out []mime.DraftAttachment
 	for _, p := range f.attach {
-		data, err := os.ReadFile(p)
+		a, err := mime.FileAttachment(p)
 		if err != nil {
 			return nil, output.Errorf(output.ExitUsage, "--attach: %v", err)
 		}
-		ct := stdmime.TypeByExtension(filepath.Ext(p))
-		if ct == "" {
-			ct = "application/octet-stream"
-		}
-		out = append(out, mime.DraftAttachment{Filename: filepath.Base(p), ContentType: ct, Data: data})
+		out = append(out, a)
 	}
 	return out, nil
 }
