@@ -251,6 +251,7 @@ func (d Deps) apply(label string, ops []accountOp, undo *undoRecord) tea.Cmd {
 		for _, ao := range ops {
 			r, err := d.applyOne(ctx, label, ao)
 			if err != nil {
+				d.log().Warn("write failed: "+label, "account", ao.account, "err", err)
 				res.err = fmt.Errorf("%s: %w", ao.account, err)
 				res.undo = nil // Apply already rolled its own patch back.
 				return res
@@ -284,6 +285,7 @@ func (d Deps) applyOne(ctx context.Context, label string, ao accountOp) (*sync.A
 		}
 		msg := applied{action: label, account: ao.account, settled: true}
 		if err != nil {
+			d.log().Warn("deferred write failed: "+label, "account", ao.account, "err", err)
 			msg.err = fmt.Errorf("%s: %w", ao.account, err)
 		} else {
 			msg.queued = true
@@ -339,6 +341,7 @@ func (d Deps) submit(what, account string, op sync.Op, orig *model.Message, repl
 		defer cancel()
 		res, err := d.Engine.Apply(ctx, account, op)
 		if err != nil {
+			d.log().Warn("submit failed: "+what, "account", account, "err", err)
 			// A submission that never left the machine comes back queued, not
 			// as an error. Being offline *here* means the connection dropped
 			// mid-request, so the engine will not replay it: the provider may

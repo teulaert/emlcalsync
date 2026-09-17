@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -185,3 +188,37 @@ func TestRespondOpCarriesTheCalendar(t *testing.T) {
 
 // Guard the assumption the rename handling rests on.
 var _ = provider.Rename{Old: "a", New: "b"}
+
+// A write that fails is reported on screen, which is no help an hour later
+// when the question is why every Gmail action stopped working. It has to reach
+// the log file too — the daemon's log is where a user goes looking, and until
+// this it held nothing at all about the TUI's own provider failures.
+func TestAFailedSubmitReachesTheLog(t *testing.T) {
+	d, mail := newTriageDeps(t)
+
+	var logged bytes.Buffer
+	d.Logger = slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	// An ambiguous failure: the request was on the wire, so the engine will
+	// not replay it and the composer is told, rather than queueing it.
+	mail.FailNextAmbiguous(1)
+	msg := d.submit("send", "work", sync.Op{
+		Kind: sync.OpSend,
+		Raw:  []byte("From: work@example.com\r\nTo: anna@example.com\r\nSubject: offerte\r\n\r\nhi\r\n"),
+	}, nil, "")()
+
+	res, ok := msg.(submitted)
+	if !ok {
+		t.Fatalf("submit returned %T, want submitted", msg)
+	}
+	if res.err == nil {
+		t.Fatal("the send succeeded; this test needs a failing one")
+	}
+	out := logged.String()
+	if !strings.Contains(out, "submit failed: send") {
+		t.Errorf("log does not name the failed action:\n%s", out)
+	}
+	if !strings.Contains(out, "account=work") {
+		t.Errorf("log does not name the account:\n%s", out)
+	}
+}

@@ -491,7 +491,10 @@ func (e *Engine) WarmMail(ctx context.Context) {
 			continue
 		}
 		if _, err := e.mailProvider(ctx, acct); err != nil {
-			e.log.Debug("warm mail provider", "account", acct.Name, "err", err)
+			// Warn, not Debug: this is where a Gmail account trades its
+			// refresh token for an access token, and a provider that will not
+			// build is the whole session's mail failing a moment later.
+			e.log.Warn("warm mail provider", "account", acct.Name, "err", err)
 		}
 	}
 }

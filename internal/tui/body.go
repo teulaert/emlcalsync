@@ -75,6 +75,7 @@ func readableBody(ctx context.Context, d Deps, m *model.Message) bodyText {
 	}
 	raw, err := d.Engine.EnsureRaw(ctx, m.AccountID, m.RemoteID)
 	if err != nil {
+		d.log().Warn("read body: fetch raw", "id", m.PublicID(), "err", err)
 		return bodyText{own: "(this message was too large to archive in full, and fetching it now failed: " +
 			err.Error() + ")"}
 	}
@@ -100,6 +101,7 @@ func ensureText(ctx context.Context, d Deps, m *model.Message) {
 	}
 	raw, err := d.Engine.EnsureRaw(ctx, m.AccountID, m.RemoteID)
 	if err != nil {
+		d.log().Warn("quote original: fetch raw", "id", m.PublicID(), "err", err)
 		return
 	}
 	if parsed, err := mime.Parse(raw); err == nil {
