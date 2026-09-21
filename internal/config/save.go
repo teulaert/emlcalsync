@@ -178,7 +178,9 @@ func render(c *Config) []byte {
 			if m.Backend != "" && m.Backend != DefaultAIBackend {
 				fmt.Fprintf(&b, "backend = %s\n", quote(m.Backend))
 			}
-			fmt.Fprintf(&b, "model   = %s\n", quote(m.Model))
+			if m.Model != "" {
+				fmt.Fprintf(&b, "model   = %s\n", quote(m.Model))
+			}
 			if m.URL != "" && !(m.Backend == AIBackendOllama && m.URL == DefaultOllamaURL) {
 				fmt.Fprintf(&b, "url     = %s\n", quote(m.URL))
 			}

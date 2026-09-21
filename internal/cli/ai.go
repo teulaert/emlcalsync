@@ -5,6 +5,7 @@ import (
 
 	"github.com/teulaert/emlcalsync/internal/ai"
 	"github.com/teulaert/emlcalsync/internal/ai/ollama"
+	"github.com/teulaert/emlcalsync/internal/ai/openai"
 	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/output"
 )
@@ -29,6 +30,12 @@ func (a *App) AI() (ai.Client, error) {
 	switch m.Backend {
 	case config.AIBackendOllama:
 		return ollama.New(ollama.Options{
+			URL:     m.URL,
+			Model:   m.Model,
+			Timeout: time.Duration(m.Timeout),
+		}), nil
+	case config.AIBackendOpenAI:
+		return openai.New(openai.Options{
 			URL:     m.URL,
 			Model:   m.Model,
 			Timeout: time.Duration(m.Timeout),

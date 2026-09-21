@@ -339,9 +339,10 @@ in the composer drafts the reply. `emlcal ai summarize <id> [--ask "…"]` and
 line, JSON when piped: the summary to read, the draft to print, to pipe into
 `mail reply --body-file -`, or with `--save` to store on the server under the
 thread — where your phone's mail app shows it, ready to edit and send. Nothing
-under `ai` ever sends. Only a local Ollama is supported
-so far; the layer behind it (`internal/ai`) is one small interface, so a
-cloud backend is a config block and one switch case away. Nothing is sent
+under `ai` ever sends. Two backends are supported: a local Ollama, and
+anything that speaks the OpenAI chat-completions API (llama.cpp's
+`llama-server`, vLLM, LM Studio). The layer behind them (`internal/ai`) is one
+small interface, so another is a config block and one switch case away. Nothing is sent
 anywhere unless a model is configured, and then only to the server you name.
 
 ```toml
@@ -351,13 +352,24 @@ default = "local"                    # optional: otherwise the first model below
 
 [[ai.models]]
 name    = "local"
-backend = "ollama"                   # the default; the only one for now
+backend = "ollama"                   # the default
 model   = "qwen3:32b"                # whatever `ollama list` shows
 url     = "http://localhost:11434"   # the default
 timeout = "5m"                       # per draft; the default
+
+[[ai.models]]
+name    = "loaded"
+backend = "openai"                   # any OpenAI-compatible server
+url     = "http://localhost:8080/v1" # required; with or without the /v1
+# model = "..."                      # optional: left out, it is whatever the server has loaded
 ```
 
-The model runs at whatever window Ollama loaded it with — emlcal does not
+Leaving `model` out suits a box where one endpoint serves whichever model is
+loaded at the moment (a `llama-server` ignores the name it is sent): emlcal
+asks the server what it is serving, shows that in the status line, and asks
+again after a minute in case it was swapped.
+
+The model runs at whatever window the server loaded it with — emlcal does not
 second-guess that, it asks the server and trims the thread to fit, oldest
 messages first, never dropping the message being answered. Any current model
 has room for a long thread many times over.

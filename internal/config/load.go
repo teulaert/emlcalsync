@@ -530,10 +530,15 @@ func validateAI(ai *AI, add func(string, ...any)) {
 		}
 		switch m.Backend {
 		case AIBackendOllama:
+		case AIBackendOpenAI:
+			if m.URL == "" {
+				add("%s: url is required for the openai backend (e.g. \"http://localhost:8080/v1\")", label)
+			}
 		default:
-			add("%s: backend %q is not one of %s", label, m.Backend, AIBackendOllama)
+			add("%s: backend %q is not one of %s, %s", label, m.Backend, AIBackendOllama, AIBackendOpenAI)
 		}
-		if strings.TrimSpace(m.Model) == "" {
+		// An OpenAI-compatible server may be serving one model it names itself.
+		if strings.TrimSpace(m.Model) == "" && m.Backend != AIBackendOpenAI {
 			add("%s: model is required (the backend's name for it, e.g. \"qwen3:32b\")", label)
 		}
 		if m.URL != "" {

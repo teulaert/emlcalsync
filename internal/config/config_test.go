@@ -1125,7 +1125,8 @@ func TestValidateAI(t *testing.T) {
 	}{
 		{"bad name", func(c *Config) { c.AI.Models[0].Name = "Not Valid" }, "name must be"},
 		{"dup name", func(c *Config) { c.AI.Models = append(c.AI.Models, c.AI.Models[0]) }, "duplicate model name"},
-		{"bad backend", func(c *Config) { c.AI.Models[0].Backend = "openai" }, `backend "openai"`},
+		{"bad backend", func(c *Config) { c.AI.Models[0].Backend = "claude" }, `backend "claude"`},
+		{"openai without a url", func(c *Config) { c.AI.Models[0] = AIModel{Name: "local", Backend: AIBackendOpenAI} }, "url is required"},
 		{"no model", func(c *Config) { c.AI.Models[0].Model = " " }, "model is required"},
 		{"bad url", func(c *Config) { c.AI.Models[0].URL = "gpu-box:11434" }, "must be an http(s) URL"},
 		{"unknown default", func(c *Config) { c.AI.Default = "cloud" }, `ai.default: "cloud"`},
@@ -1138,6 +1139,13 @@ func TestValidateAI(t *testing.T) {
 			t.Errorf("%s: err = %v, want it to mention %q", tc.name, err, tc.want)
 		}
 	}
+
+	// An OpenAI-compatible server may name its own model: only the URL is needed.
+	c := base()
+	c.AI.Models[0] = AIModel{Name: "local", Backend: AIBackendOpenAI, URL: "http://localhost:8080/v1"}
+	if err := c.Validate(); err != nil {
+		t.Errorf("openai with a url and no model should validate: %v", err)
+	}
 }
 
 func TestSaveKeepsAIModels(t *testing.T) {
@@ -1148,6 +1156,7 @@ func TestSaveKeepsAIModels(t *testing.T) {
 	orig.AI.Models = []AIModel{
 		{Name: "small", Backend: AIBackendOllama, Model: "qwen3:8b", URL: DefaultOllamaURL, Timeout: Duration(DefaultAITimeout)},
 		{Name: "big", Backend: AIBackendOllama, Model: "qwen3:32b", URL: "http://gpu-box:11434", Timeout: Duration(10 * time.Minute)},
+		{Name: "loaded", Backend: AIBackendOpenAI, URL: "http://localhost:8080/v1", Timeout: Duration(DefaultAITimeout)},
 	}
 	p := filepath.Join(dir, "config.toml")
 	if err := Save(p, orig); err != nil {

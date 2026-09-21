@@ -1103,7 +1103,8 @@ email    = "lennert@example.com"
   archive_folder = "Archief"            # when the name is not recognised
 
 # Language models the TUI can draft with (ctrl+g in the composer). Absent =
-# off. Only Ollama for now; the block is shaped for more.
+# off. backend is "ollama" or "openai" (any OpenAI-compatible server; url
+# required, model optional: left out, it is whatever the server has loaded).
 [ai]
 default = "local"
 
@@ -1171,7 +1172,8 @@ internal/
   compose/        reply headers, quoting, address parsing, SMTP envelope (cli + tui)
   doctext/        attachment -> text: pdftotext for PDFs, html2text, plain text
   ai/             language-model layer: Client interface, tool loop (Run), reply prompt, CleanText
-    ollama/       the one backend: /api/chat over HTTP, streamed, tool calls
+    ollama/       Ollama's /api/chat over HTTP, streamed, tool calls
+    openai/       /v1/chat/completions over SSE (llama-server, vLLM, ...); the model may be the server's
   sync/           engine: backfill, delta, reconcile, outbox, scheduler, watch
   provider/       interfaces + registry
     gmail/  gcal/  jmap/ (mail + calendar)  caldav/  imap/ (mail + smtp)  oauth/
@@ -1579,7 +1581,7 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     attribution-finding the reader uses — which is why that is exported now.
   - **The model layer is `internal/ai`**, one interface (`Describe`,
     `ContextWindow`, `Chat` streaming through a callback) and the prompt
-    assembly beside it, with `ai/ollama` the one backend. The backend is
+    assembly beside it, with `ai/ollama` and `ai/openai` the backends. The backend is
     picked in `internal/cli` (`App.AI`) from the `[ai]` table, the way
     `Factory` picks providers from an account's blocks, so adding one is a
     switch case; `Validate` refuses a backend it does not know. Nothing in

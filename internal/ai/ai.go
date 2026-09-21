@@ -3,7 +3,7 @@
 //
 // It is deliberately narrow. A Client is one configured model that can be
 // handed a conversation and streams text back; which model, where it runs and
-// how it is spoken to are the backend's business (ai/ollama for now), chosen
+// how it is spoken to are the backend's business (ai/ollama, ai/openai), chosen
 // in internal/cli from the [ai] table the same way providers are chosen from
 // an account's blocks. Nothing here touches the store, the engine or a
 // provider — what a request is built out of is assembled by the caller, so

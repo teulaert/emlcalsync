@@ -220,12 +220,14 @@ type AI struct {
 type AIModel struct {
 	// Name is how the entry is referred to (ai.default, and later --model).
 	Name string `toml:"name"`
-	// Backend is the API spoken: "ollama" for now.
+	// Backend is the API spoken: "ollama", or "openai" for anything with an
+	// OpenAI-compatible /v1/chat/completions (llama-server, vLLM, a gateway).
 	Backend string `toml:"backend"`
-	// Model is the backend's own name for the model, e.g. "qwen3:32b".
+	// Model is the backend's own name for the model, e.g. "qwen3:32b". The
+	// openai backend may leave it empty: whatever the server has loaded.
 	Model string `toml:"model"`
 	// URL is where the backend listens; empty means the backend's default
-	// (http://localhost:11434 for Ollama).
+	// (http://localhost:11434 for Ollama). The openai backend has none.
 	URL string `toml:"url"`
 	// Timeout bounds one whole generation; 0 means DefaultAITimeout.
 	Timeout Duration `toml:"timeout"`
@@ -357,6 +359,7 @@ const (
 
 	// AI backends.
 	AIBackendOllama  = "ollama"
+	AIBackendOpenAI  = "openai"
 	DefaultAIBackend = AIBackendOllama
 	DefaultOllamaURL = "http://localhost:11434"
 	DefaultAITimeout = 5 * time.Minute
