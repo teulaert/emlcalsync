@@ -331,12 +331,32 @@ func (e *Engine) syncResource(ctx context.Context, acct config.Account, o SyncOp
 		}
 		e.log.Warn("sync failed", "account", acct.Name, "resource", resource,
 			"added", total.Added, "duration", total.Duration.Round(time.Millisecond), "err", err)
+		e.recordCheck(ctx, acct.Name, resource, err)
 		return total, err
 	}
 	e.log.Info("sync finished", "account", acct.Name, "resource", resource, "kind", total.Kind,
 		"added", total.Added, "updated", total.Updated, "removed", total.Removed,
 		"duration", total.Duration.Round(time.Millisecond))
+	e.recordCheck(ctx, acct.Name, resource, nil)
 	return total, nil
+}
+
+// recordCheck notes that a pass over one resource has completed, with or
+// without an error, so that `emlcal status` can tell "checked an hour ago and
+// found nothing" from "has not looked in an hour". The sync log cannot: it
+// only has rows for passes that changed something or failed, which is right
+// for a log -- a poll a minute would drown it -- and useless as a pulse.
+//
+// A pass the context cut short has not completed: the daemon shutting down
+// mid-delta is not the provider failing, and the store would refuse the write
+// under the dead context anyway. It leaves the row as it was.
+func (e *Engine) recordCheck(ctx context.Context, account, resource string, passErr error) {
+	if ctx.Err() != nil {
+		return
+	}
+	if err := e.st.RecordSyncCheck(ctx, account, resource, time.Now(), passErr); err != nil {
+		e.log.Warn("sync check", "account", account, "resource", resource, "err", err)
+	}
 }
 
 // workInFlight reports whether an outage has interrupted something worth

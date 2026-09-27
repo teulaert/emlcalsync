@@ -142,7 +142,7 @@ emlcal account add gmail --name gm --email you@gmail.com        # opens the cons
 
 ```bash
 emlcal sync                      # full backfill of every account; resumable
-emlcal status                    # counts, backfill progress, last sync
+emlcal status                    # counts, backfill progress, when each resource was last checked
 emlcal sync                      # afterwards: incremental delta in seconds
 ```
 

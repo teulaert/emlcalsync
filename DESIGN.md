@@ -289,10 +289,19 @@ CREATE TABLE outbox (                      -- queued writes (offline or failed)
   done_at     INTEGER
 );
 
-CREATE TABLE sync_log (
+CREATE TABLE sync_log (                    -- passes that changed something, or failed
   id INTEGER PRIMARY KEY, account_id TEXT, kind TEXT,
   started_at INTEGER, finished_at INTEGER,
   added INTEGER, updated INTEGER, removed INTEGER, error TEXT
+);
+
+CREATE TABLE sync_checks (                 -- every completed pass, found anything or not
+  account_id   TEXT NOT NULL,
+  resource     TEXT NOT NULL,              -- 'mail' | 'calendar'
+  checked_at   INTEGER,                    -- last pass that completed without error
+  attempted_at INTEGER NOT NULL,           -- last pass that completed at all
+  error        TEXT,                       -- what it failed with; NULL on success
+  PRIMARY KEY (account_id, resource)
 );
 
 -- Calendar ---------------------------------------------------------------
@@ -629,6 +638,21 @@ replays rather than skips.
 Full id enumeration diffed against the local set; see 6.1 / 6.2. Logged loudly
 in `sync_log` because it's slow and should be rare.
 
+### 7.3a Checked vs. changed
+
+`sync_log` only has rows for passes that applied something or failed: a poll a
+minute for months would otherwise bury what the log is for. So its newest row
+is *when the resource last changed*, and on a quiet mailbox that falls hours
+behind without anything being wrong. `sync_checks` is the pulse: one row per
+account and resource, moved by every pass that completes. `checked_at` is the
+finish of the last pass that completed without error, whatever it found;
+`attempted_at` and `error` record the last pass that completed at all, so a
+failing account still shows its last known good check. A pass still running,
+or cut short by the daemon shutting down, moves nothing. `emlcal status`
+reports both per resource (`mail_sync`, `calendar_sync`: `checked_at`,
+`changed_at`, `failed_at`, `error`); `checked_at` is the freshness check, and
+a monitor must not read `changed_at` as one.
+
 ### 7.4 Outbox
 
 Write commands construct an outbox row *first*, then try to apply it
@@ -889,7 +913,8 @@ emlcal account add fastmail --name personal     prompts for API token
 emlcal account list | remove <name>
 
 emlcal sync [--account A] [--full] [--watch]
-emlcal status                                   per account: last sync, counts,
+emlcal status                                   per account: when mail and calendar were
+                                                last checked and last changed, counts,
                                                 backfill %, outbox, daemon state
 emlcal doctor                                   tokens valid? db integrity? disk?
 

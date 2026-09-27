@@ -504,3 +504,110 @@ func (s *Store) PruneSyncLog(ctx context.Context, keep int) error {
 	}
 	return nil
 }
+
+// LastSyncChange returns the newest successful sync_log entry for one
+// resource -- "mail" (every kind but calendar) or "calendar" -- or nil when
+// nothing has ever been logged for it. Because a pass is only logged when it
+// applied something, this is the last time the resource *changed*. It says
+// nothing about when it was last looked at; that is GetSyncCheck.
+func (s *Store) LastSyncChange(ctx context.Context, accountID, resource string) (*SyncLogEntry, error) {
+	q := `SELECT id, account_id, kind, started_at, finished_at, added, updated, removed
+	        FROM sync_log WHERE account_id = ? AND error IS NULL AND kind `
+	if resource == "calendar" {
+		q += `= 'calendar'`
+	} else {
+		q += `<> 'calendar'`
+	}
+	q += ` ORDER BY id DESC LIMIT 1`
+	var e SyncLogEntry
+	var acct, kind sql.NullString
+	var started, finished, added, updated, removed sql.NullInt64
+	err := s.db.QueryRowContext(ctx, q, accountID).Scan(&e.ID, &acct, &kind, &started, &finished,
+		&added, &updated, &removed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: last sync change: %w", err)
+	}
+	e.AccountID = acct.String
+	e.Kind = kind.String
+	e.Started = nullTime(started)
+	e.Finished = nullTime(finished)
+	e.Added = int(added.Int64)
+	e.Updated = int(updated.Int64)
+	e.Removed = int(removed.Int64)
+	return &e, nil
+}
+
+// ---------------------------------------------------------------------------
+// Sync checks (migrations/0009_sync_checks.sql)
+
+// SyncCheck is when one resource of one account was last looked at, as
+// distinct from when it last changed.
+//
+// CheckedAt is the finish of the last pass that completed without error,
+// whether or not it found anything: the freshness a monitor should read.
+// AttemptedAt is the finish of the last pass that completed at all, and Error
+// is what that pass failed with -- empty when it succeeded, in which case the
+// two times are the same.
+type SyncCheck struct {
+	AccountID   string    `json:"account"`
+	Resource    string    `json:"resource"` // mail|calendar
+	CheckedAt   time.Time `json:"checked_at"`
+	AttemptedAt time.Time `json:"attempted_at"`
+	Error       string    `json:"error,omitempty"`
+}
+
+// Failed reports that the most recent completed pass did not succeed.
+func (c *SyncCheck) Failed() bool { return c != nil && c.Error != "" }
+
+// RecordSyncCheck notes that a pass over resource finished at `at`. A nil err
+// moves CheckedAt and AttemptedAt together and clears the error; a non-nil err
+// moves only AttemptedAt, so the last good check is still on record.
+func (s *Store) RecordSyncCheck(ctx context.Context, accountID, resource string, at time.Time, err error) error {
+	return s.tx().RecordSyncCheck(ctx, accountID, resource, at, err)
+}
+
+func (tx *Tx) RecordSyncCheck(ctx context.Context, accountID, resource string, at time.Time, passErr error) error {
+	var q string
+	args := []any{accountID, resource, unixOf(at)}
+	if passErr == nil {
+		q = `INSERT INTO sync_checks (account_id, resource, checked_at, attempted_at, error)
+		     VALUES (?, ?, ?, ?, NULL)
+		     ON CONFLICT (account_id, resource) DO UPDATE SET
+		       checked_at = excluded.checked_at, attempted_at = excluded.attempted_at, error = NULL`
+		args = append(args, unixOf(at))
+	} else {
+		q = `INSERT INTO sync_checks (account_id, resource, checked_at, attempted_at, error)
+		     VALUES (?, ?, NULL, ?, ?)
+		     ON CONFLICT (account_id, resource) DO UPDATE SET
+		       attempted_at = excluded.attempted_at, error = excluded.error`
+		args = append(args, passErr.Error())
+	}
+	if _, err := tx.q.ExecContext(ctx, q, args...); err != nil {
+		return fmt.Errorf("store: record sync check %s/%s: %w", accountID, resource, err)
+	}
+	return nil
+}
+
+// GetSyncCheck returns the check row for one resource, or nil when no pass
+// over it has ever completed.
+func (s *Store) GetSyncCheck(ctx context.Context, accountID, resource string) (*SyncCheck, error) {
+	c := &SyncCheck{AccountID: accountID, Resource: resource}
+	var checked, attempted sql.NullInt64
+	var errMsg sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT checked_at, attempted_at, error FROM sync_checks
+		 WHERE account_id = ? AND resource = ?`, accountID, resource).Scan(&checked, &attempted, &errMsg)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: get sync check %s/%s: %w", accountID, resource, err)
+	}
+	c.CheckedAt = nullTime(checked)
+	c.AttemptedAt = nullTime(attempted)
+	c.Error = errMsg.String
+	return c, nil
+}

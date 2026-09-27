@@ -62,7 +62,7 @@ emlcal cal show <id>
 emlcal cal free --from .. --to .. [--duration 30m] [--hours 09:00-18:00]
 emlcal contacts list [--limit N]                 # people in the archive, by who you write to
 emlcal contacts search <name-or-address>         # find a person; row.address goes into --to
-emlcal status                                    # counts, last sync, daemon state
+emlcal status                                    # counts, when each resource was last checked, daemon state
 ```
 
 Examples:
@@ -188,9 +188,9 @@ the organizer, where `my_response` is what emlcal recorded, not a calendar.
   it answers through the calendar when one holds the event, else mails the
   organizer an iTIP reply and files the meeting (a decline files nothing).
   Never send prose — a scheduler reads the calendar part, not words.
-- If results look stale or a message the user mentions is missing, run
-  `emlcal status` to see the last sync and whether the daemon runs, then
-  `emlcal sync` once.
+- If results look stale, run `emlcal status`: `mail_sync.checked_at` is when mail
+  was last checked (a pass finding nothing counts); `changed_at` is only the last
+  change, never a freshness check; a set `error` means the last pass failed. Then `emlcal sync`.
 - Searching is FTS5: `AND`, `OR`, `NOT`, `"exact phrase"`, `subject:budget`.
   Quote the whole query so the shell does not eat it.
 

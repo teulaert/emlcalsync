@@ -1294,3 +1294,122 @@ func TestITIPResponseOnAMessageThatIsNotThere(t *testing.T) {
 		t.Errorf("err = %v, want ErrNotFound", err)
 	}
 }
+
+// A pass that found nothing is still a pass: it moves the check, and the log
+// -- which is where the changes live -- stays as it was.
+func TestSyncCheckMovesApartFromTheLog(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+
+	if c, err := s.GetSyncCheck(ctx, "work", "mail"); err != nil || c != nil {
+		t.Fatalf("before any pass: check = %+v, %v; want nil", c, err)
+	}
+	if e, err := s.LastSyncChange(ctx, "work", "mail"); err != nil || e != nil {
+		t.Fatalf("before any pass: change = %+v, %v; want nil", e, err)
+	}
+
+	// A delta that added something: logged, and checked.
+	if _, err := s.AppendSyncLog(ctx, SyncLogEntry{
+		AccountID: "work", Kind: "delta", Started: base, Finished: base.Add(10 * time.Second), Added: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordSyncCheck(ctx, "work", "mail", base.Add(10*time.Second), nil); err != nil {
+		t.Fatal(err)
+	}
+	// Then an hour of no-op polls: checked, never logged.
+	later := base.Add(time.Hour)
+	if err := s.RecordSyncCheck(ctx, "work", "mail", later, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := s.GetSyncCheck(ctx, "work", "mail")
+	if err != nil || c == nil {
+		t.Fatalf("GetSyncCheck: %+v, %v", c, err)
+	}
+	if !c.CheckedAt.Equal(later) || !c.AttemptedAt.Equal(later) || c.Failed() {
+		t.Errorf("after a no-op pass: %+v, want checked and attempted at %s with no error", c, later)
+	}
+	ch, err := s.LastSyncChange(ctx, "work", "mail")
+	if err != nil || ch == nil {
+		t.Fatalf("LastSyncChange: %+v, %v", ch, err)
+	}
+	if !ch.Finished.Equal(base.Add(10 * time.Second)) {
+		t.Errorf("last change moved to %s; a no-op pass is not a change", ch.Finished)
+	}
+
+	// A failure moves what was tried, not what was last known good.
+	failed := later.Add(time.Minute)
+	if err := s.RecordSyncCheck(ctx, "work", "mail", failed, errors.New("fake: 503")); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = s.GetSyncCheck(ctx, "work", "mail")
+	if !c.CheckedAt.Equal(later) {
+		t.Errorf("a failed pass moved checked_at to %s", c.CheckedAt)
+	}
+	if !c.AttemptedAt.Equal(failed) || c.Error != "fake: 503" || !c.Failed() {
+		t.Errorf("a failed pass was not recorded as one: %+v", c)
+	}
+
+	// Recovering clears the error and moves both.
+	ok := failed.Add(time.Minute)
+	if err := s.RecordSyncCheck(ctx, "work", "mail", ok, nil); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = s.GetSyncCheck(ctx, "work", "mail")
+	if !c.CheckedAt.Equal(ok) || !c.AttemptedAt.Equal(ok) || c.Failed() {
+		t.Errorf("after recovering: %+v", c)
+	}
+}
+
+// The calendar and the mail are checked and change on their own: a calendar
+// event landing says nothing about whether the mailbox was looked at.
+func TestSyncCheckAndChangeAreKeptPerResource(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+
+	if _, err := s.AppendSyncLog(ctx, SyncLogEntry{
+		AccountID: "work", Kind: "delta", Started: base, Finished: base, Added: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calAt := base.Add(2 * time.Hour)
+	if _, err := s.AppendSyncLog(ctx, SyncLogEntry{
+		AccountID: "work", Kind: "calendar", Started: calAt, Finished: calAt, Added: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A failed mail pass after both: it is in the log, but not a change.
+	if _, err := s.AppendSyncLog(ctx, SyncLogEntry{
+		AccountID: "work", Kind: "delta", Started: calAt, Finished: calAt.Add(time.Minute), Error: "boom",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordSyncCheck(ctx, "work", "calendar", calAt, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	mail, _ := s.LastSyncChange(ctx, "work", "mail")
+	cal, _ := s.LastSyncChange(ctx, "work", "calendar")
+	if mail == nil || !mail.Finished.Equal(base) || mail.Kind != "delta" {
+		t.Errorf("mail change = %+v, want the delta at %s", mail, base)
+	}
+	if cal == nil || !cal.Finished.Equal(calAt) || cal.Kind != "calendar" {
+		t.Errorf("calendar change = %+v, want the calendar pass at %s", cal, calAt)
+	}
+	if c, _ := s.GetSyncCheck(ctx, "work", "mail"); c != nil {
+		t.Errorf("a calendar check produced a mail check: %+v", c)
+	}
+	if c, _ := s.GetSyncCheck(ctx, "work", "calendar"); c == nil || !c.CheckedAt.Equal(calAt) {
+		t.Errorf("calendar check = %+v", c)
+	}
+
+	if err := s.DeleteAccount(ctx, "work"); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := s.GetSyncCheck(ctx, "work", "calendar"); c != nil {
+		t.Errorf("DeleteAccount left the check behind: %+v", c)
+	}
+}

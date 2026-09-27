@@ -119,8 +119,11 @@ func TestStatus(t *testing.T) {
 	if work.Messages != 2 {
 		t.Errorf("work messages = %d, want 2", work.Messages)
 	}
-	if work.LastSync.IsZero() || work.LastSyncKind == "" {
-		t.Errorf("work has no last sync: %+v", work)
+	if work.Mail.CheckedAt.IsZero() || work.Mail.ChangedAt.IsZero() || work.Mail.ChangeKind == "" {
+		t.Errorf("work has no mail check or change: %+v", work.Mail)
+	}
+	if work.LastChange.IsZero() || work.LastChangeKind == "" {
+		t.Errorf("work has no last change: %+v", work)
 	}
 	if out.Daemon.Running {
 		t.Errorf("daemon reported as running: %+v", out.Daemon)
@@ -425,8 +428,14 @@ func TestSyncSkipsDisabledResources(t *testing.T) {
 	if len(st.Accounts) != 1 {
 		t.Fatalf("status listed %d accounts", len(st.Accounts))
 	}
-	if st.Accounts[0].Mail != "-" || st.Accounts[0].Calendar != "caldav" {
-		t.Errorf("status backends = mail:%q calendar:%q", st.Accounts[0].Mail, st.Accounts[0].Calendar)
+	if st.Accounts[0].MailBackend != "-" || st.Accounts[0].CalendarBackend != "caldav" {
+		t.Errorf("status backends = mail:%q calendar:%q", st.Accounts[0].MailBackend, st.Accounts[0].CalendarBackend)
+	}
+	if !st.Accounts[0].Mail.CheckedAt.IsZero() {
+		t.Errorf("a mail-disabled account was recorded as mail-checked: %+v", st.Accounts[0].Mail)
+	}
+	if st.Accounts[0].Calendar.CheckedAt.IsZero() {
+		t.Errorf("the calendar pass was not recorded as a check: %+v", st.Accounts[0].Calendar)
 	}
 	if st.Accounts[0].Disabled != "mail off" {
 		t.Errorf("status disabled = %q, want %q", st.Accounts[0].Disabled, "mail off")

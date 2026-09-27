@@ -111,6 +111,7 @@ func (tx *Tx) DeleteAccount(ctx context.Context, id string) error {
 		`DELETE FROM backfill_progress WHERE account_id = ?`,
 		`DELETE FROM outbox WHERE account_id = ?`,
 		`DELETE FROM sync_log WHERE account_id = ?`,
+		`DELETE FROM sync_checks WHERE account_id = ?`,
 		`DELETE FROM event_occurrences WHERE event_id IN
 			(SELECT e.id FROM events e JOIN calendars c ON c.id = e.calendar_id WHERE c.account_id = ?)`,
 		`DELETE FROM events WHERE calendar_id IN (SELECT id FROM calendars WHERE account_id = ?)`,
