@@ -174,5 +174,5 @@ func (e *eventView) View(w, h int) string {
 }
 
 func (e *eventView) footer(w int) string {
-	return "y accept · n decline · t tentative"
+	return "y accept · n decline · t tentative · d delete"
 }

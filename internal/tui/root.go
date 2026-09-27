@@ -362,6 +362,12 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return r, r.triage("archive")
 
 	case key.Matches(msg, r.keys.Trash):
+		// On the calendar d deletes the event. The triage below would not do
+		// it: neither calendar screen has targets, so the mail trash has
+		// always been a key that quietly did nothing there.
+		if cmd, ok := r.deleteEvent(); ok {
+			return r, cmd
+		}
 		return r, r.triage("trash")
 
 	case key.Matches(msg, r.keys.Restore):
@@ -884,6 +890,41 @@ func (r *root) triage(what string) tea.Cmd {
 	return tea.Batch(r.d.apply(what, ops, undo), follow)
 }
 
+// deleteEvent is d on the calendar. The second return reports that the
+// keystroke belonged to a calendar screen at all, so that a screen with
+// nothing selected swallows it rather than falling through to the mail trash.
+//
+// On the agenda the row is the event. On an event being read it is that event,
+// and the screen is closed with it: leaving a detail view open on something
+// that no longer exists only invites a second key press on it. Either way what
+// is underneath re-reads itself once the write lands -- see onApplied, which
+// is where the reload happens, because the index is only patched by then.
+//
+// There is no confirmation and no undo. See actionEventDelete for why the
+// undo the mail trash offers on this same key cannot honestly be offered here.
+func (r *root) deleteEvent() (tea.Cmd, bool) {
+	switch s := r.top().(type) {
+	case *agenda:
+		o := s.selectedOcc()
+		if o == nil {
+			return nil, true
+		}
+		r.note("deleting…")
+		return r.d.apply(actionEventDelete,
+			deleteEventOp(o.AccountID, o.CalendarRemote, o.EventRemoteID), nil), true
+	case *eventView:
+		if s.ev == nil {
+			return nil, true
+		}
+		cmd := r.d.apply(actionEventDelete,
+			deleteEventOp(s.accountID, s.calRemote, s.remote), nil)
+		r.note("deleting…")
+		r.pop()
+		return cmd, true
+	}
+	return nil, false
+}
+
 // followOn moves on after the message being read has been archived or trashed.
 // The thread underneath drops it and the reader takes whichever message is now
 // under the thread's cursor -- the next one down, the thread being newest
@@ -985,6 +1026,22 @@ func (r *root) applyUndo() tea.Cmd {
 	return tea.Batch(r.d.apply("undo "+u.label, u.ops, nil), r.top().reload())
 }
 
+// rereads reports whether a write changed what the screen now on top is
+// showing, so that it has to go and look again. The engine patched the index
+// before apply returned, so by here the reload sees the new state.
+//
+// An answered invitation is one: the event view's RSVP line and the reader's
+// card both say what the calendar says. A deleted event is the same thing from
+// the other end -- the agenda has one row fewer, and after a delete from the
+// detail view the agenda is what the pop left on top.
+func rereads(action string) bool {
+	switch model.Participation(action) {
+	case model.PartAccepted, model.PartDeclined, model.PartTentative:
+		return true
+	}
+	return action == actionEventDelete
+}
+
 func (r *root) onApplied(a applied) tea.Cmd {
 	if a.err != nil {
 		if t := r.triageScreen(); t != nil {
@@ -997,12 +1054,8 @@ func (r *root) onApplied(a applied) tea.Cmd {
 	if t := r.triageScreen(); t != nil {
 		t.commit()
 	}
-	// An answered invitation is re-read so the screen says what the calendar
-	// now says: the event view's RSVP line, the reader's card. The engine
-	// patched the row before returning, so the reload sees the new answer.
 	var reload tea.Cmd
-	switch model.Participation(a.action) {
-	case model.PartAccepted, model.PartDeclined, model.PartTentative:
+	if rereads(a.action) {
 		reload = r.top().reload()
 	}
 	switch {

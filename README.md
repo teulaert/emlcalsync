@@ -292,7 +292,12 @@ first, with `t` for the one-row-per-message index; `M` cycles the mailbox
 (inbox, all, flagged, drafts, sent, archive, trash, spam), so unsent drafts are
 a view of their own and are marked `D` wherever they turn up in a thread;
 `enter` on an
-event opens it, where `y` / `n` / `t` answer the invitation. A mailed
+event opens it, where `y` / `n` / `t` answer the invitation and `d` deletes
+it — on the agenda row too, and with neither a confirmation nor an undo,
+because putting a deleted event back means creating it again: a new UID, and
+a second invitation to everyone a meeting had. A row standing for one date of
+a repeating event takes the whole series with it, the way `cal delete` does.
+A mailed
 invitation shows its card above its text, in the thread and in the reader —
 what, when, where, who, and whether you have answered — and `y` / `n` / `t`
 answer it right there, through the calendar's copy of the event; in the

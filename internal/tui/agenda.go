@@ -222,5 +222,5 @@ func (a *agenda) View(w, h int) string {
 }
 
 func (a *agenda) footer(w int) string {
-	return fmt.Sprintf("%d events · [ ] to page weeks · enter for detail", len(a.occs))
+	return fmt.Sprintf("%d events · [ ] to page weeks · enter for detail · d delete", len(a.occs))
 }

@@ -220,6 +220,28 @@ func respondOp(accountID, calRemote, remote string, r model.Participation) []acc
 	}}}
 }
 
+// actionEventDelete is the label a calendar delete travels under, and the one
+// onApplied reads to know the agenda has to go and look again.
+//
+// It is deliberately the only write on the d key with no undoRecord beside it.
+// The mail trash is reversible because the message is still there, in another
+// mailbox; a deleted event is gone, and putting it back means creating it
+// afresh -- a new UID at the provider, and on a meeting with attendees a
+// second invitation to every one of them. An offer of "z to undo" that did
+// that would be describing something it is not.
+const actionEventDelete = "delete"
+
+// deleteEventOp is the calendar delete, the other half of respondOp. It takes
+// the event's own remote id, not an occurrence's: deleting a row that stands
+// for one date of a series deletes the series, exactly as `cal delete` does.
+func deleteEventOp(accountID, calRemote, remote string) []accountOp {
+	return []accountOp{{accountID, sync.Op{
+		Kind:           sync.OpEventDelete,
+		CalendarRemote: calRemote,
+		IDs:            []string{remote},
+	}}}
+}
+
 // ---------------------------------------------------------------------------
 // Running them
 
