@@ -202,6 +202,17 @@ func keyPress(s string) tea.KeyPressMsg {
 // addEvent puts one calendar, one event and one occurrence in place.
 func addEvent(t *testing.T, d Deps, account, calRemote, calName, remote, title string, start time.Time, dur time.Duration) {
 	t.Helper()
+	putEvent(t, d, account, calRemote, calName, remote, title, start, start.Add(dur), false)
+}
+
+// addAllDay indexes a one-day all-day event on the given day.
+func addAllDay(t *testing.T, d Deps, account, calRemote, calName, remote, title string, day time.Time) {
+	t.Helper()
+	putEvent(t, d, account, calRemote, calName, remote, title, day, day.AddDate(0, 0, 1), true)
+}
+
+func putEvent(t *testing.T, d Deps, account, calRemote, calName, remote, title string, start, end time.Time, allDay bool) {
+	t.Helper()
 	ctx := context.Background()
 	cals, err := d.Store.ListCalendars(ctx, []string{account})
 	if err != nil {
@@ -226,7 +237,8 @@ func addEvent(t *testing.T, d Deps, account, calRemote, calName, remote, title s
 		UID:            remote,
 		Title:          title,
 		Start:          start,
-		End:            start.Add(dur),
+		End:            end,
+		AllDay:         allDay,
 		Status:         model.StatusConfirmed,
 		MyResponse:     model.PartNeedsAction,
 		RawJSON:        []byte(`{}`),

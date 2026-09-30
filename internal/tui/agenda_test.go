@@ -92,3 +92,80 @@ func TestAgendaPagesForward(t *testing.T) {
 		t.Errorf("window is %s wide, want %d days", ag.to.Sub(ag.from), agendaDays)
 	}
 }
+
+// . brings the cursor back to now: the meeting under way, or the next one up
+// when nothing is running -- and an all-day banner already in progress does
+// not count as running while a timed row is still ahead.
+func TestAgendaDotReturnsToNow(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addEvent(t, d, "work", "cal-w", "Work", "e1", "Earlier", testNow.Add(-3*time.Hour), time.Hour)
+	addEvent(t, d, "work", "cal-w", "Work", "e2", "Running", testNow.Add(-30*time.Minute), time.Hour)
+	addEvent(t, d, "work", "cal-w", "Work", "e3", "Later", testNow.Add(2*time.Hour), time.Hour)
+	addEvent(t, d, "work", "cal-w", "Work", "e4", "Tomorrow", testNow.Add(26*time.Hour), time.Hour)
+
+	k := defaultKeys()
+	a := newAgenda(d)
+	ag := pump(t, a, a.Init(), k, 100, 24).(*agenda)
+	if got := ag.selectedOcc(); got == nil || got.Title != "Earlier" {
+		t.Fatalf("opened on %v, want Earlier (the day's first row)", got)
+	}
+
+	s, _ := ag.Update(keyPress("."), k, 100, 24)
+	ag = s.(*agenda)
+	if got := ag.selectedOcc(); got == nil || got.Title != "Running" {
+		t.Fatalf("after . selected = %v, want Running", got)
+	}
+
+	// Wander off to the end and come back.
+	s, _ = ag.Update(keyPress("G"), k, 100, 24)
+	s, _ = s.Update(keyPress("."), k, 100, 24)
+	ag = s.(*agenda)
+	if got := ag.selectedOcc(); got == nil || got.Title != "Running" {
+		t.Fatalf("after G . selected = %v, want Running", got)
+	}
+}
+
+func TestAgendaDotSkipsAnAllDayBannerForTheNextMeeting(t *testing.T) {
+	d := newTestDeps(t, "work")
+	day := time.Date(testNow.Year(), testNow.Month(), testNow.Day(), 0, 0, 0, 0, time.UTC)
+	addAllDay(t, d, "work", "cal-w", "Work", "e1", "Offsite", day)
+	addEvent(t, d, "work", "cal-w", "Work", "e2", "Earlier", testNow.Add(-3*time.Hour), time.Hour)
+	addEvent(t, d, "work", "cal-w", "Work", "e3", "Later", testNow.Add(2*time.Hour), time.Hour)
+
+	k := defaultKeys()
+	a := newAgenda(d)
+	ag := pump(t, a, a.Init(), k, 100, 24).(*agenda)
+	s, _ := ag.Update(keyPress("."), k, 100, 24)
+	ag = s.(*agenda)
+	if got := ag.selectedOcc(); got == nil || got.Title != "Later" {
+		t.Fatalf("after . selected = %v, want Later", got)
+	}
+}
+
+// Paged into another fortnight, . first brings the window back to today.
+func TestAgendaDotComesBackFromAnotherWeek(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addEvent(t, d, "work", "cal-w", "Work", "e1", "Earlier", testNow.Add(-3*time.Hour), time.Hour)
+	addEvent(t, d, "work", "cal-w", "Work", "e2", "Next", testNow.Add(2*time.Hour), time.Hour)
+	addEvent(t, d, "work", "cal-w", "Work", "e3", "Far", testNow.AddDate(0, 0, 20), time.Hour)
+
+	k := defaultKeys()
+	a := newAgenda(d)
+	ag := pump(t, a, a.Init(), k, 100, 24).(*agenda)
+	from := ag.from
+
+	s, cmd := ag.Update(keyPress("]"), k, 100, 24)
+	ag = pump(t, s, cmd, k, 100, 24).(*agenda)
+	if got := ag.selectedOcc(); got == nil || got.Title != "Far" {
+		t.Fatalf("after ] selected = %v, want Far", got)
+	}
+
+	s, cmd = ag.Update(keyPress("."), k, 100, 24)
+	ag = pump(t, s, cmd, k, 100, 24).(*agenda)
+	if !ag.from.Equal(from) {
+		t.Errorf(". left the window at %s, want it back at %s", ag.from, from)
+	}
+	if got := ag.selectedOcc(); got == nil || got.Title != "Next" {
+		t.Fatalf("after . selected = %v, want Next", got)
+	}
+}

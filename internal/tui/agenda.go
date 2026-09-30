@@ -28,6 +28,9 @@ type agenda struct {
 	lines    []agendaLine
 	cursor   int
 	top      int
+	// seekNow is set by a . that had to move the window first: once that
+	// load lands, the cursor goes to now rather than to the top.
+	seekNow bool
 
 	seq     int
 	loading bool
@@ -113,7 +116,11 @@ func (a *agenda) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 		if msg.err == nil {
 			a.occs = msg.occs
 			a.build()
+			if a.seekNow {
+				a.gotoNow(listRows(h))
+			}
 		}
+		a.seekNow = false
 		return a, nil
 
 	case tea.KeyPressMsg:
@@ -138,6 +145,18 @@ func (a *agenda) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 			a.cursor = max(len(a.lines)-1, 0)
 			a.skipHeader(-1)
 			a.scroll(rows)
+		case key.Matches(msg, k.Now):
+			// Paged away from today: come back to the window the screen
+			// opened on, then seek once it has loaded.
+			now := a.d.now()
+			if now.Before(a.from) || !now.Before(a.to) {
+				fresh := newAgenda(a.d)
+				a.from, a.to = fresh.from, fresh.to
+				a.cursor, a.top = 0, 0
+				a.seekNow = true
+				return a, a.reload()
+			}
+			a.gotoNow(rows)
 		default:
 			switch msg.String() {
 			case "]":
@@ -155,6 +174,39 @@ func (a *agenda) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 		return a, nil
 	}
 	return a, nil
+}
+
+// gotoNow puts the cursor on the meeting under way, or else on the first one
+// still to come. An all-day event already in progress is not "now" the way a
+// running meeting is -- it would sit above every timed row of the day -- so
+// it only wins when nothing timed is left ahead. Past the last row, the
+// cursor rests on the last row.
+func (a *agenda) gotoNow(rows int) {
+	now := a.d.now()
+	pick := -1
+	for i, l := range a.lines {
+		if l.header != "" {
+			continue
+		}
+		o := &a.occs[l.occ]
+		if !o.End.After(now) {
+			continue
+		}
+		if o.AllDay && !o.Start.After(now) {
+			if pick < 0 {
+				pick = i
+			}
+			continue
+		}
+		pick = i
+		break
+	}
+	if pick < 0 {
+		pick = len(a.lines) - 1
+	}
+	a.cursor = max(pick, 0)
+	a.skipHeader(-1)
+	a.scroll(rows)
 }
 
 func (a *agenda) scroll(rows int) {
@@ -222,5 +274,5 @@ func (a *agenda) View(w, h int) string {
 }
 
 func (a *agenda) footer(w int) string {
-	return fmt.Sprintf("%d events · [ ] to page weeks · enter for detail · d delete", len(a.occs))
+	return fmt.Sprintf("%d events · [ ] to page weeks · . now · enter for detail · d delete", len(a.occs))
 }
