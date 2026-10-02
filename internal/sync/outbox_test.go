@@ -2,10 +2,12 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/store"
 )
 
 func TestApplyOnlineExecutesImmediately(t *testing.T) {
@@ -218,4 +220,107 @@ func TestRestorePutsItBackInTheInboxWithoutClearingOtherMailboxes(t *testing.T) 
 	if !contains(got, "WORK") {
 		t.Errorf("mailboxes = %v, want WORK kept", got)
 	}
+}
+
+// The row a process is pushing is pending in the table, and the daemon's
+// outbox pass runs in another process with no memory of who is doing what.
+// Before the lease, that pass executed the row as well -- which is how one
+// message went out twice on 2026-10-02 -- so here the daemon is a second
+// engine over the same store, and it has to find the row taken.
+func TestOutboxPassLeavesAnInFlightSendAlone(t *testing.T) {
+	h := newHarness(t)
+	daemon := h.newEngine()
+	release := h.mail.Gate()
+
+	type outcome struct {
+		res *ApplyResult
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := h.eng.Apply(context.Background(), "work",
+			Op{Kind: OpSend, Raw: mailRaw(t, "once", "only once")})
+		done <- outcome{res, err}
+	}()
+
+	// Wait for the row to be committed; the push behind it is held at the gate.
+	var row store.OutboxItem
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		items, err := h.st.ListOutbox(context.Background(), true)
+		if err != nil {
+			t.Fatalf("ListOutbox: %v", err)
+		}
+		if len(items) == 1 {
+			row = items[0]
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the send never reached the outbox")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !row.InFlight(time.Now()) {
+		t.Fatalf("row = %+v, want it leased by the process pushing it", row)
+	}
+
+	rep, err := daemon.RetryOutbox(context.Background(), "")
+	if err != nil {
+		t.Fatalf("RetryOutbox: %v", err)
+	}
+	if rep.Attempted != 0 || rep.Skipped != 1 {
+		t.Fatalf("daemon pass = %+v, want the in-flight row skipped, not executed", rep)
+	}
+
+	release()
+	out := <-done
+	if out.err != nil {
+		t.Fatalf("Apply: %v", out.err)
+	}
+	if n := len(h.mail.Sent()); n != 1 {
+		t.Fatalf("the provider received %d sends, want exactly 1", n)
+	}
+	it, err := h.st.GetOutbox(context.Background(), out.res.OutboxID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.DoneAt == nil {
+		t.Fatalf("row = %+v, want done", it)
+	}
+}
+
+// A lease that has run out belongs to nobody: the holder crashed, or its
+// context ran out inside the lease, as leaseCtx guarantees. The outbox pass
+// then takes the row over, which is the crash-safety the outbox exists for.
+func TestOutboxPassTakesOverAnExpiredLease(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	id, err := h.st.EnqueueOutbox(ctx, "work", string(OpSend),
+		mustJSON(t, Op{Kind: OpSend, Raw: mailRaw(t, "late", "picked up later")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := h.st.LeaseOutbox(ctx, id, time.Now().Add(-time.Second)); err != nil || !ok {
+		t.Fatalf("LeaseOutbox = %v, %v", ok, err)
+	}
+
+	rep, err := h.eng.RetryOutbox(ctx, "")
+	if err != nil {
+		t.Fatalf("RetryOutbox: %v", err)
+	}
+	if rep.Done != 1 {
+		t.Fatalf("pass = %+v, want the expired row executed", rep)
+	}
+	if n := len(h.mail.Sent()); n != 1 {
+		t.Fatalf("the provider received %d sends, want 1", n)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

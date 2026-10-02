@@ -1413,3 +1413,50 @@ func TestSyncCheckAndChangeAreKeptPerResource(t *testing.T) {
 		t.Errorf("DeleteAccount left the check behind: %+v", c)
 	}
 }
+
+// Two processes find the same outbox row pending; the lease is what lets
+// exactly one of them execute it.
+func TestLeaseOutboxIsExclusive(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	id, err := s.EnqueueOutbox(ctx, "work", "send", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(time.Minute)
+	if ok, err := s.LeaseOutbox(ctx, id, until); err != nil || !ok {
+		t.Fatalf("first lease = %v, %v, want taken", ok, err)
+	}
+	if ok, err := s.LeaseOutbox(ctx, id, until); err != nil || ok {
+		t.Fatalf("second lease = %v, %v, want refused while the first runs", ok, err)
+	}
+	it, err := s.GetOutbox(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !it.InFlight(time.Now()) {
+		t.Fatalf("row = %+v, want in flight", it)
+	}
+
+	// A failed attempt hands the lease back.
+	if err := s.MarkOutboxFailed(ctx, id, "offline"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.LeaseOutbox(ctx, id, until); err != nil || !ok {
+		t.Fatalf("lease after a failure = %v, %v, want taken", ok, err)
+	}
+	if err := s.ReleaseOutbox(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.LeaseOutbox(ctx, id, until); err != nil || !ok {
+		t.Fatalf("lease after a release = %v, %v, want taken", ok, err)
+	}
+
+	// A row that went through is nobody's to lease.
+	if err := s.MarkOutboxDone(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.LeaseOutbox(ctx, id, until); err != nil || ok {
+		t.Fatalf("lease on a done row = %v, %v, want refused", ok, err)
+	}
+}

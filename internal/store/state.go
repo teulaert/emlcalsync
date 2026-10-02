@@ -237,6 +237,15 @@ type OutboxItem struct {
 	// will never accept it, so it is not retried and not pending. DoneAt stays
 	// nil — the write never went through — and LastError says why.
 	FailedAt *time.Time `json:"failed_at,omitempty"`
+	// LeasedUntil, while in the future, says a process is executing the row
+	// right now. An outbox pass leaves it alone until then; see LeaseOutbox.
+	LeasedUntil *time.Time `json:"leased_until,omitempty"`
+}
+
+// InFlight reports whether the row is pending and held by a live lease.
+func (it OutboxItem) InFlight(now time.Time) bool {
+	return it.DoneAt == nil && it.FailedAt == nil &&
+		it.LeasedUntil != nil && now.Before(*it.LeasedUntil)
 }
 
 // Pending reports whether the write is still waiting to be executed. A row is
@@ -263,7 +272,7 @@ func (tx *Tx) EnqueueOutbox(ctx context.Context, accountID, kind string, payload
 }
 
 // outboxCols is the projection every outbox read shares.
-const outboxCols = `id, account_id, kind, payload, created_at, attempts, last_error, done_at, failed_at`
+const outboxCols = `id, account_id, kind, payload, created_at, attempts, last_error, done_at, failed_at, leased_until`
 
 // ListOutbox returns outbox rows oldest first; pending=true limits to rows
 // that are still waiting: neither done nor permanently failed.
@@ -288,9 +297,9 @@ func (tx *Tx) ListOutbox(ctx context.Context, pending bool) ([]OutboxItem, error
 		var payload string
 		var lastErr sql.NullString
 		var created int64
-		var done, failed sql.NullInt64
+		var done, failed, leased sql.NullInt64
 		if err := rows.Scan(&it.ID, &it.AccountID, &it.Kind, &payload, &created,
-			&it.Attempts, &lastErr, &done, &failed); err != nil {
+			&it.Attempts, &lastErr, &done, &failed, &leased); err != nil {
 			return nil, err
 		}
 		it.Payload = []byte(payload)
@@ -298,6 +307,7 @@ func (tx *Tx) ListOutbox(ctx context.Context, pending bool) ([]OutboxItem, error
 		it.LastError = lastErr.String
 		it.DoneAt = timePtr(done)
 		it.FailedAt = timePtr(failed)
+		it.LeasedUntil = timePtr(leased)
 		out = append(out, it)
 	}
 	return out, rows.Err()
@@ -309,10 +319,10 @@ func (s *Store) GetOutbox(ctx context.Context, id int64) (*OutboxItem, error) {
 	var payload string
 	var lastErr sql.NullString
 	var created int64
-	var done, failed sql.NullInt64
+	var done, failed, leased sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
 		`SELECT `+outboxCols+` FROM outbox WHERE id = ?`, id).
-		Scan(&it.ID, &it.AccountID, &it.Kind, &payload, &created, &it.Attempts, &lastErr, &done, &failed)
+		Scan(&it.ID, &it.AccountID, &it.Kind, &payload, &created, &it.Attempts, &lastErr, &done, &failed, &leased)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, notFound("outbox item %d", id)
 	}
@@ -324,7 +334,46 @@ func (s *Store) GetOutbox(ctx context.Context, id int64) (*OutboxItem, error) {
 	it.LastError = lastErr.String
 	it.DoneAt = timePtr(done)
 	it.FailedAt = timePtr(failed)
+	it.LeasedUntil = timePtr(leased)
 	return &it, nil
+}
+
+// LeaseOutbox claims a pending row for execution until the given time. It is
+// one atomic update, so of two processes that find the same row pending
+// exactly one gets true; the other must leave the row alone. A row that is
+// done, retired, or still held by someone else's live lease is not claimed.
+func (s *Store) LeaseOutbox(ctx context.Context, id int64, until time.Time) (bool, error) {
+	return s.tx().LeaseOutbox(ctx, id, until)
+}
+
+func (tx *Tx) LeaseOutbox(ctx context.Context, id int64, until time.Time) (bool, error) {
+	res, err := tx.q.ExecContext(ctx, `
+		UPDATE outbox SET leased_until = ?
+		 WHERE id = ? AND done_at IS NULL AND failed_at IS NULL
+		   AND (leased_until IS NULL OR leased_until <= ?)`,
+		until.Unix(), id, time.Now().Unix())
+	if err != nil {
+		return false, fmt.Errorf("store: lease outbox %d: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: lease outbox %d: %w", id, err)
+	}
+	return n == 1, nil
+}
+
+// ReleaseOutbox gives a lease back before it runs out: the holder is not going
+// to execute the row after all, and the next outbox pass may.
+func (s *Store) ReleaseOutbox(ctx context.Context, id int64) error {
+	return s.tx().ReleaseOutbox(ctx, id)
+}
+
+func (tx *Tx) ReleaseOutbox(ctx context.Context, id int64) error {
+	if _, err := tx.q.ExecContext(ctx,
+		`UPDATE outbox SET leased_until = NULL WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("store: release outbox %d: %w", id, err)
+	}
+	return nil
 }
 
 // MarkOutboxDone records a successful apply.
@@ -342,14 +391,15 @@ func (tx *Tx) MarkOutboxDone(ctx context.Context, id int64) error {
 	return requireRow(res, "outbox item %d", id)
 }
 
-// MarkOutboxFailed increments the attempt counter and records the error.
+// MarkOutboxFailed increments the attempt counter and records the error. The
+// attempt is over, so the lease goes with it: the row is anybody's to retry.
 func (s *Store) MarkOutboxFailed(ctx context.Context, id int64, errMsg string) error {
 	return s.tx().MarkOutboxFailed(ctx, id, errMsg)
 }
 
 func (tx *Tx) MarkOutboxFailed(ctx context.Context, id int64, errMsg string) error {
 	res, err := tx.q.ExecContext(ctx,
-		`UPDATE outbox SET attempts = attempts + 1, last_error = ? WHERE id = ?`,
+		`UPDATE outbox SET attempts = attempts + 1, last_error = ?, leased_until = NULL WHERE id = ?`,
 		nullStr(errMsg), id)
 	if err != nil {
 		return fmt.Errorf("store: mark outbox failed %d: %w", id, err)

@@ -658,6 +658,10 @@ a monitor must not read `changed_at` as one.
 Write commands construct an outbox row *first*, then try to apply it
 immediately. Success → `done_at`. Network failure → row stays, the sync loop
 retries with exponential backoff, and `emlcal status` shows pending items.
+The row is *leased* (`leased_until`, migration `0010`) by whoever executes it,
+from the enqueue transaction on: a pending row with a live lease is in flight
+in another process and an outbox pass skips it. Every provider round trip is
+bounded by the lease, so an expired lease means its holder is gone.
 This is what makes "compose offline, send when back" work, and it makes every
 write crash-safe. Kinds: `send`, `draft`, `flags`, `mailboxes`, `trash`,
 `event.create|update|delete`.
@@ -1323,6 +1327,13 @@ first full build and the two adversarial reviews (`docs/reviews/`).
   `provider.IsPreRequestFailure`); an ambiguous failure (timeout after the
   request went out, 5xx) is permanent so a message can never be sent twice.
   `mail send` therefore exits 6 (queued) or 4 (not sent, run again).
+- **Outbox** rows carry a lease (`leased_until`, migration `0010`). The
+  process that enqueues a row leases it in the same transaction, and
+  `RetryOutbox` claims a row with one atomic update before executing it, so
+  the daemon's outbox pass can no longer execute a row the CLI or TUI is
+  pushing at that moment. Without it, one message went out twice on
+  2026-10-02: the daemon's pass found the row pending (its backoff timers are
+  per process) and sent it 213 ms after the sender did.
 - **`send --draft`** sends the draft's raw bytes and then trashes the draft
   (providers return the draft's *message* id from `CreateDraft`).
 - **JMAP enumeration** uses `anchor`/`anchorOffset` paging (cursor is a JSON

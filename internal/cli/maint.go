@@ -105,6 +105,8 @@ func coreOutboxState(it store.OutboxItem) string {
 		return "done"
 	case it.Attempts >= coreOutboxMaxAttempts:
 		return "gave-up"
+	case it.InFlight(time.Now()):
+		return "in-flight"
 	default:
 		return "pending"
 	}

@@ -527,6 +527,7 @@ func (f *fakeMail) CreateDraft(ctx context.Context, raw []byte) (string, error) 
 }
 
 func (f *fakeMail) Send(ctx context.Context, raw []byte, threadID string) (string, error) {
+	f.waitGate()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := f.fail(); err != nil {
@@ -535,6 +536,13 @@ func (f *fakeMail) Send(ctx context.Context, raw []byte, threadID string) (strin
 	f.sentRaw = append(f.sentRaw, raw)
 	f.nextID++
 	return fmt.Sprintf("sent-%d", f.nextID), nil
+}
+
+// Sent returns every message the fake was asked to send, in order.
+func (f *fakeMail) Sent() [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]byte(nil), f.sentRaw...)
 }
 
 func (f *fakeMail) FetchAttachment(ctx context.Context, messageID, ref string) ([]byte, error) {

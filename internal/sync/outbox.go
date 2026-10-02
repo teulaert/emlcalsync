@@ -112,6 +112,25 @@ const maxOutboxAttempts = 10
 // The rollback matters because a rejected write changed nothing on the server:
 // no later delta mentions the id, so without it the optimistic patch would
 // survive every sync until a full reconcile.
+// outboxLease is how long a process holds an outbox row while it executes it.
+// The row is committed before the provider is called, so to any other process
+// -- the daemon's outbox pass, above all -- it looks like a pending write that
+// nobody is handling, and before the lease existed the daemon executed it as
+// well: on 2026-10-02 one message went out twice, 213 ms apart.
+//
+// A lease is only a guarantee if no push outlives it, so leaseCtx caps every
+// provider round trip at the lease minus a margin for the bookkeeping after
+// it. The callers' own deadlines (the TUI's 60 s, ApplyLater's 2 min) are
+// shorter; this is the ceiling for a CLI call that set none.
+var outboxLease = 5 * time.Minute
+
+const leaseMargin = 30 * time.Second
+
+// leaseCtx bounds a provider round trip so that it ends inside the lease.
+func leaseCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, outboxLease-leaseMargin)
+}
+
 func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult, error) {
 	acct, ok := e.cfg.Account(account)
 	if !ok {
@@ -174,6 +193,11 @@ func (e *Engine) ApplyLater(ctx context.Context, account string, op Op, done fun
 	if !queued {
 		e.log.Warn("write handed to the outbox: too many already in flight",
 			"account", account, "kind", op.Kind, "outbox", id)
+		// Nobody here is going to push it, so the outbox may, now rather
+		// than when the lease it was enqueued with runs out.
+		if err := e.st.ReleaseOutbox(ctx, id); err != nil {
+			e.log.Warn("outbox release", "outbox", id, "err", err)
+		}
 		if done != nil {
 			done(&ApplyResult{OutboxID: id, Queued: true}, nil)
 		}
@@ -218,6 +242,11 @@ func (e *Engine) enqueue(ctx context.Context, acct config.Account, op Op) (int64
 		if err != nil {
 			return err
 		}
+		// The caller is about to push this row itself; say so before the
+		// transaction commits, so no outbox pass ever sees it unclaimed.
+		if _, err = tx.LeaseOutbox(ctx, id, time.Now().Add(outboxLease)); err != nil {
+			return err
+		}
 		undo, err = e.patchLocal(ctx, tx, acct, op)
 		return err
 	})
@@ -232,7 +261,9 @@ func (e *Engine) enqueue(ctx context.Context, acct config.Account, op Op) (int64
 func (e *Engine) push(ctx context.Context, acct config.Account, op Op, id int64, undo *rollback) (*ApplyResult, error) {
 	account := acct.Name
 	res := &ApplyResult{OutboxID: id}
-	remote, renames, err := e.execute(ctx, acct, op)
+	pctx, cancel := leaseCtx(ctx)
+	remote, renames, err := e.execute(pctx, acct, op)
+	cancel()
 	switch {
 	case err == nil:
 		res.RemoteID = remote
@@ -1024,8 +1055,24 @@ func (e *Engine) RetryOutbox(ctx context.Context, account string) (*OutboxReport
 			continue
 		}
 
+		// Claim it first. Another process may be pushing this very row --
+		// the one that enqueued it, most likely -- and a row whose lease is
+		// still running is its business, not ours.
+		claimed, err := e.st.LeaseOutbox(ctx, it.ID, time.Now().Add(outboxLease))
+		if err != nil {
+			return rep, err
+		}
+		if !claimed {
+			e.log.Debug("outbox item in flight elsewhere, skipped",
+				"account", it.AccountID, "kind", it.Kind, "outbox", it.ID)
+			rep.Skipped++
+			continue
+		}
+
 		rep.Attempted++
-		remote, renames, err := e.execute(ctx, *acct, op)
+		pctx, cancel := leaseCtx(ctx)
+		remote, renames, err := e.execute(pctx, *acct, op)
+		cancel()
 		e.noteAttempt(it.ID, it.Attempts+1)
 		switch {
 		case err == nil:
