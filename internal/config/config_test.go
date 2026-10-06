@@ -413,7 +413,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	orig.General.DataDir = filepath.Join(dir, "data")
 	orig.Accounts = []Account{
 		{
-			Name: "work", Email: "lennert@example.com",
+			Name: "work", Email: "lennert@example.com", DisplayName: "Lennert den Teuling",
 			Mail:     &MailBackend{Backend: model.BackendGmail, Vendor: model.VendorGoogle},
 			Calendar: &CalendarBackend{Backend: model.BackendGCal, Vendor: model.VendorGoogle},
 			Poll:     Duration(90 * time.Second), Push: false, IncludeSpamTrash: false,
@@ -461,7 +461,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	for i := range orig.Accounts {
 		a, b := orig.Accounts[i], back.Accounts[i]
 		if a.Name != b.Name || a.Vendor() != b.Vendor() || a.Email != b.Email ||
-			!sameMail(a.Mail, b.Mail) || !sameCalendar(a.Calendar, b.Calendar) ||
+			a.DisplayName != b.DisplayName || !sameMail(a.Mail, b.Mail) || !sameCalendar(a.Calendar, b.Calendar) ||
 			a.Poll != b.Poll || a.Push != b.Push || a.IncludeSpamTrash != b.IncludeSpamTrash ||
 			a.Concurrency != b.Concurrency || !equalStrings(a.Calendars, b.Calendars) {
 			t.Errorf("account %d changed:\n orig %+v\n back %+v", i, a, b)
@@ -1215,5 +1215,16 @@ func TestDownloadDirFollowsTheDesktop(t *testing.T) {
 	t.Setenv("XDG_DOWNLOAD_DIR", "/srv/incoming")
 	if got := DownloadDir(); got != "/srv/incoming" {
 		t.Errorf("$XDG_DOWNLOAD_DIR: %q", got)
+	}
+}
+
+func TestSenderPutsTheDisplayNameOnTheAddress(t *testing.T) {
+	a := Account{Name: "work", Email: "lennert@example.com"}
+	if got := a.Sender(); got.Name != "" || got.Email != "lennert@example.com" {
+		t.Errorf("bare account: Sender() = %+v", got)
+	}
+	a.DisplayName = " Lennert den Teuling "
+	if got := a.Sender().String(); got != "Lennert den Teuling <lennert@example.com>" {
+		t.Errorf("named account: Sender() = %q", got)
 	}
 }

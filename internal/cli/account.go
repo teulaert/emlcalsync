@@ -149,6 +149,7 @@ func coreAccountAddCmd(app *App, prov model.Vendor) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.Name, "name", "", "short account name, used in ids ([a-z0-9-])")
 	cmd.Flags().StringVar(&opts.Email, "email", "", "the account's email address")
+	cmd.Flags().StringVar(&opts.DisplayName, "display-name", "", "the name in front of the address on mail you send")
 	_ = cmd.MarkFlagRequired("name")
 	_ = cmd.MarkFlagRequired("email")
 	if prov == model.VendorICloud {
@@ -216,6 +217,7 @@ type coreAddOptions struct {
 	Vendor           model.Vendor
 	Name             string
 	Email            string
+	DisplayName      string
 	TokenStdin       bool
 	AppPassword      string
 	AppPasswordStdin bool
@@ -249,6 +251,7 @@ func coreAddAccount(app *App, opts coreAddOptions) error {
 	}
 
 	acct := config.NewAccount(name, email, prov)
+	acct.DisplayName = strings.TrimSpace(opts.DisplayName)
 	if opts.Username != "" {
 		// The Apple ID authenticates both halves.
 		if acct.Calendar != nil {

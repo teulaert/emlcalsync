@@ -329,6 +329,11 @@ func (c *CalendarBackend) User(email string) string {
 type Account struct {
 	Name  string `toml:"name"`
 	Email string `toml:"email"`
+	// DisplayName is the name in front of the address on mail the account
+	// sends: `From: Lennert <lennert@example.com>`. Empty sends the bare
+	// address, which is what every provider accepts but what every mail
+	// client then shows as the sender.
+	DisplayName string `toml:"display_name"`
 
 	// Mail is the [accounts.mail] block; nil syncs no mail.
 	Mail *MailBackend `toml:"mail"`
@@ -414,6 +419,13 @@ func (a *Account) EffectiveRawMaxSize(g General) Size {
 		return *a.RawMaxSize
 	}
 	return g.RawMaxSize
+}
+
+// Sender is the address mail from this account goes out as: the configured
+// display name in front of the account's address. It is the one place the
+// From header is decided, for the composer, `mail send`, and an RSVP alike.
+func (a *Account) Sender() model.Address {
+	return model.Address{Name: strings.TrimSpace(a.DisplayName), Email: a.Email}
 }
 
 // SyncsMail reports whether the account has a mail backend.

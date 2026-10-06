@@ -714,8 +714,8 @@ func (c *composeView) fromRow(w int) string {
 	if c.focus != fromFocus {
 		label = styleFaint.Render(label)
 	}
-	line := c.from.Email
-	if line == "" {
+	line := c.from.String()
+	if c.from.Email == "" {
 		line = "(this account has no address configured)"
 	}
 	if c.account != "" {

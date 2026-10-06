@@ -70,6 +70,8 @@ Security → Integrations → New app password, access "Calendars (CalDAV)").
 
 ```bash
 emlcal account add fastmail --name fm --email you@fastmail.com   # prompts for the token
+# add --display-name "Your Name" to any of these, or set display_name in config.toml,
+# and mail you send goes out as `Your Name <you@...>` instead of the bare address
 emlcal account caldav-password --name fm                         # prompts for the app password (calendars)
 ```
 

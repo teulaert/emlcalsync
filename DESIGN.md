@@ -1082,6 +1082,7 @@ raw_max_size   = "0"                    # global default, per-account override
 [[accounts]]
 name     = "work"
 email    = "lennert@example.com"
+display_name = "Lennert den Teuling"    # From: Lennert den Teuling <lennert@example.com>; unset sends the bare address
 poll     = "60s"
 include_spam_trash = true
 

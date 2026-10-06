@@ -1404,3 +1404,26 @@ func TestMailRespondFileOnlyRefusesADecline(t *testing.T) {
 		t.Errorf("exited %d, want 2 — a declined meeting is not put on the calendar", code)
 	}
 }
+
+func TestMailSendCarriesTheAccountsDisplayName(t *testing.T) {
+	acct := config.NewAccount("work", "me@example.com", model.VendorFastmail)
+	acct.DisplayName = "Me Myself"
+	env := newTestEnv(t, acct)
+
+	env.MustRun("mail", "send", "--account", "work", "--to", "x@y.example", "--subject", "s", "--body", "b")
+	sent := env.Mail["work"].Sent()
+	if len(sent) != 1 {
+		t.Fatalf("sent = %d, want 1", len(sent))
+	}
+	// Go's address writer quotes every display name.
+	if raw := string(sent[0]); !strings.Contains(raw, `From: "Me Myself" <me@example.com>`) {
+		t.Errorf("From header lacks the display name:\n%s", raw)
+	}
+
+	// --from still wins, name and all.
+	env.MustRun("mail", "send", "--account", "work", "--from", "Other <other@example.com>",
+		"--to", "x@y.example", "--subject", "s", "--body", "b")
+	if raw := string(env.Mail["work"].Sent()[1]); !strings.Contains(raw, `From: "Other" <other@example.com>`) {
+		t.Errorf("--from was overridden:\n%s", raw)
+	}
+}

@@ -53,6 +53,7 @@ type fileGeneral struct {
 type fileAccount struct {
 	Name             *string              `toml:"name"`
 	Email            *string              `toml:"email"`
+	DisplayName      *string              `toml:"display_name"`
 	Mail             *fileMailBackend     `toml:"mail"`
 	Calendar         *fileCalendarBackend `toml:"calendar"`
 	Poll             *Duration            `toml:"poll"`
@@ -217,6 +218,7 @@ func materialize(fa fileAccount) (Account, error) {
 	}
 	setString(&a.Name, fa.Name)
 	setString(&a.Email, fa.Email)
+	setString(&a.DisplayName, fa.DisplayName)
 
 	if fa.Mail != nil {
 		mb := MailBackend{}

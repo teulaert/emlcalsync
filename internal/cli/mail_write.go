@@ -325,7 +325,7 @@ func mailCompose(cmd *cobra.Command, app *App, f *mailComposeFlags, replyID stri
 		return nil, err
 	}
 
-	from := model.Address{Email: acct.Email}
+	from := acct.Sender()
 	if f.from != "" {
 		from, err = mailParseAddress(f.from)
 		if err != nil {

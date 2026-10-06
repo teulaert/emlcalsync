@@ -147,6 +147,7 @@ func coreAccountAddIMAPCmd(app *App) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&o.Name, "name", "", "short account name, used in ids ([a-z0-9-])")
 	cmd.Flags().StringVar(&o.Email, "email", "", "the account's email address")
+	cmd.Flags().StringVar(&o.DisplayName, "display-name", "", "the name in front of the address on mail you send")
 	cmd.Flags().StringVar(&o.Host, "host", "", "IMAP host (omit to try SRV discovery)")
 	cmd.Flags().IntVar(&o.Port, "port", 0, "IMAP port (default 993, or 143 with --security starttls)")
 	cmd.Flags().StringVar(&o.Security, "security", "", "tls (default), starttls or none")
@@ -162,7 +163,7 @@ func coreAccountAddIMAPCmd(app *App) *cobra.Command {
 }
 
 type coreIMAPAddOptions struct {
-	Name, Email              string
+	Name, Email, DisplayName string
 	Host, Security, Username string
 	Port                     int
 	SMTPHost, SMTPSecurity   string
@@ -216,6 +217,7 @@ func coreAddIMAPAccount(app *App, o coreIMAPAddOptions) error {
 	}
 
 	acct := config.NewAccount(o.Name, o.Email, "")
+	acct.DisplayName = strings.TrimSpace(o.DisplayName)
 	acct.Mail = &config.MailBackend{
 		Backend: model.BackendIMAP,
 		Host:    o.Host, Port: o.Port, Security: o.Security, Username: o.Username,

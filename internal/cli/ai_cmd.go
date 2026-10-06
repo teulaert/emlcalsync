@@ -110,7 +110,7 @@ would be stored. Nothing is ever sent.`,
 			if !noLookups {
 				tools = app.AITools()
 			}
-			from := model.Address{Email: acct.Email}
+			from := acct.Sender()
 			req := ai.ReplyPrompt(ai.ReplyInput{
 				Self:          aiSelf(cmd.Context(), st, orig.AccountID, acct.Email),
 				Thread:        msgs,

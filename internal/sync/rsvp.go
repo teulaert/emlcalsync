@@ -156,10 +156,10 @@ func (e *Engine) invitationOf(ctx context.Context, account, messageRemote string
 	if !ok {
 		return nil, nil, self, fmt.Errorf("sync: unknown account %q", account)
 	}
-	// The address, with no display name: an emlcal account has none, and
-	// `mail reply` sends the same way. itip.Reply answers under the name the
-	// organizer put on the attendee line, which is the better one anyway.
-	self = model.Address{Email: acct.Email}
+	// The account's sender, as `mail reply` sends. The display name goes on
+	// the From header only: itip.Reply answers under the name the organizer
+	// put on the attendee line, which is what their scheduler matches on.
+	self = acct.Sender()
 	if self.Email == "" {
 		return nil, nil, self, fmt.Errorf("sync: account %q has no address to answer from", account)
 	}

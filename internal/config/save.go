@@ -75,6 +75,10 @@ func render(c *Config) []byte {
 		b.WriteString("\n[[accounts]]\n")
 		fmt.Fprintf(&b, "name     = %s\n", quote(a.Name))
 		fmt.Fprintf(&b, "email    = %s\n", quote(a.Email))
+		if a.DisplayName != "" {
+			b.WriteString("# The name in front of the address on mail this account sends.\n")
+			fmt.Fprintf(&b, "display_name = %s\n", quote(a.DisplayName))
+		}
 
 		// Every scalar key must be written before the first sub-table: once
 		// [accounts.mail] is open, a following bare `poll = …` would belong to

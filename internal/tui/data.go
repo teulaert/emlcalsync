@@ -597,7 +597,7 @@ func liveDraft(m *model.Message, draftsRemote, trashRemote string) bool {
 func (d Deps) sendFrom(account string) model.Address {
 	if d.Config != nil {
 		if a, ok := d.Config.Account(account); ok && strings.TrimSpace(a.Email) != "" {
-			return model.Address{Email: a.Email}
+			return a.Sender()
 		}
 	}
 	// The index carries the address too, which is what keeps this working
