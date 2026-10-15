@@ -184,7 +184,7 @@ func (k keymap) helpLines() [][2]string {
 		{"", ""},
 		{"A", "cycle the account filter"},
 		{"M", "cycle the mailbox (inbox, all, flagged, drafts, sent, archive, trash, spam)"},
-		{"R", "refresh now (and nudge the sync daemon)"},
+		{"R", "refresh now: nudge the sync daemon, or run a sync pass here when none is up"},
 		{"?", "this help"},
 		{"", ""},
 		// The marks, not keys -- and A is both, which is exactly why it is

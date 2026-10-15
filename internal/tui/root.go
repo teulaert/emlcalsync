@@ -3,11 +3,10 @@ package tui
 import (
 	"context"
 	"errors"
-	"os"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -15,6 +14,8 @@ import (
 	"github.com/mattn/go-runewidth"
 
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/sync"
 )
 
 // screen is one full-window view. The root owns a stack of them, so Esc is
@@ -70,8 +71,11 @@ type root struct {
 
 	status    string
 	statusSeq int
-	undo      *undoRecord
-	showHelp  bool
+	// syncing is whether R is running a pass in this process, so a second R
+	// before it ends does not start another behind it.
+	syncing  bool
+	undo     *undoRecord
+	showHelp bool
 	// helpOff is how far the help overlay is scrolled, in wrapped lines. The
 	// key list is longer than most terminals are tall, so it has to be a
 	// window over the list rather than the top of it.
@@ -200,6 +204,9 @@ func (r *root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case submitted:
 		return r, r.onSubmitted(msg)
+
+	case synced:
+		return r, r.onSynced(msg)
 
 	case screenClosed:
 		switch r.top().(type) {
@@ -341,9 +348,7 @@ func (r *root) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return r, nil
 
 	case key.Matches(msg, r.keys.Refresh):
-		r.nudgeDaemon()
-		r.note("refreshing…")
-		return r, r.top().reload()
+		return r, r.refresh()
 
 	case key.Matches(msg, r.keys.Undo):
 		return r, r.applyUndo()
@@ -851,8 +856,9 @@ func (r *root) onSubmitted(s submitted) tea.Cmd {
 		r.note("reply sent")
 	}
 	// The message is on the server but not yet in the archive; the daemon is
-	// what puts it there, so ask it to look now rather than in a minute.
-	r.nudgeDaemon()
+	// what puts it there, so ask it to look now rather than in a minute. No
+	// daemon is fine: the next sync, whoever runs it, brings it in.
+	_ = r.nudgeDaemon()
 	return r.top().reload()
 }
 
@@ -1098,25 +1104,83 @@ func (r *root) note(s string) {
 }
 
 // nudgeDaemon asks a running `sync --watch` to do a pass now, the same SIGUSR1
-// handshake the sync command uses. No daemon means nothing to nudge, which is
-// not an error: R still re-queries what is already on disk.
-func (r *root) nudgeDaemon() {
+// handshake `emlcal sync` uses, and says whether one was there to ask. The
+// sync package reads the pid file, because it is the sync package's file:
+// this used to parse the number out itself, and the day the file grew an
+// identity the parse failed and R quietly stopped nudging anything.
+func (r *root) nudgeDaemon() error {
 	if r.d.StatePath == "" {
-		return
+		return sync.ErrNoDaemon
 	}
-	b, err := os.ReadFile(filepath.Join(r.d.StatePath, "emlcal.pid"))
-	if err != nil {
-		return
+	_, err := sync.NudgeDaemon(filepath.Join(r.d.StatePath, sync.PidFileName))
+	return err
+}
+
+// refresh is R: re-query what is on disk, and get the provider looked at now
+// rather than on the next poll. A running daemon is nudged for that. Without
+// one -- the timer install, or nothing installed -- the pass runs here, in
+// the background, the way `emlcal sync` would run it; the screen fills in as
+// it commits, and the status line says how it ended.
+func (r *root) refresh() tea.Cmd {
+	err := r.nudgeDaemon()
+	switch {
+	case err == nil:
+		r.note("refreshing — daemon nudged")
+	case !errors.Is(err, sync.ErrNoDaemon):
+		r.note("refresh: " + err.Error())
+	case r.d.Engine == nil:
+		r.note("refreshed — no daemon running")
+	case r.syncing:
+		r.note("still syncing…")
+		return nil
+	default:
+		r.syncing = true
+		r.note("no daemon running — syncing…")
+		return tea.Batch(r.top().reload(), r.d.syncNow())
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 {
-		return
+	return r.top().reload()
+}
+
+// onSynced is the end of the pass refresh started: one line on what it
+// brought in, or what stopped it.
+func (r *root) onSynced(s synced) tea.Cmd {
+	r.syncing = false
+	var added, changed int
+	var first error
+	for _, rep := range s.reports {
+		if rep == nil {
+			continue
+		}
+		if rep.Err != nil && first == nil {
+			first = fmt.Errorf("%s: %w", rep.Account, rep.Err)
+		}
+		for _, rr := range []*sync.ResourceReport{rep.Mail, rep.Calendar} {
+			if rr != nil {
+				added += rr.Added
+				changed += rr.Updated + rr.Removed
+			}
+		}
 	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return
+	if first == nil {
+		first = s.err
 	}
-	_ = p.Signal(syscall.SIGUSR1)
+	switch {
+	case errors.Is(first, sync.ErrLocked):
+		r.note("another sync is running — it will show up as it lands")
+	case first != nil && provider.IsOffline(first):
+		r.note("offline — showing what is on disk")
+	case first != nil:
+		r.note("sync failed: " + first.Error())
+	case added == 0 && changed == 0:
+		r.note("synced — nothing new")
+	case added == 0:
+		r.note(fmt.Sprintf("synced — %d changed", changed))
+	case changed == 0:
+		r.note(fmt.Sprintf("synced — %d new", added))
+	default:
+		r.note(fmt.Sprintf("synced — %d new, %d changed", added, changed))
+	}
+	return r.top().reload()
 }
 
 func (r *root) View() tea.View {

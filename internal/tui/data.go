@@ -22,6 +22,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/store"
+	"github.com/teulaert/emlcalsync/internal/sync"
 	"github.com/teulaert/emlcalsync/internal/webasset"
 )
 
@@ -137,6 +138,13 @@ type submitted struct {
 	what   string // "reply" or "draft"
 	queued bool
 	err    error
+}
+
+// synced is the end of the pass R ran in this process, when no daemon was
+// there to nudge: what SyncAll returned.
+type synced struct {
+	reports []*sync.Report
+	err     error
 }
 
 // screenClosed asks the root to take the screen on top off the stack. A

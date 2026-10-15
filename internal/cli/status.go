@@ -10,6 +10,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/store"
+	"github.com/teulaert/emlcalsync/internal/sync"
 )
 
 func init() {
@@ -260,13 +261,13 @@ func coreDaemonState(app *App) coreDaemonInfo {
 	if err != nil {
 		return coreDaemonInfo{}
 	}
-	info := coreDaemonInfo{PidFile: corePidPathOf(cfg)}
+	info := coreDaemonInfo{PidFile: sync.PidPath(cfg)}
 	rec, err := coreReadPid(app)
 	if err != nil {
 		return info
 	}
 	info.PID = rec.PID
-	info.Running = rec.alive()
+	info.Running = rec.Alive()
 	if !info.Running {
 		info.PID = 0
 	}

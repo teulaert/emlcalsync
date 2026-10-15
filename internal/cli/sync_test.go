@@ -186,7 +186,7 @@ func TestWatchRefusesSecondDaemon(t *testing.T) {
 	}
 	// pid 1 is always alive and is never this process, so `sync --watch`
 	// bails out before it starts the loop.
-	pidPath := corePidPathOf(cfg)
+	pidPath := sync.PidPath(cfg)
 	if err := os.WriteFile(pidPath, []byte("1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -194,12 +194,6 @@ func TestWatchRefusesSecondDaemon(t *testing.T) {
 
 	if rec, err := coreReadPid(app); err != nil || rec.PID != 1 {
 		t.Fatalf("coreReadPid = %+v, %v", rec, err)
-	}
-	if !coreProcRecord(os.Getpid()).alive() {
-		t.Fatal("alive says this process is not running")
-	}
-	if (corePidRecord{}).alive() {
-		t.Error("the empty record reads as alive")
 	}
 
 	out, errOut, code := env.Run("sync", "--watch")
@@ -211,39 +205,6 @@ func TestWatchRefusesSecondDaemon(t *testing.T) {
 	st := coreDecodeOne[coreStatusOut](t, env.MustRun("status"))
 	if !st.Daemon.Running || st.Daemon.PID != 1 {
 		t.Errorf("status daemon = %+v", st.Daemon)
-	}
-}
-
-// A pid file that outlives a reboot names a number the kernel has since handed
-// to something else. That has to read as stale: taking the number as proof of a
-// daemon is what locked `sync --watch` out of every restart for good.
-func TestPidRecordRejectsRecycledPid(t *testing.T) {
-	live := coreProcRecord(os.Getpid())
-	if !live.identified() {
-		t.Skip("/proc reports no boot id and start time here")
-	}
-	if !live.alive() {
-		t.Fatal("this process reads as not alive")
-	}
-
-	stale := live
-	stale.Start = live.Start + "0" // this pid, a process that started elsewhen
-	if stale.alive() {
-		t.Error("a record whose start time disagrees with /proc reads as alive")
-	}
-	stale = live
-	stale.Boot = "00000000-0000-0000-0000-000000000000"
-	if stale.alive() {
-		t.Error("a record from an earlier boot reads as alive")
-	}
-
-	if round, err := coreParsePid(live.bytes(), "test"); err != nil || round != live {
-		t.Errorf("pid file round trip = %+v, %v; want %+v", round, err, live)
-	}
-	// What an older build wrote carries no identity and still has to parse.
-	legacy, err := coreParsePid([]byte("1\n"), "test")
-	if err != nil || legacy.PID != 1 || legacy.identified() {
-		t.Errorf("legacy pid file = %+v, %v", legacy, err)
 	}
 }
 

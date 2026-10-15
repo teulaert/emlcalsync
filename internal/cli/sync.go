@@ -1,21 +1,17 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/provider"
 	"github.com/teulaert/emlcalsync/internal/sync"
@@ -216,21 +212,22 @@ func coreClearProgress(app *App) {
 // coreNudgeDaemon signals a running daemon to sync now. Not finding one is an
 // error: the lock was held by something, and silently exiting 0 would lie.
 func coreNudgeDaemon(app *App) error {
-	rec, err := coreReadPid(app)
-	if err != nil || rec.PID <= 0 {
+	cfg, err := app.Config()
+	if err != nil {
+		return err
+	}
+	pid, err := sync.NudgeDaemon(sync.PidPath(cfg))
+	switch {
+	case errors.Is(err, os.ErrNotExist):
 		return output.Errorf(output.ExitGeneric,
 			"another sync holds the lock but no daemon pid file was found; retry in a moment")
-	}
-	// Never signal a pid the record no longer vouches for: the number may
-	// have been handed to some unrelated process since the daemon died.
-	if !rec.alive() {
+	case errors.Is(err, sync.ErrNoDaemon):
 		return output.Errorf(output.ExitGeneric,
-			"another sync holds the lock but the daemon pid file is stale (pid %d is a different process); retry in a moment", rec.PID)
+			"another sync holds the lock but the daemon pid file is stale (pid %d is a different process); retry in a moment", pid)
+	case err != nil:
+		return output.Errorf(output.ExitGeneric, "another sync holds the lock (pid %d): %v", pid, err)
 	}
-	if err := syscall.Kill(rec.PID, syscall.SIGUSR1); err != nil {
-		return output.Errorf(output.ExitGeneric, "another sync holds the lock (pid %d): %v", rec.PID, err)
-	}
-	fmt.Fprintf(app.Stdout, "daemon active — nudged (pid %d)\n", rec.PID)
+	fmt.Fprintf(app.Stdout, "daemon active — nudged (pid %d)\n", pid)
 	return nil
 }
 
@@ -246,10 +243,10 @@ func coreWatch(app *App, opts sync.SyncOptions) error {
 	if err != nil {
 		return err
 	}
-	if rec, err := coreReadPid(app); err == nil && rec.PID != os.Getpid() && rec.alive() {
+	if rec, err := coreReadPid(app); err == nil && rec.PID != os.Getpid() && rec.Alive() {
 		return output.Errorf(output.ExitGeneric, "a daemon is already running (pid %d)", rec.PID)
 	}
-	if err := os.WriteFile(path, coreProcRecord(os.Getpid()).bytes(), 0o600); err != nil {
+	if err := os.WriteFile(path, sync.ProcRecord(os.Getpid()).Bytes(), 0o600); err != nil {
 		return fmt.Errorf("write pid file %s: %w", path, err)
 	}
 	defer os.Remove(path)
@@ -279,7 +276,7 @@ func coreWatch(app *App, opts sync.SyncOptions) error {
 }
 
 // ---------------------------------------------------------------------------
-// pid file helpers, shared with `status` and `doctor`
+// pid file helpers, shared with `status`, `doctor` and the TUI's R
 
 // corePidPath is <state dir>/emlcal.pid.
 func corePidPath(app *App) (string, error) {
@@ -290,131 +287,15 @@ func corePidPath(app *App) (string, error) {
 	if err := cfg.EnsureDirs(); err != nil {
 		return "", err
 	}
-	return corePidPathOf(cfg), nil
+	return sync.PidPath(cfg), nil
 }
 
-func corePidPathOf(cfg *config.Config) string {
-	_, _, _, lock, _ := cfg.Paths()
-	return filepath.Join(filepath.Dir(lock), "emlcal.pid")
-}
-
-// coreReadPid returns the record left by a `sync --watch` process.
-func coreReadPid(app *App) (corePidRecord, error) {
+// coreReadPid reads the daemon's pid file. The record and what it means
+// live in the sync package, so the TUI reads the same file the same way.
+func coreReadPid(app *App) (sync.PidRecord, error) {
 	cfg, err := app.Config()
 	if err != nil {
-		return corePidRecord{}, err
+		return sync.PidRecord{}, err
 	}
-	path := corePidPathOf(cfg)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return corePidRecord{}, err
-	}
-	return coreParsePid(b, path)
-}
-
-// corePidRecord is what the daemon leaves behind: its pid, and enough of the
-// kernel's own bookkeeping to tell that process apart from whatever inherits
-// the number later. A pid alone proves nothing across a reboot -- the daemon's
-// old number came back as the keyring daemon, and a bare liveness probe read
-// that as a daemon still running and locked `sync --watch` out for good.
-type corePidRecord struct {
-	PID   int
-	Boot  string // kernel boot id: a different boot is a different pid space
-	Start string // start time in jiffies since boot, /proc/<pid>/stat field 22
-}
-
-// identified says whether the record carries more than a bare pid. Pid files
-// written before the daemon recorded an identity do not.
-func (r corePidRecord) identified() bool { return r.Boot != "" && r.Start != "" }
-
-// alive reports whether the process the record describes is still the one
-// holding that pid. The signal-0 probe only proves the number is taken, so
-// when both records carry an identity they have to agree as well. EPERM means
-// the process exists but belongs to someone else, which still counts as taken.
-func (r corePidRecord) alive() bool {
-	if r.PID <= 0 {
-		return false
-	}
-	if err := syscall.Kill(r.PID, 0); err != nil && !errors.Is(err, syscall.EPERM) {
-		return false
-	}
-	live := coreProcRecord(r.PID)
-	if !r.identified() || !live.identified() {
-		return true // nothing to compare; the probe is all there is
-	}
-	return live.Boot == r.Boot && live.Start == r.Start
-}
-
-// coreProcRecord reads the identity the kernel keeps for a live pid. It comes
-// back bare when /proc does not answer, which callers read as "cannot tell".
-func coreProcRecord(pid int) corePidRecord {
-	boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
-	if err != nil {
-		return corePidRecord{PID: pid}
-	}
-	start, err := coreProcStart(pid)
-	if err != nil {
-		return corePidRecord{PID: pid}
-	}
-	return corePidRecord{PID: pid, Boot: strings.TrimSpace(string(boot)), Start: start}
-}
-
-// coreProcStart is field 22 of /proc/<pid>/stat, the jiffies since boot at
-// which the process started. Paired with the boot id it pins a pid to one
-// process: a recycled number always starts later than the one it replaced.
-func coreProcStart(pid int) (string, error) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return "", err
-	}
-	// The comm field is parenthesised and may itself hold spaces and
-	// parentheses, so the fixed columns only start after its closing brace.
-	i := bytes.LastIndexByte(b, ')')
-	if i < 0 {
-		return "", fmt.Errorf("proc stat %d: no comm field", pid)
-	}
-	fields := strings.Fields(string(b[i+1:]))
-	const startCol = 22 - 3 // fields[0] is state, column 3 of the stat line
-	if len(fields) <= startCol {
-		return "", fmt.Errorf("proc stat %d: %d columns after comm", pid, len(fields))
-	}
-	return fields[startCol], nil
-}
-
-// bytes renders the record for the pid file: the pid on its own first line, so
-// anything that only wants the number still reads it, then the identity.
-func (r corePidRecord) bytes() []byte {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%d\n", r.PID)
-	if r.Boot != "" {
-		fmt.Fprintf(&b, "boot %s\n", r.Boot)
-	}
-	if r.Start != "" {
-		fmt.Fprintf(&b, "start %s\n", r.Start)
-	}
-	return []byte(b.String())
-}
-
-// coreParsePid reads a pid file. A file holding nothing but a pid is one an
-// older build wrote, and parses into a record with no identity.
-func coreParsePid(b []byte, path string) (corePidRecord, error) {
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	pid, err := strconv.Atoi(strings.TrimSpace(lines[0]))
-	if err != nil {
-		return corePidRecord{}, fmt.Errorf("pid file %s: %w", path, err)
-	}
-	r := corePidRecord{PID: pid}
-	for _, line := range lines[1:] {
-		key, val, ok := strings.Cut(strings.TrimSpace(line), " ")
-		if !ok {
-			continue
-		}
-		switch key {
-		case "boot":
-			r.Boot = val
-		case "start":
-			r.Start = val
-		}
-	}
-	return r, nil
+	return sync.ReadPid(sync.PidPath(cfg))
 }

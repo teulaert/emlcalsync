@@ -17,6 +17,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/provider"
 	"github.com/teulaert/emlcalsync/internal/provider/oauth"
+	"github.com/teulaert/emlcalsync/internal/sync"
 )
 
 func init() {
@@ -254,7 +255,7 @@ func coreCheckPDFReader() coreCheck {
 }
 
 func coreCheckDaemon(app *App, cfg *config.Config) coreCheck {
-	path := corePidPathOf(cfg)
+	path := sync.PidPath(cfg)
 	rec, err := coreReadPid(app)
 	if errors.Is(err, os.ErrNotExist) {
 		return coreOK("daemon", "not running (no pid file)")
@@ -262,9 +263,9 @@ func coreCheckDaemon(app *App, cfg *config.Config) coreCheck {
 	if err != nil {
 		return coreFail("daemon", fmt.Sprintf("%s: %v", path, err))
 	}
-	if !rec.alive() {
+	if !rec.Alive() {
 		gone := fmt.Sprintf("pid %d is gone", rec.PID)
-		if coreProcRecord(rec.PID).identified() {
+		if sync.ProcRecord(rec.PID).Identified() {
 			// The number is taken, just not by the daemon: it was recycled,
 			// which is what a reboot does to every pid the daemon recorded.
 			gone = fmt.Sprintf("pid %d belongs to another process now", rec.PID)

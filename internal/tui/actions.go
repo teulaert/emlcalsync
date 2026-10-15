@@ -344,6 +344,19 @@ func (d Deps) warmProviders() tea.Cmd {
 	}
 }
 
+// syncNow runs one pass over every account in this process, for R when no
+// daemon is up to be nudged. It is what `emlcal sync --wait-offline 0` runs:
+// the first transport error ends the pass, because someone who pressed R
+// wants an answer, not a ten-minute wait for the network. A pass the daemon
+// turns out to own comes back ErrLocked, which onSynced reads as "it is
+// being done anyway".
+func (d Deps) syncNow() tea.Cmd {
+	return func() tea.Msg {
+		reports, err := d.Engine.SyncAll(context.Background(), sync.SyncOptions{})
+		return synced{reports: reports, err: err}
+	}
+}
+
 // submit sends a composed message, or stores it as a draft.
 //
 // It follows `mail send`: the reply goes out first, and only once it really
