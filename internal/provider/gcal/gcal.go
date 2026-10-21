@@ -127,7 +127,8 @@ func (c *Calendar) Calendars(ctx context.Context) ([]model.Calendar, error) {
 //
 // Cancelled masters are reported as removals; cancelled instances of a
 // recurring event are upserted with model.StatusCancelled, because the local
-// index needs them to punch a hole in the expanded occurrences.
+// index needs them to punch a hole in the expanded occurrences. An instance
+// deleted by way of an EXDATE on its master is upserted the same way.
 func (c *Calendar) EventChanges(ctx context.Context, calendarRemote, since string) (*provider.EventChanges, error) {
 	if calendarRemote == "" {
 		return nil, errors.New("gcal: EventChanges needs a calendar id")
@@ -171,6 +172,9 @@ func (c *Calendar) EventChanges(ctx context.Context, calendarRemote, since strin
 				return nil, err
 			}
 			out.Upserted = append(out.Upserted, ev)
+			// A deleted instance Google only expressed as an EXDATE on the
+			// master is handed over as the cancelled instance it stands for.
+			out.Upserted = append(out.Upserted, excludedInstances(calendarRemote, item, &ev, c.log)...)
 		}
 
 		if resp.NextPageToken != "" {

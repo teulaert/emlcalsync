@@ -356,3 +356,55 @@ func TestEventUpdateClearingRRuleCollapsesTheSeries(t *testing.T) {
 		t.Errorf("the cleared event has %d occurrences, want 1", n)
 	}
 }
+
+// A deleted instance that reaches the index after its series was already
+// materialised -- the cancelled instance the Google provider makes of an
+// EXDATE, or one the server sends on its own -- takes the occurrence out of
+// the cache the agenda and free/busy read, and nothing takes its place.
+func TestCalendarCancelledInstanceArrivingLaterRemovesTheOccurrence(t *testing.T) {
+	h := newHarness(t)
+	start := baseTime()
+
+	h.cal.Put("primary", model.Event{
+		RemoteID: "r1", UID: "u1", Title: "Standup",
+		Start: start, End: start.Add(30 * time.Minute),
+		Timezone: "UTC", RRule: "FREQ=DAILY;COUNT=5",
+		Status: model.StatusConfirmed,
+	})
+	h.sync(SyncOptions{Calendar: true})
+	if occ := h.occurrences(); len(occ) != 5 {
+		t.Fatalf("got %d occurrences, want 5: %+v", len(occ), occ)
+	}
+
+	third := start.Add(48 * time.Hour)
+	h.cal.Put("primary", model.Event{
+		RemoteID: "r1_" + third.Format("20060102T150405Z"), UID: "u1", Title: "Standup",
+		RecurrenceID: third.Format(time.RFC3339),
+		Start:        third, End: third.Add(30 * time.Minute),
+		Timezone: "UTC", Status: model.StatusCancelled,
+	})
+	rep := h.sync(SyncOptions{Calendar: true})
+	if rep.Calendar == nil || rep.Calendar.Added != 1 {
+		t.Fatalf("delta report = %+v, want the cancelled instance only", rep.Calendar)
+	}
+
+	occ := h.occurrences()
+	if len(occ) != 4 {
+		t.Fatalf("got %d occurrences after the cancellation, want 4: %+v", len(occ), occ)
+	}
+	for _, o := range occ {
+		if o.Start.Equal(third) {
+			t.Fatalf("the cancelled instance is still materialised: %+v", occ)
+		}
+		if o.Event != "r1" {
+			t.Fatalf("an occurrence is filed under the cancelled instance: %+v", o)
+		}
+	}
+
+	// The same cancellation delivered again -- the next full listing hands
+	// the EXDATE over once more -- changes nothing.
+	h.sync(SyncOptions{Calendar: true, Full: true})
+	if occ := h.occurrences(); len(occ) != 4 {
+		t.Fatalf("got %d occurrences after a full listing, want 4: %+v", len(occ), occ)
+	}
+}

@@ -739,3 +739,51 @@ func TestCalCreateRecurringDryRun(t *testing.T) {
 		}
 	}
 }
+
+// A cancelled instance -- what the Google provider makes of an EXDATE on the
+// master, and what every provider sends for an instance deleted on the
+// server -- leaves the agenda and the free/busy search alike.
+func TestCalAgendaAndFreeSkipACancelledInstance(t *testing.T) {
+	env := calSeed(t)
+	second := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	env.Cal["work"].Put("primary", model.Event{
+		RemoteID:     "e1_20260902T090000Z",
+		UID:          "u1",
+		Title:        "Standup",
+		RecurrenceID: second.Format(time.RFC3339),
+		Start:        second,
+		End:          second.Add(30 * time.Minute),
+		Timezone:     "UTC",
+		Status:       model.StatusCancelled,
+	})
+	env.Sync("work")
+
+	rows := calDecodeAgenda(t, env.MustRun("cal", "agenda", "--days", "28"))
+	var standups []time.Time
+	for _, r := range rows {
+		if r.Title == "Standup" {
+			standups = append(standups, time.Unix(r.StartUTC, 0).UTC())
+		}
+	}
+	if len(standups) != 3 {
+		t.Fatalf("want three standups left of four, got %v", standups)
+	}
+	for _, s := range standups {
+		if s.Equal(second) {
+			t.Fatalf("the cancelled standup is still on the agenda: %v", standups)
+		}
+	}
+
+	out := env.MustRun("cal", "free",
+		"--from", "2026-09-02 08:00", "--to", "2026-09-02 12:00", "--duration", "4h")
+	var slots []struct {
+		StartUTC int64 `json:"start_utc"`
+		EndUTC   int64 `json:"end_utc"`
+	}
+	if err := json.Unmarshal([]byte(out), &slots); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out)
+	}
+	if len(slots) != 1 || slots[0].EndUTC-slots[0].StartUTC != int64(4*time.Hour/time.Second) {
+		t.Fatalf("want the whole morning free once the standup is cancelled, got %s", out)
+	}
+}

@@ -452,7 +452,11 @@ type Pusher interface {                      // optional
   `syncToken` persisted in `sync_state` as `cal:<id>`. 410 GONE → full re-list.
 - Recurrence expansion happens locally (`teambition/rrule-go`) into
   `event_occurrences` for now−1y … now+2y; refreshed when the master changes
-  and by a nightly job that extends the window.
+  and by a nightly job that extends the window. Only the RRULE is modelled:
+  an EXDATE on a master becomes a cancelled exception row under Google's own
+  instance id (`<master>_<UTC stamp>`), the same shape a deleted instance
+  arrives in, and a patch hands the server's EXDATE lines back with the rule.
+  RDATE is not supported.
 - Poll every 120 s. Writes via `events.insert/patch/delete`; `raw_json` holds
   the last server object so patches are minimal.
 

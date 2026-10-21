@@ -72,8 +72,9 @@ func mapEvent(calendarRemote string, in *calendarapi.Event, calTZ, selfEmail str
 	}
 	ev.Start, ev.End, ev.AllDay, ev.Timezone = start, end, allDay, tz
 
-	// Only the RRULE is modelled; EXDATE/RDATE stay in RawJSON, which the
-	// recurrence expander reads for exceptions.
+	// Only the RRULE is modelled here. EXDATE lines become cancelled
+	// instances of their own (excludedInstances); RDATE is not supported and
+	// stays in RawJSON only.
 	for _, line := range in.Recurrence {
 		if rule, ok := strings.CutPrefix(line, "RRULE:"); ok {
 			ev.RRule = rule
@@ -322,7 +323,7 @@ func toAPIPatch(ev *model.Event) *calendarapi.Event {
 	// wire: without ForceSendFields the JSON encoder drops it and the series
 	// survives the write that was meant to end it.
 	if ev.RRule != "" {
-		patch.Recurrence = []string{"RRULE:" + ev.RRule}
+		patch.Recurrence = recurrenceLines(ev)
 	} else {
 		patch.Recurrence = []string{}
 		patch.ForceSendFields = append(patch.ForceSendFields, "Recurrence")

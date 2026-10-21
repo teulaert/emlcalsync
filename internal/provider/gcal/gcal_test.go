@@ -405,8 +405,8 @@ func TestEventMappingRecurrenceAndTimezone(t *testing.T) {
 	if !reflect.DeepEqual(ch.Removed, []string{"dead"}) {
 		t.Errorf("Removed = %v, want [dead]", ch.Removed)
 	}
-	if len(ch.Upserted) != 3 {
-		t.Fatalf("upserted %d events, want 3", len(ch.Upserted))
+	if len(ch.Upserted) != 4 {
+		t.Fatalf("upserted %d events, want 4: the master, its EXDATE, the moved and the cancelled instance", len(ch.Upserted))
 	}
 
 	master := ch.Upserted[0]
@@ -446,7 +446,8 @@ func TestEventMappingRecurrenceAndTimezone(t *testing.T) {
 	if master.Status != model.StatusConfirmed {
 		t.Errorf("status = %q, want confirmed", master.Status)
 	}
-	// EXDATE is not modelled but must survive in RawJSON.
+	// EXDATE becomes a cancelled instance of its own and must also survive
+	// in RawJSON, so a later patch hands it back to the server.
 	var rawBack calendarapi.Event
 	if err := json.Unmarshal(master.RawJSON, &rawBack); err != nil {
 		t.Fatalf("RawJSON is not valid event JSON: %v", err)
@@ -458,12 +459,18 @@ func TestEventMappingRecurrenceAndTimezone(t *testing.T) {
 		t.Error("Updated was not parsed")
 	}
 
-	moved := ch.Upserted[1]
+	excluded := ch.Upserted[1]
+	if excluded.RemoteID != "master_20260901T070000Z" || excluded.Status != model.StatusCancelled ||
+		excluded.RecurrenceID != "2026-09-01T09:00:00+02:00" {
+		t.Errorf("EXDATE instance = %+v, want master_20260901T070000Z cancelled at 2026-09-01T09:00:00+02:00", excluded)
+	}
+
+	moved := ch.Upserted[2]
 	if moved.RecurrenceID != "2026-08-26T09:00:00+02:00" {
 		t.Errorf("RecurrenceID = %q, want the original start in RFC3339", moved.RecurrenceID)
 	}
 
-	cancelled := ch.Upserted[2]
+	cancelled := ch.Upserted[3]
 	if cancelled.Status != model.StatusCancelled {
 		t.Errorf("cancelled instance status = %q, want cancelled", cancelled.Status)
 	}
