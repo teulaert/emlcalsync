@@ -9,6 +9,7 @@ import (
 	calendarapi "google.golang.org/api/calendar/v3"
 
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // Google keeps a deleted instance of a recurring event in one of two ways:
@@ -20,11 +21,17 @@ import (
 // showing up on the days it had been deleted.
 //
 // excludedInstances turns each EXDATE instant into the cancelled instance
-// Google would otherwise have sent, under the id Google gives that instance.
-// That is how the CalDAV and JMAP providers already hand their exclusions
-// over, and it is what calendar.ApplyExceptions drops an occurrence for.
-// Sharing Google's id means a cancelled instance that does also arrive
-// lands on the same row rather than beside it.
+// Google would otherwise have sent. That is how the CalDAV and JMAP providers
+// already hand their exclusions over, and it is what calendar.ApplyExceptions
+// drops an occurrence for.
+//
+// The row is stored under a derived id (provider.DerivedRemoteID), not under
+// Google's id for the instance: nothing on the server stands behind it, so
+// the sync engine drops it again once the master comes without its EXDATE,
+// which is how a lifted exclusion brings the meeting back. Google's own
+// instance object for the same slot -- a cancellation, or a moved meeting --
+// keeps a row of its own that this one can neither overwrite nor take along
+// when it goes. The raw object still names the instance by Google's id.
 func excludedInstances(calendarRemote string, in *calendarapi.Event, master *model.Event, log *slog.Logger) []model.Event {
 	if in.RecurringEventId != "" {
 		return nil // an instance has no recurrence of its own
@@ -54,7 +61,7 @@ func excludedInstances(calendarRemote string, in *calendarapi.Event, master *mod
 			}
 			seen[rid] = true
 
-			id := instanceID(in.Id, ex.at, ex.allDay)
+			stamp := instanceStamp(ex.at, ex.allDay)
 			end := ex.at.Add(dur)
 			if ex.allDay {
 				// Google's all-day end is the following day; a day series
@@ -62,7 +69,7 @@ func excludedInstances(calendarRemote string, in *calendarapi.Event, master *mod
 				end = ex.at.AddDate(0, 0, 1)
 			}
 			raw, _ := json.Marshal(&calendarapi.Event{
-				Id:                id,
+				Id:                in.Id + "_" + stamp,
 				ICalUID:           in.ICalUID,
 				Status:            statusCancelled,
 				RecurringEventId:  in.Id,
@@ -71,7 +78,7 @@ func excludedInstances(calendarRemote string, in *calendarapi.Event, master *mod
 			})
 			out = append(out, model.Event{
 				CalendarRemote: calendarRemote,
-				RemoteID:       id,
+				RemoteID:       provider.DerivedRemoteID(in.Id, stamp),
 				UID:            master.UID,
 				Title:          master.Title,
 				Description:    master.Description,
@@ -91,14 +98,14 @@ func excludedInstances(calendarRemote string, in *calendarapi.Event, master *mod
 	return out
 }
 
-// instanceID is the id Google gives one instance of a recurring event: the
-// master's id and the instance's original start, as a UTC stamp for a timed
-// series and a bare date for an all-day one.
-func instanceID(masterID string, at time.Time, allDay bool) string {
+// instanceStamp is how Google names one instance of a recurring event after
+// its master ("<master>_<stamp>"): the instance's original start, as a UTC
+// stamp for a timed series and a bare date for an all-day one.
+func instanceStamp(at time.Time, allDay bool) string {
 	if allDay {
-		return masterID + "_" + at.Format("20060102")
+		return at.Format("20060102")
 	}
-	return masterID + "_" + at.UTC().Format("20060102T150405Z")
+	return at.UTC().Format("20060102T150405Z")
 }
 
 // exdate is one value of an EXDATE line, resolved or not.

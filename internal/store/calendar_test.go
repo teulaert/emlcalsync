@@ -487,3 +487,55 @@ func TestFindEventsByUID(t *testing.T) {
 		t.Errorf("an empty uid matched %d events", len(evs))
 	}
 }
+
+// PruneEventRows removes exactly the rows under one prefix that are not kept,
+// in one calendar, and nothing that merely shares a beginning with it.
+func TestPruneEventRows(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+	seedCalendars(t, s, "work")
+
+	put := func(cal, remote string) *model.Event {
+		t.Helper()
+		ev := &model.Event{AccountID: "work", CalendarRemote: cal, RemoteID: remote, UID: "u",
+			Start: base, End: base.Add(time.Hour), RecurrenceID: base.Format(time.RFC3339)}
+		if _, err := s.UpsertEvent(ctx, ev); err != nil {
+			t.Fatal(err)
+		}
+		return ev
+	}
+	stale := put("primary", "m#exdate-20260901T070000Z")
+	put("primary", "m#exdate-20260908T070000Z")
+	for _, other := range []string{"m", "m_20260901T070000Z", "m#exdate", "m#exdate.", "mx#exdate-1", "m2#exdate-1"} {
+		put("primary", other)
+	}
+	put("team@group.calendar", "m#exdate-20260901T070000Z")
+	if err := s.ReplaceOccurrences(ctx, stale.ID, []model.Occurrence{
+		{EventID: stale.ID, Start: base, End: base.Add(time.Hour)}}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := s.PruneEventRows(ctx, stale.CalendarID, "m#exdate-", map[string]bool{"m#exdate-20260908T070000Z": true})
+	if err != nil || n != 1 {
+		t.Fatalf("PruneEventRows = %d, %v; want 1 row", n, err)
+	}
+	if _, err := s.GetEvent(ctx, "work", "primary", stale.RemoteID); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("the stale row is still there: %v", err)
+	}
+	if c, err := s.CountOccurrences(ctx, stale.ID); err != nil || c != 0 {
+		t.Errorf("the stale row left %d occurrences (%v)", c, err)
+	}
+	for _, kept := range []string{"m#exdate-20260908T070000Z", "m", "m_20260901T070000Z", "m#exdate", "m#exdate.", "mx#exdate-1", "m2#exdate-1"} {
+		if _, err := s.GetEvent(ctx, "work", "primary", kept); err != nil {
+			t.Errorf("%s went too: %v", kept, err)
+		}
+	}
+	if _, err := s.GetEvent(ctx, "work", "team@group.calendar", "m#exdate-20260901T070000Z"); err != nil {
+		t.Errorf("the other calendar's row went too: %v", err)
+	}
+
+	if _, err := s.PruneEventRows(ctx, stale.CalendarID, "", nil); err == nil {
+		t.Error("an empty prefix was accepted")
+	}
+}

@@ -408,3 +408,29 @@ func TestCalendarCancelledInstanceArrivingLaterRemovesTheOccurrence(t *testing.T
 		t.Fatalf("got %d occurrences after a full listing, want 4: %+v", len(occ), occ)
 	}
 }
+
+// An exception whose series is not in the index (it lives elsewhere, or was
+// deleted) stands on its own -- unless it is cancelled, which leaves nothing
+// to show. This holds for every provider, not only Google's.
+func TestCalendarOrphanCancelledExceptionShowsNothing(t *testing.T) {
+	h := newHarness(t)
+	start := baseTime()
+	moved := start.Add(26 * time.Hour)
+	h.cal.Put("primary", model.Event{
+		RemoteID: "/cal/x.ics;20260101T000000Z", UID: "orphan", Title: "Moved",
+		RecurrenceID: start.Add(24 * time.Hour).Format(time.RFC3339),
+		Start:        moved, End: moved.Add(time.Hour),
+		Timezone: "UTC", Status: model.StatusConfirmed,
+	})
+	h.cal.Put("primary", model.Event{
+		RemoteID: "/cal/x.ics;20260102T000000Z", UID: "orphan", Title: "Dropped",
+		RecurrenceID: start.Add(48 * time.Hour).Format(time.RFC3339),
+		Start:        start.Add(48 * time.Hour), End: start.Add(49 * time.Hour),
+		Timezone: "UTC", Status: model.StatusCancelled,
+	})
+	h.sync(SyncOptions{Calendar: true})
+	occ := h.occurrences()
+	if len(occ) != 1 || !occ[0].Start.Equal(moved) || occ[0].Title != "Moved" {
+		t.Fatalf("occurrences = %+v, want the moved orphan alone", occ)
+	}
+}

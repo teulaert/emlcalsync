@@ -460,9 +460,9 @@ func TestEventMappingRecurrenceAndTimezone(t *testing.T) {
 	}
 
 	excluded := ch.Upserted[1]
-	if excluded.RemoteID != "master_20260901T070000Z" || excluded.Status != model.StatusCancelled ||
+	if excluded.RemoteID != "master#exdate-20260901T070000Z" || excluded.Status != model.StatusCancelled ||
 		excluded.RecurrenceID != "2026-09-01T09:00:00+02:00" {
-		t.Errorf("EXDATE instance = %+v, want master_20260901T070000Z cancelled at 2026-09-01T09:00:00+02:00", excluded)
+		t.Errorf("EXDATE instance = %+v, want master#exdate-20260901T070000Z cancelled at 2026-09-01T09:00:00+02:00", excluded)
 	}
 
 	moved := ch.Upserted[2]

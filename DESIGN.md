@@ -453,10 +453,16 @@ type Pusher interface {                      // optional
 - Recurrence expansion happens locally (`teambition/rrule-go`) into
   `event_occurrences` for now−1y … now+2y; refreshed when the master changes
   and by a nightly job that extends the window. Only the RRULE is modelled:
-  an EXDATE on a master becomes a cancelled exception row under Google's own
-  instance id (`<master>_<UTC stamp>`), the same shape a deleted instance
-  arrives in, and a patch hands the server's EXDATE lines back with the rule.
-  RDATE is not supported.
+  an EXDATE on a master becomes a cancelled exception row, the same shape a
+  deleted instance arrives in, and a patch hands the server's EXDATE lines
+  back with the rule. RDATE is not supported. The row is a *derived* one,
+  under `<master>#exdate-<stamp>` (`provider.DerivedRemoteID`) rather than
+  Google's `<master>_<stamp>`: nothing on the server stands behind it, so no
+  removal is ever reported for it. Every time the sync engine upserts a master
+  it hard-deletes that master's derived rows the same batch did not deliver
+  again, and a removed master takes all of them along -- which is how a lifted
+  EXDATE brings the meeting back. Google's own instance objects (a
+  cancellation, a moved meeting) keep their rows and are never touched by it.
 - Poll every 120 s. Writes via `events.insert/patch/delete`; `raw_json` holds
   the last server object so patches are minimal.
 

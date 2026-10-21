@@ -130,6 +130,26 @@ type EventChanges struct {
 	NewState string
 }
 
+// A provider may derive exception rows from its master instead of receiving
+// them as objects of their own -- the Google provider turns each EXDATE line
+// into a cancelled instance. Such a row has no server object behind it, so
+// nothing ever reports its removal: when the exclusion is lifted, the master
+// simply arrives without it. A derived row is therefore stored under
+// DerivedRemoteID, and every time a master is upserted, the derived rows of
+// that master the same batch does not upsert again are dropped.
+//
+// The id lives in a namespace of its own, so a derived row never lands on the
+// row of an instance the server does hold -- a genuine cancellation, or a
+// moved meeting -- and dropping it can never revive or discard one.
+const derivedSeparator = "#exdate-"
+
+// DerivedRemoteID is the remote id of the row derived from master for the
+// instance named by stamp.
+func DerivedRemoteID(master, stamp string) string { return master + derivedSeparator + stamp }
+
+// DerivedPrefix is the prefix every row derived from master shares.
+func DerivedPrefix(master string) string { return master + derivedSeparator }
+
 // CalendarProvider is implemented by every calendar backend.
 type CalendarProvider interface {
 	Calendars(ctx context.Context) ([]model.Calendar, error)

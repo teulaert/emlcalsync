@@ -8,6 +8,7 @@ import (
 
 	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/model"
+	"github.com/teulaert/emlcalsync/internal/provider"
 )
 
 // calAgendaJSON is the shape `cal agenda` emits, for decoding in tests.
@@ -785,5 +786,78 @@ func TestCalAgendaAndFreeSkipACancelledInstance(t *testing.T) {
 	}
 	if len(slots) != 1 || slots[0].EndUTC-slots[0].StartUTC != int64(4*time.Hour/time.Second) {
 		t.Fatalf("want the whole morning free once the standup is cancelled, got %s", out)
+	}
+}
+
+// An exclusion a provider derived from the master -- the Google provider's
+// EXDATE -- lasts only as long as the master carries it: once the master
+// comes without it, the meeting is back on the agenda and busy again in
+// free/busy, read from the same cached occurrences.
+func TestCalAgendaAndFreeBringBackALiftedExclusion(t *testing.T) {
+	env := calSeed(t)
+	second := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	derived := provider.DerivedRemoteID("e1", second.Format("20060102T150405Z"))
+	env.Cal["work"].Put("primary", model.Event{
+		RemoteID:     derived,
+		UID:          "u1",
+		Title:        "Standup",
+		RecurrenceID: second.Format(time.RFC3339),
+		Start:        second,
+		End:          second.Add(30 * time.Minute),
+		Timezone:     "UTC",
+		Status:       model.StatusCancelled,
+	})
+	env.Sync("work")
+
+	standups := func() []time.Time {
+		t.Helper()
+		var out []time.Time
+		for _, r := range calDecodeAgenda(t, env.MustRun("cal", "agenda", "--days", "28")) {
+			if r.Title == "Standup" {
+				out = append(out, time.Unix(r.StartUTC, 0).UTC())
+			}
+		}
+		return out
+	}
+	free := func() string {
+		t.Helper()
+		return env.MustRun("cal", "free",
+			"--from", "2026-09-02 08:00", "--to", "2026-09-02 12:00", "--duration", "4h")
+	}
+	if got := standups(); len(got) != 3 {
+		t.Fatalf("want three standups while the exclusion stands, got %v", got)
+	}
+	if out := free(); strings.TrimSpace(out) == "[]" {
+		t.Fatalf("the excluded standup still blocks the morning: %s", out)
+	}
+
+	// The master comes again without the exclusion; the derived row is not
+	// in the listing any more.
+	var master *model.Event
+	for _, ev := range env.Cal["work"].Events("primary") {
+		if ev.RemoteID == "e1" {
+			master = &ev
+		}
+	}
+	if master == nil {
+		t.Fatal("no master e1 in the fake")
+	}
+	env.Cal["work"].Put("primary", *master)
+	env.Cal["work"].Drop("primary", derived)
+	env.Sync("work")
+
+	got := standups()
+	if len(got) != 4 {
+		t.Fatalf("want all four standups back, got %v", got)
+	}
+	found := false
+	for _, s := range got {
+		found = found || s.Equal(second)
+	}
+	if !found {
+		t.Fatalf("the reinstated standup is missing: %v", got)
+	}
+	if out := free(); strings.TrimSpace(out) != "[]" {
+		t.Fatalf("want no four-hour slot once the standup is back, got %s", out)
 	}
 }

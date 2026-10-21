@@ -10,6 +10,7 @@ import (
 	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/provider"
+	"github.com/teulaert/emlcalsync/internal/store"
 )
 
 // calResource is the sync_state resource name for one calendar.
@@ -112,6 +113,31 @@ func (e *Engine) syncOneCalendar(ctx context.Context, acct config.Account, cp pr
 		default:
 			singles = append(singles, ev)
 		}
+	}
+
+	// A master carries the whole of what a provider derives from it, so the
+	// derived rows it no longer produces -- an EXDATE since lifted -- go now,
+	// before the series is re-expanded without them. A removed master takes
+	// all of its derived rows along. (provider.DerivedRemoteID)
+	upserted := make(map[string]bool, len(ch.Upserted))
+	var masters []string
+	for i := range ch.Upserted {
+		ev := &ch.Upserted[i]
+		upserted[ev.RemoteID] = true
+		if ev.RecurrenceID == "" {
+			masters = append(masters, ev.RemoteID)
+		}
+	}
+	// One transaction for the lot: a full listing has a master per event.
+	if err := e.st.Tx(ctx, func(tx *store.Tx) error {
+		for _, id := range append(masters, ch.Removed...) {
+			if _, err := tx.PruneEventRows(ctx, cal.ID, provider.DerivedPrefix(id), upserted); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return rep, since == "", err
 	}
 
 	for _, id := range ch.Removed {
@@ -230,8 +256,15 @@ func (c *calRun) expandSeries(ctx context.Context, uid string) error {
 
 	if master == nil {
 		// An exception without a master (the series lives in another account
-		// or was never delivered): treat each instance as a standalone event.
+		// or was never delivered, or is deleted): treat each instance as a
+		// standalone event. A cancelled one has nothing to show on its own.
 		for i := range exceptions {
+			if exceptions[i].Status == model.StatusCancelled {
+				if err := c.e.st.ReplaceOccurrences(ctx, exceptions[i].ID, nil); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := c.expandSingle(ctx, &exceptions[i]); err != nil {
 				return err
 			}

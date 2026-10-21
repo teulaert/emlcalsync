@@ -356,6 +356,62 @@ func (tx *Tx) DeleteEventRow(ctx context.Context, calendarID int64, remote strin
 	return nil
 }
 
+// PruneEventRows removes, outright, every event row of one calendar whose
+// remote id starts with prefix and is not in keep, and reports how many went.
+// It is for rows a provider derives from another one (provider.DerivedPrefix):
+// they have no server object of their own, so no removal is ever reported for
+// them, and a soft-deleted exception would still hide the occurrence it names.
+// Their occurrences go with them (the FK cascades).
+func (s *Store) PruneEventRows(ctx context.Context, calendarID int64, prefix string, keep map[string]bool) (int, error) {
+	var n int
+	err := s.Tx(ctx, func(tx *Tx) error {
+		var err error
+		n, err = tx.PruneEventRows(ctx, calendarID, prefix, keep)
+		return err
+	})
+	return n, err
+}
+
+func (tx *Tx) PruneEventRows(ctx context.Context, calendarID int64, prefix string, keep map[string]bool) (int, error) {
+	last := len(prefix) - 1
+	if last < 0 || prefix[last] == 0xff {
+		return 0, fmt.Errorf("store: prune events: unusable prefix %q", prefix)
+	}
+	// A range rather than LIKE, so the (calendar_id, remote_id) index serves
+	// it and no character in the prefix needs escaping.
+	upper := prefix[:last] + string([]byte{prefix[last] + 1})
+	rows, err := tx.q.QueryContext(ctx,
+		`SELECT id, remote_id FROM events WHERE calendar_id = ? AND remote_id >= ? AND remote_id < ?`,
+		calendarID, prefix, upper)
+	if err != nil {
+		return 0, fmt.Errorf("store: prune events: %w", err)
+	}
+	var stale []int64
+	for rows.Next() {
+		var id int64
+		var remote string
+		if err := rows.Scan(&id, &remote); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("store: prune events: %w", err)
+		}
+		if !keep[remote] {
+			stale = append(stale, id)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return 0, fmt.Errorf("store: prune events: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: prune events: %w", err)
+	}
+	for _, id := range stale {
+		if _, err := tx.q.ExecContext(ctx, `DELETE FROM events WHERE id = ?`, id); err != nil {
+			return 0, fmt.Errorf("store: prune event #%d: %w", id, err)
+		}
+	}
+	return len(stale), nil
+}
+
 // GetEvent returns one event by public coordinates, or model.ErrNotFound.
 func (s *Store) GetEvent(ctx context.Context, accountID, calendarRemote, remote string) (*model.Event, error) {
 	return s.tx().GetEvent(ctx, accountID, calendarRemote, remote)

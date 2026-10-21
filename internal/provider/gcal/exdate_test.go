@@ -94,7 +94,8 @@ func utc(y int, m time.Month, d, h, min int) time.Time {
 
 // An EXDATE on a Google master has nowhere to go in the flat event model, so
 // it becomes what the CalDAV and JMAP providers already make of one: a
-// cancelled instance, under the id Google itself gives that instance.
+// cancelled instance. Its row is a derived one (provider.DerivedRemoteID),
+// which the sync engine drops again once the master stops naming it.
 func TestExdateBecomesCancelledInstances(t *testing.T) {
 	evs := listOnce(t, "Europe/Amsterdam", sponsortje())
 	if len(evs) != 3 {
@@ -106,16 +107,16 @@ func TestExdateBecomesCancelledInstances(t *testing.T) {
 	}
 
 	want := []struct {
-		id    string
-		start time.Time
+		id, googleID string
+		start        time.Time
 	}{
-		{"g7ifrv1337tr318er1n3aq3uc4_20261014T110000Z", utc(2026, 10, 14, 11, 0)},
-		{"g7ifrv1337tr318er1n3aq3uc4_20261021T110000Z", utc(2026, 10, 21, 11, 0)},
+		{"g7ifrv1337tr318er1n3aq3uc4#exdate-20261014T110000Z", "g7ifrv1337tr318er1n3aq3uc4_20261014T110000Z", utc(2026, 10, 14, 11, 0)},
+		{"g7ifrv1337tr318er1n3aq3uc4#exdate-20261021T110000Z", "g7ifrv1337tr318er1n3aq3uc4_20261021T110000Z", utc(2026, 10, 21, 11, 0)},
 	}
 	for i, w := range want {
 		ex := evs[1+i]
 		if ex.RemoteID != w.id {
-			t.Errorf("exception %d id = %q, want %q (Google's own instance id)", i, ex.RemoteID, w.id)
+			t.Errorf("exception %d id = %q, want the derived id %q", i, ex.RemoteID, w.id)
 		}
 		if ex.Status != model.StatusCancelled {
 			t.Errorf("exception %d status = %q, want cancelled", i, ex.Status)
@@ -137,12 +138,12 @@ func TestExdateBecomesCancelledInstances(t *testing.T) {
 			t.Errorf("exception %d updated = %v, want the master's %v", i, ex.Updated, master.Updated)
 		}
 		// Its raw object is what Google would have sent for the instance,
-		// so nothing downstream can tell the two apart.
+		// under Google's id for it.
 		var raw calendarapi.Event
 		if err := json.Unmarshal(ex.RawJSON, &raw); err != nil {
 			t.Fatalf("exception %d raw json: %v", i, err)
 		}
-		if raw.Id != w.id || raw.Status != statusCancelled || raw.RecurringEventId != "g7ifrv1337tr318er1n3aq3uc4" ||
+		if raw.Id != w.googleID || raw.Status != statusCancelled || raw.RecurringEventId != "g7ifrv1337tr318er1n3aq3uc4" ||
 			raw.OriginalStartTime == nil || raw.OriginalStartTime.DateTime == "" {
 			t.Errorf("exception %d raw json = %s", i, ex.RawJSON)
 		}
@@ -157,8 +158,9 @@ func TestExdateBecomesCancelledInstances(t *testing.T) {
 		utc(2026, 11, 4, 11, 0), utc(2026, 11, 11, 11, 0), utc(2026, 11, 18, 11, 0), utc(2026, 11, 25, 11, 0))
 }
 
-// When Google also delivers the cancelled instance itself, the one made from
-// the EXDATE has the same remote id, so the index holds one row, not two.
+// When Google also delivers an instance object for an excluded slot, the row
+// made from the EXDATE sits beside it, never on it: the object's row is
+// Google's to change, and lifting the EXDATE must not take it along.
 func TestExdateMatchesTheDeliveredCancellation(t *testing.T) {
 	delivered := &calendarapi.Event{
 		Id: "g7ifrv1337tr318er1n3aq3uc4_20261014T110000Z", Status: statusCancelled,
@@ -170,8 +172,8 @@ func TestExdateMatchesTheDeliveredCancellation(t *testing.T) {
 	for _, ev := range evs {
 		ids[ev.RemoteID]++
 	}
-	if ids["g7ifrv1337tr318er1n3aq3uc4_20261014T110000Z"] != 2 {
-		t.Errorf("ids = %v, want the EXDATE and the delivered instance to share one id", ids)
+	if ids["g7ifrv1337tr318er1n3aq3uc4_20261014T110000Z"] != 1 || ids["g7ifrv1337tr318er1n3aq3uc4#exdate-20261014T110000Z"] != 1 {
+		t.Errorf("ids = %v, want the delivered instance and the EXDATE on a row each", ids)
 	}
 	got := expanded(t, evs, utc(2026, 10, 1, 0, 0), utc(2026, 10, 31, 0, 0))
 	wantStarts(t, got, utc(2026, 10, 7, 11, 0), utc(2026, 10, 28, 11, 0))
@@ -218,7 +220,8 @@ func TestExdateFormsAcrossDST(t *testing.T) {
 		utc(2026, 10, 28, 12, 0), utc(2026, 11, 18, 12, 0), utc(2026, 12, 9, 12, 0))
 }
 
-// An all-day series excludes whole days, under Google's date-only instance id.
+// An all-day series excludes whole days, named after Google's date-only
+// instance id.
 func TestExdateAllDay(t *testing.T) {
 	ev := &calendarapi.Event{
 		Id: "day", ICalUID: "day@google.com", Summary: "Office day", Status: statusConfirmed,
@@ -231,8 +234,8 @@ func TestExdateAllDay(t *testing.T) {
 		t.Fatalf("mapped %d events, want the master and one cancelled day: %+v", len(evs), evs)
 	}
 	ex := evs[1]
-	if ex.RemoteID != "day_20261014" || !ex.AllDay {
-		t.Errorf("exception = id %q all-day %v, want day_20261014 and all-day", ex.RemoteID, ex.AllDay)
+	if ex.RemoteID != "day#exdate-20261014" || !ex.AllDay {
+		t.Errorf("exception = id %q all-day %v, want day#exdate-20261014 and all-day", ex.RemoteID, ex.AllDay)
 	}
 	loc, _ := time.LoadLocation("Europe/Amsterdam")
 	if want := time.Date(2026, 10, 14, 0, 0, 0, 0, loc); !ex.Start.Equal(want) || !ex.End.Equal(want.AddDate(0, 0, 1)) {
