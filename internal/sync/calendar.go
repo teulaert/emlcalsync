@@ -103,8 +103,16 @@ func (e *Engine) syncOneCalendar(ctx context.Context, acct config.Account, cp pr
 			ev.CalendarRemote = cal.RemoteID
 		}
 		ev.CalendarID = cal.ID
-		if _, err := e.st.UpsertEvent(ctx, &ev); err != nil {
+		_, changed, err := e.st.UpsertEventChanged(ctx, &ev)
+		if err != nil {
 			return rep, since == "", err
+		}
+		if !changed {
+			// Google's holiday calendars come back whole, and identical, on
+			// every delta. An event already stored as is has nothing to count
+			// and nothing to re-expand: the daily re-expansion slides its
+			// window like everyone else's.
+			continue
 		}
 		rep.Added++
 		switch {
@@ -120,19 +128,27 @@ func (e *Engine) syncOneCalendar(ctx context.Context, acct config.Account, cp pr
 	// before the series is re-expanded without them. A removed master takes
 	// all of its derived rows along. (provider.DerivedRemoteID)
 	upserted := make(map[string]bool, len(ch.Upserted))
+	masterUID := map[string]string{} // remote id -> uid
 	var masters []string
 	for i := range ch.Upserted {
 		ev := &ch.Upserted[i]
 		upserted[ev.RemoteID] = true
 		if ev.RecurrenceID == "" {
 			masters = append(masters, ev.RemoteID)
+			masterUID[ev.RemoteID] = ev.UID
 		}
 	}
 	// One transaction for the lot: a full listing has a master per event.
 	if err := e.st.Tx(ctx, func(tx *store.Tx) error {
 		for _, id := range append(masters, ch.Removed...) {
-			if _, err := tx.PruneEventRows(ctx, cal.ID, provider.DerivedPrefix(id), upserted); err != nil {
+			n, err := tx.PruneEventRows(ctx, cal.ID, provider.DerivedPrefix(id), upserted)
+			if err != nil {
 				return err
+			}
+			// The master itself may have come back unchanged, and so not be
+			// touched yet, but the series it expands to has lost a row.
+			if uid := masterUID[id]; n > 0 && uid != "" {
+				touched[uid] = true
 			}
 		}
 		return nil

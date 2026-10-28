@@ -379,6 +379,55 @@ func TestOccurrencesWindowQuery(t *testing.T) {
 	}
 }
 
+// UpsertEventChanged writes, and reports, only a real change: storing an
+// event exactly as it already is leaves the row alone.
+func TestUpsertEventChanged(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+	seedCalendars(t, s, "work")
+
+	mk := func() *model.Event {
+		return &model.Event{
+			AccountID: "work", CalendarRemote: "primary", RemoteID: "ev-1",
+			UID: "uid-1", Title: "Koningsdag", Start: base, End: base.Add(24 * time.Hour),
+			AllDay: true, Status: model.StatusConfirmed,
+			RawJSON: []byte(`{"id":"ev-1","etag":"1"}`), Updated: base,
+		}
+	}
+	id, changed, err := s.UpsertEventChanged(ctx, mk())
+	if err != nil || !changed || id == 0 {
+		t.Fatalf("insert: id=%d changed=%v err=%v, want a new row", id, changed, err)
+	}
+
+	ev := mk()
+	again, changed, err := s.UpsertEventChanged(ctx, ev)
+	if err != nil || changed {
+		t.Fatalf("identical upsert: changed=%v err=%v, want unchanged", changed, err)
+	}
+	if again != id || ev.ID != id || ev.CalendarID == 0 {
+		t.Fatalf("identical upsert ids: got %d (ev %d, cal %d), want %d", again, ev.ID, ev.CalendarID, id)
+	}
+
+	edited := mk()
+	edited.Title = "Koningsdag (verplaatst)"
+	if _, changed, err := s.UpsertEventChanged(ctx, edited); err != nil || !changed {
+		t.Fatalf("edit: changed=%v err=%v, want changed", changed, err)
+	}
+	got, err := s.GetEvent(ctx, "work", "primary", "ev-1")
+	if err != nil || got.Title != "Koningsdag (verplaatst)" {
+		t.Fatalf("after edit: %+v, %v", got, err)
+	}
+
+	// Coming back from a soft delete is a change too.
+	if err := s.MarkEventDeleted(ctx, got.CalendarID, "ev-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, changed, err := s.UpsertEventChanged(ctx, edited); err != nil || !changed {
+		t.Fatalf("undelete: changed=%v err=%v, want changed", changed, err)
+	}
+}
+
 func TestEventExceptionsAndUpdatedSince(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)

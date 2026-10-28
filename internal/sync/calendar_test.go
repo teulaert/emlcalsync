@@ -132,11 +132,48 @@ func TestCalendarStateExpiredFallsBackToFullListing(t *testing.T) {
 	if rep.Calendar.Kind != KindBackfill {
 		t.Fatalf("kind = %q, want a full listing", rep.Calendar.Kind)
 	}
-	if rep.Calendar.Added != 2 {
-		t.Fatalf("added = %d, want both events re-listed", rep.Calendar.Added)
+	// Both are listed, but r1 comes back exactly as stored: only r2 is news.
+	if rep.Calendar.Added != 1 {
+		t.Fatalf("added = %d, want only the new event counted", rep.Calendar.Added)
 	}
 	if got := len(h.occurrences()); got != 2 {
 		t.Fatalf("%d occurrences, want 2", got)
+	}
+}
+
+// Google hands its public holiday calendars back whole on every delta, each
+// event identical to what is stored. That is not a change: nothing is counted,
+// so the sync log and status do not report the calendar as changing every
+// minute, and nothing is lost either.
+func TestCalendarIdenticalRelistingIsNotAChange(t *testing.T) {
+	h := newHarness(t)
+	start := baseTime()
+	h.cal.Put("primary", model.Event{
+		RemoteID: "r1", UID: "u1", Title: "Koningsdag",
+		Start: start, End: start.Add(24 * time.Hour), AllDay: true,
+		Status: model.StatusConfirmed,
+	})
+	if rep := h.sync(SyncOptions{Calendar: true}); rep.Calendar.Added != 1 {
+		t.Fatalf("first sync added = %d, want 1", rep.Calendar.Added)
+	}
+
+	h.cal.InjectStateExpired("primary")
+	rep := h.sync(SyncOptions{Calendar: true})
+	if rep.Calendar.Added != 0 || rep.Calendar.Updated != 0 || rep.Calendar.Removed != 0 {
+		t.Fatalf("identical relisting reported %+v, want no change", rep.Calendar)
+	}
+	if got := len(h.occurrences()); got != 1 {
+		t.Fatalf("%d occurrences, want the event's 1 kept", got)
+	}
+
+	// A real edit still counts.
+	h.cal.Put("primary", model.Event{
+		RemoteID: "r1", UID: "u1", Title: "Koningsdag (verplaatst)",
+		Start: start, End: start.Add(24 * time.Hour), AllDay: true,
+		Status: model.StatusConfirmed,
+	})
+	if rep := h.sync(SyncOptions{Calendar: true}); rep.Calendar.Added != 1 {
+		t.Fatalf("edit added = %d, want 1", rep.Calendar.Added)
 	}
 }
 

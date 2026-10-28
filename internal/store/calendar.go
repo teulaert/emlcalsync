@@ -239,31 +239,52 @@ func (s *Store) UpsertEvent(ctx context.Context, ev *model.Event) (int64, error)
 }
 
 func (tx *Tx) UpsertEvent(ctx context.Context, ev *model.Event) (int64, error) {
+	id, _, err := tx.UpsertEventChanged(ctx, ev)
+	return id, err
+}
+
+// UpsertEventChanged is UpsertEvent that also says whether the row changed:
+// false when the event was already stored exactly as given, in which case
+// nothing is written. A calendar sync needs the difference because Google
+// hands some calendars (its public holiday ones) back whole on every delta,
+// identical each time, and only a real change should count or be re-expanded.
+func (s *Store) UpsertEventChanged(ctx context.Context, ev *model.Event) (int64, bool, error) {
+	var id int64
+	var changed bool
+	err := s.Tx(ctx, func(tx *Tx) error {
+		var err error
+		id, changed, err = tx.UpsertEventChanged(ctx, ev)
+		return err
+	})
+	return id, changed, err
+}
+
+func (tx *Tx) UpsertEventChanged(ctx context.Context, ev *model.Event) (int64, bool, error) {
 	calID := ev.CalendarID
 	if calID == 0 {
 		if ev.AccountID == "" || ev.CalendarRemote == "" {
-			return 0, fmt.Errorf("store: event needs calendar_id or account+calendar remote")
+			return 0, false, fmt.Errorf("store: event needs calendar_id or account+calendar remote")
 		}
 		err := tx.q.QueryRowContext(ctx,
 			`SELECT id FROM calendars WHERE account_id = ? AND remote_id = ?`,
 			ev.AccountID, ev.CalendarRemote).Scan(&calID)
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, notFound("calendar %s:%s", ev.AccountID, ev.CalendarRemote)
+			return 0, false, notFound("calendar %s:%s", ev.AccountID, ev.CalendarRemote)
 		}
 		if err != nil {
-			return 0, fmt.Errorf("store: resolve calendar: %w", err)
+			return 0, false, fmt.Errorf("store: resolve calendar: %w", err)
 		}
 	}
 
 	organizer, err := marshalOne(ev.Organizer)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	var attendees any
 	if len(ev.Attendees) > 0 {
 		b, err := json.Marshal(ev.Attendees)
 		if err != nil {
-			return 0, fmt.Errorf("store: marshal attendees: %w", err)
+			return 0, false, fmt.Errorf("store: marshal attendees: %w", err)
 		}
 		attendees = string(b)
 	}
@@ -287,18 +308,37 @@ func (tx *Tx) UpsertEvent(ctx context.Context, ev *model.Event) (int64, error) {
 		  organizer = excluded.organizer, attendees_json = excluded.attendees_json,
 		  my_response = excluded.my_response, raw_json = excluded.raw_json,
 		  updated_utc = excluded.updated_utc, deleted_at = excluded.deleted_at
+		WHERE uid IS NOT excluded.uid OR title IS NOT excluded.title
+		   OR description IS NOT excluded.description OR location IS NOT excluded.location
+		   OR conference_url IS NOT excluded.conference_url
+		   OR start_utc IS NOT excluded.start_utc OR end_utc IS NOT excluded.end_utc
+		   OR all_day IS NOT excluded.all_day OR timezone IS NOT excluded.timezone
+		   OR rrule IS NOT excluded.rrule OR recurrence_id IS NOT excluded.recurrence_id
+		   OR status IS NOT excluded.status OR organizer IS NOT excluded.organizer
+		   OR attendees_json IS NOT excluded.attendees_json
+		   OR my_response IS NOT excluded.my_response OR raw_json IS NOT excluded.raw_json
+		   OR updated_utc IS NOT excluded.updated_utc OR deleted_at IS NOT excluded.deleted_at
 		RETURNING id`,
 		calID, ev.RemoteID, nullStr(ev.UID), nullStr(ev.Title), nullStr(ev.Description),
 		nullStr(ev.Location), nullStr(ev.ConferenceURL), unixOf(ev.Start), unixOf(ev.End), boolInt(ev.AllDay),
 		nullStr(ev.Timezone), nullStr(ev.RRule), nullStr(ev.RecurrenceID), nullStr(string(ev.Status)),
 		organizer, attendees, nullStr(string(ev.MyResponse)), rawJSON,
 		unixOf(ev.Updated), nullUnix(ev.DeletedAt)).Scan(&id)
+	changed := true
+	if errors.Is(err, sql.ErrNoRows) {
+		// The conflict update's WHERE found nothing to change, so no row came
+		// back: the event is stored exactly as given already.
+		changed = false
+		err = tx.q.QueryRowContext(ctx,
+			`SELECT id FROM events WHERE calendar_id = ? AND remote_id = ?`,
+			calID, ev.RemoteID).Scan(&id)
+	}
 	if err != nil {
-		return 0, fmt.Errorf("store: upsert event %s: %w", ev.RemoteID, err)
+		return 0, false, fmt.Errorf("store: upsert event %s: %w", ev.RemoteID, err)
 	}
 	ev.ID = id
 	ev.CalendarID = calID
-	return id, nil
+	return id, changed, nil
 }
 
 func marshalOne(a model.Address) (any, error) {
