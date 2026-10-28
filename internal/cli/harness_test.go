@@ -87,7 +87,16 @@ func newTestEnv(t *testing.T, accounts ...config.Account) *testEnv {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
 	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "data"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state"))
+	// `mail open` writes its pages under the cache directory; left alone the
+	// tests would write into, and count, the real ~/.cache/emlcal/view.
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
 	t.Setenv("HOME", dir)
+	// JSON times are written in time.Local, so a fixture's expected "Z" holds
+	// only on a machine that happens to run in UTC. t.Setenv above already
+	// keeps these tests off t.Parallel, which makes swapping it safe.
+	prevLocal := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = prevLocal })
 	t.Setenv(config.EnvFormat, "")
 	t.Setenv(config.EnvConfig, "")
 	t.Setenv(config.EnvDataDir, "")
