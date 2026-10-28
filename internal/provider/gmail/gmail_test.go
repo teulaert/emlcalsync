@@ -544,6 +544,14 @@ func TestWrites(t *testing.T) {
 	if !reflect.DeepEqual(f.untrashed, []string{"m1"}) {
 		t.Errorf("untrashed = %v, want [m1] (a missing id is not an error)", f.untrashed)
 	}
+	// Untrash alone leaves an archived message out of the inbox, so Restore
+	// must add INBOX itself -- and only for the message that still exists.
+	if f.lastModify == nil ||
+		!reflect.DeepEqual(f.lastModify.Ids, []string{"m1"}) ||
+		!reflect.DeepEqual(f.lastModify.AddLabelIds, []string{"INBOX"}) ||
+		!reflect.DeepEqual(f.lastModify.RemoveLabelIds, []string{"TRASH"}) {
+		t.Errorf("restore batchModify = %+v, want m1 +INBOX -TRASH", f.lastModify)
+	}
 	f.mu.Unlock()
 
 	id, err := m.CreateDraft(ctx, []byte("Subject: hi\r\n\r\nbody"))

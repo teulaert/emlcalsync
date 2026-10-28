@@ -8,6 +8,7 @@ import (
 	"fmt"
 	netmail "net/mail"
 	"strings"
+	"sync"
 
 	"golang.org/x/sync/errgroup"
 	gmailapi "google.golang.org/api/gmail/v1"
@@ -94,14 +95,17 @@ func (m *Mail) Trash(ctx context.Context, ids []string) error {
 	return g.Wait()
 }
 
-// Restore moves messages back to the inbox. It uses messages.untrash rather
-// than a label edit even for a merely archived message: Trash below strips
-// every label, not just INBOX, and untrash is the one call that puts them
-// back — it is a no-op label-wise for a message that only lost INBOX.
+// Restore moves messages back to the inbox. It untrashes first, because Trash
+// below strips every label, not just INBOX, and untrash is the one call that
+// puts them back. Untrash does not add INBOX to a message that was merely
+// archived (it is a no-op for anything not in the trash), so INBOX is then
+// added explicitly to every message that still exists.
 func (m *Mail) Restore(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	var mu sync.Mutex
+	live := make([]string, 0, len(ids))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(m.conc)
 	for _, id := range ids {
@@ -114,10 +118,19 @@ func (m *Mail) Restore(ctx context.Context, ids []string) error {
 				m.log.Debug("gmail message already gone, not restoring", "id", id)
 				return nil
 			}
-			return err
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			live = append(live, id)
+			mu.Unlock()
+			return nil
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+	return m.batchModify(ctx, live, []string{"INBOX"}, []string{"TRASH"})
 }
 
 // CreateDraft stores raw as a draft.
