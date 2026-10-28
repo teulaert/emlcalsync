@@ -45,6 +45,7 @@ type coreStatusRow struct {
 	Backfill           string        `json:"backfill,omitempty" table:"BACKFILL"`
 	BackfillPercent    float64       `json:"backfill_percent,omitempty"`
 	OutboxPending      int           `json:"outbox_pending"   table:"OUTBOX"`
+	OutboxFailed       int           `json:"outbox_failed"    table:"FAILED"`
 	// MailBackend/CalendarBackend name each resource's backend, or "-" when
 	// the account has no block for it; Disabled is the same fact spelled for
 	// the table.
@@ -164,6 +165,7 @@ func coreStatus(app *App) error {
 				row.Deleted = s.Deleted
 				row.BlobsIncomplete = s.BlobsIncomplete
 				row.OutboxPending = s.OutboxPending
+				row.OutboxFailed = s.OutboxFailed
 			}
 			row.Mail = coreSyncTimesOf(ctx, st, name, "mail")
 			row.Calendar = coreSyncTimesOf(ctx, st, name, "calendar")

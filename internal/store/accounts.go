@@ -143,6 +143,7 @@ type Stats struct {
 	LastReceived    time.Time `json:"last_received"`
 	LastIndexed     time.Time `json:"last_indexed"`
 	OutboxPending   int       `json:"outbox_pending"`
+	OutboxFailed    int       `json:"outbox_failed"` // given up on, kept for the user to see
 }
 
 // AccountStats collects the counters `emlcal status` prints for one account.
@@ -179,7 +180,8 @@ func (tx *Tx) AccountStats(ctx context.Context, accountID string) (Stats, error)
 		{`SELECT count(*) FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.account_id = ?`, &st.Attachments},
 		{`SELECT count(*) FROM events e JOIN calendars c ON c.id = e.calendar_id
 		    WHERE c.account_id = ? AND e.deleted_at IS NULL`, &st.Events},
-		{`SELECT count(*) FROM outbox WHERE account_id = ? AND done_at IS NULL`, &st.OutboxPending},
+		{`SELECT count(*) FROM outbox WHERE account_id = ? AND done_at IS NULL AND failed_at IS NULL`, &st.OutboxPending},
+		{`SELECT count(*) FROM outbox WHERE account_id = ? AND done_at IS NULL AND failed_at IS NOT NULL`, &st.OutboxFailed},
 	}
 	for _, c := range counts {
 		if err := tx.q.QueryRowContext(ctx, c.query, accountID).Scan(c.dst); err != nil {

@@ -1092,6 +1092,14 @@ func TestAccountStats(t *testing.T) {
 	if _, err := s.EnqueueOutbox(ctx, "work", "send", []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
+	// A write given up on is no longer pending; it is counted on its own.
+	dead, err := s.EnqueueOutbox(ctx, "work", "flags", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkOutboxPermanentlyFailed(ctx, dead, "rejected"); err != nil {
+		t.Fatal(err)
+	}
 
 	st, err := s.AccountStats(ctx, "work")
 	if err != nil {
@@ -1114,6 +1122,9 @@ func TestAccountStats(t *testing.T) {
 	}
 	if st.OutboxPending != 1 {
 		t.Errorf("OutboxPending = %d, want 1", st.OutboxPending)
+	}
+	if st.OutboxFailed != 1 {
+		t.Errorf("OutboxFailed = %d, want 1", st.OutboxFailed)
 	}
 	if !st.LastReceived.Equal(base.Add(time.Hour)) {
 		t.Errorf("LastReceived = %v, want the newest live message", st.LastReceived)
