@@ -192,6 +192,11 @@ func (d Deps) loadThreads(seq int, f store.MessageFilter, query string, appendPa
 		defer cancel()
 		if query != "" {
 			hits, err := d.Store.Search(ctx, query, f)
+			if errors.Is(err, store.ErrBadQuery) {
+				// Typed text, not FTS5: a hyphen or an @ is part of
+				// what the person is looking for, so search the words.
+				hits, err = d.Store.Search(ctx, store.QuoteWords(query), f)
+			}
 			if err != nil {
 				return threadsLoaded{seq: seq, err: err, append: appendPage}
 			}

@@ -135,6 +135,51 @@ func TestMailListSearchCapturesTypingAndFinds(t *testing.T) {
 	}
 }
 
+// A space arrives as the key "space", not " ": the prompt must take it as
+// text, or "sunday foundation" is searched as "sundayfoundation".
+func TestMailListSearchTakesSeveralWords(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "Factuur Sunday Foundation", "wendy", time.Hour, false)
+	addMessage(t, d, "work", "w2", "t2", "Sunday lunch", "anna", 2*time.Hour, false)
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	s := pump(t, m, m.Init(), k, 100, 24)
+	s, _ = s.Update(keyPress("/"), k, 100, 24)
+	for _, c := range []string{"s", "u", "n", "d", "a", "y", "space", "f", "o", "u", "n", "d", "a", "t", "i", "o", "n"} {
+		s, _ = s.Update(keyPress(c), k, 100, 24)
+	}
+	if got := s.(*mailList).input; got != "sunday foundation" {
+		t.Fatalf("search input = %q, want %q", got, "sunday foundation")
+	}
+	s2, cmd := s.Update(keyPress("enter"), k, 100, 24)
+	ml := pump(t, s2, cmd, k, 100, 24).(*mailList)
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "Factuur Sunday Foundation" {
+		t.Errorf("search returned %+v, want just the Sunday Foundation thread", ml.threads)
+	}
+}
+
+// Text that is not FTS5 -- a hyphenated name, an address -- is searched as
+// its words instead of ending in a syntax error.
+func TestMailListSearchFallsBackToWords(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "Opening in Sierra-Leone", "wendy", time.Hour, false)
+	addMessage(t, d, "work", "w2", "t2", "Lunch on Friday", "anna", 2*time.Hour, false)
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	s := pump(t, m, m.Init(), k, 100, 24)
+	s, _ = s.Update(keyPress("/"), k, 100, 24)
+	for _, c := range "sierra-leone" {
+		s, _ = s.Update(keyPress(string(c)), k, 100, 24)
+	}
+	s2, cmd := s.Update(keyPress("enter"), k, 100, 24)
+	ml := pump(t, s2, cmd, k, 100, 24).(*mailList)
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "Opening in Sierra-Leone" {
+		t.Errorf("search returned %+v, want just the Sierra-Leone thread", ml.threads)
+	}
+}
+
 func TestMailListMailboxCycleNarrowsToArchive(t *testing.T) {
 	d := newTestDeps(t, "work")
 	addMessage(t, d, "work", "w1", "t1", "In the inbox", "anna", time.Hour, false)

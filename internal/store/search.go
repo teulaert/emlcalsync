@@ -153,3 +153,15 @@ func classifyFTSError(err error, query string) error {
 func QuoteFTS(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
+
+// QuoteWords turns arbitrary user text into an FTS5 query that matches every
+// word in it, each quoted on its own: "sierra-leone" and an address like
+// "anna@example.com" stop being syntax, while the words still match in any
+// order rather than as one phrase.
+func QuoteWords(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		words[i] = QuoteFTS(w)
+	}
+	return strings.Join(words, " ")
+}

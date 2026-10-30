@@ -295,6 +295,8 @@ func (m *mailList) searchKey(msg tea.KeyPressMsg) (screen, tea.Cmd) {
 	}
 	if s := msg.String(); len([]rune(s)) == 1 {
 		m.input += s
+	} else if msg.Text != "" {
+		m.input += msg.Text // space ("space" as a key), a paste
 	}
 	return m, nil
 }

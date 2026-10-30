@@ -578,6 +578,23 @@ func TestSearchBadQuery(t *testing.T) {
 	if len(hits) != 2 {
 		t.Fatalf("QuoteFTS phrase found %d, want 2", len(hits))
 	}
+
+	// QuoteWords keeps the words apart: they match in any order, and the
+	// punctuation that made the raw query fail is no longer syntax.
+	if _, err := s.Search(ctx, `2026-08 invoice`, MessageFilter{}); !errors.Is(err, ErrBadQuery) {
+		t.Fatalf("raw hyphenated query = %v, want ErrBadQuery", err)
+	}
+	hits, err = s.Search(ctx, QuoteWords(` 2026-08   invoice "x`), MessageFilter{})
+	if err != nil {
+		t.Fatalf("Search(QuoteWords(...)) = %v, want no error", err)
+	}
+	hits, err = s.Search(ctx, QuoteWords(`2026-08 invoice`), MessageFilter{})
+	if err != nil {
+		t.Fatalf("word search: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("QuoteWords found %d, want 2", len(hits))
+	}
 }
 
 func TestSearchFollowsEdits(t *testing.T) {
