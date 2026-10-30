@@ -61,6 +61,10 @@ func (tx *Tx) SearchHighlight(ctx context.Context, query string, f MessageFilter
 	}
 	where, args := f.where()
 	limit, limitArgs := f.limitClause()
+	order := "rank, m.received_utc DESC"
+	if f.NewestFirst {
+		order = "m.received_utc DESC, rank"
+	}
 
 	sqlArgs := make([]any, 0, len(args)+len(limitArgs)+4)
 	sqlArgs = append(sqlArgs, open, close, q)
@@ -73,8 +77,8 @@ func (tx *Tx) SearchHighlight(ctx context.Context, query string, f MessageFilter
 		  FROM messages_fts
 		  JOIN messages m ON m.id = messages_fts.rowid
 		 WHERE messages_fts MATCH ? AND %s
-		 ORDER BY rank, m.received_utc DESC%s`,
-		messageCols, searchTextColumn, where, limit), sqlArgs...)
+		 ORDER BY %s%s`,
+		messageCols, searchTextColumn, where, order, limit), sqlArgs...)
 	if err != nil {
 		return nil, classifyFTSError(err, q)
 	}

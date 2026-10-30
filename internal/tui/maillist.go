@@ -92,7 +92,7 @@ func (m *mailList) Title() string {
 
 // filter builds the store query for the current view.
 func (m *mailList) filter(offset int) store.MessageFilter {
-	f := store.MessageFilter{Limit: pageSize, Offset: offset}
+	f := store.MessageFilter{Limit: pageSize, Offset: offset, NewestFirst: true}
 	if m.account > 0 && m.account <= len(m.accounts) {
 		f.Accounts = []string{m.accounts[m.account-1]}
 	} else {

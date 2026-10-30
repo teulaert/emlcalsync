@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +178,32 @@ func TestMailListSearchFallsBackToWords(t *testing.T) {
 	ml := pump(t, s2, cmd, k, 100, 24).(*mailList)
 	if len(ml.threads) != 1 || ml.threads[0].Subject != "Opening in Sierra-Leone" {
 		t.Errorf("search returned %+v, want just the Sierra-Leone thread", ml.threads)
+	}
+}
+
+// Search results read like a mailbox: newest first, not by how well the
+// words matched -- the oldest mail here is the strongest match.
+func TestMailListSearchIsNewestFirst(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "Starlink Starlink Starlink", "starlink", 72*time.Hour, false)
+	addMessage(t, d, "work", "w2", "t2", "Starlink reminder", "billing", time.Hour, false)
+	addMessage(t, d, "work", "w3", "t3", "Starlink order shipped for your dish", "shop", 24*time.Hour, false)
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	s := pump(t, m, m.Init(), k, 100, 24)
+	s, _ = s.Update(keyPress("/"), k, 100, 24)
+	for _, c := range "starlink" {
+		s, _ = s.Update(keyPress(string(c)), k, 100, 24)
+	}
+	s2, cmd := s.Update(keyPress("enter"), k, 100, 24)
+	ml := pump(t, s2, cmd, k, 100, 24).(*mailList)
+	var got []string
+	for _, th := range ml.threads {
+		got = append(got, th.ThreadID)
+	}
+	if want := []string{"t2", "t3", "t1"}; !slices.Equal(got, want) {
+		t.Errorf("search order = %v, want %v", got, want)
 	}
 }
 

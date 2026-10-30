@@ -1134,6 +1134,9 @@ type MessageFilter struct {
 	ThreadID string
 	// IncludeDeleted keeps messages that are gone on the server.
 	IncludeDeleted bool
+	// NewestFirst orders Search by received time instead of relevance, the
+	// way a mailbox reads. Listing is newest first regardless.
+	NewestFirst bool
 	// Limit <= 0 means unlimited. Offset is applied after ordering.
 	Limit, Offset int
 }

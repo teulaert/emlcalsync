@@ -776,3 +776,22 @@ func TestListMessagesDraftsExcludesTheTrash(t *testing.T) {
 		t.Errorf("trash = %v, want both trashed messages", got)
 	}
 }
+
+func TestSearchNewestFirst(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedCorpus(t, s)
+
+	hits, err := s.Search(ctx, "invoice", MessageFilter{NewestFirst: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) < 2 {
+		t.Fatalf("found %d, want at least 2 to compare", len(hits))
+	}
+	for i := 1; i < len(hits); i++ {
+		if hits[i].Message.Received.After(hits[i-1].Message.Received) {
+			t.Errorf("hit %d (%s) is newer than hit %d (%s)", i, hits[i].Message.Received, i-1, hits[i-1].Message.Received)
+		}
+	}
+}

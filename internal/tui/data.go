@@ -200,8 +200,7 @@ func (d Deps) loadThreads(seq int, f store.MessageFilter, query string, appendPa
 			if err != nil {
 				return threadsLoaded{seq: seq, err: err, append: appendPage}
 			}
-			// Search ranks messages; collapse to one row per thread, keeping
-			// the order the ranking produced.
+			// Search finds messages; collapse to one row per thread.
 			seen := map[string]bool{}
 			var out []model.Thread
 			for i := range hits {
@@ -217,6 +216,9 @@ func (d Deps) loadThreads(seq int, f store.MessageFilter, query string, appendPa
 				}
 				out = append(out, *t)
 			}
+			// A thread shows its latest message's date, which can be
+			// newer than the message that matched: order by what is shown.
+			slices.SortStableFunc(out, func(a, b model.Thread) int { return b.Last.Compare(a.Last) })
 			return threadsLoaded{seq: seq, threads: out, append: appendPage}
 		}
 		th, err := d.Store.ListThreads(ctx, f)
