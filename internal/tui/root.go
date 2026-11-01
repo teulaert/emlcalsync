@@ -38,10 +38,24 @@ type capturing interface{ capturingKeys() bool }
 
 // triageable is implemented by the screens whose rows can be acted on, so the
 // root can update them optimistically without knowing which one it holds.
+// restore and unhide differ in who calls them: a failed write puts its row
+// back where it was, undo lifts the message of a landed write out of the
+// screen's gone set so the reload it starts can see it again.
 type triageable interface {
-	dropSelected()
-	restore()
-	commit()
+	screen
+	// dropSelected takes the row under the cursor off and returns its key,
+	// which names that drop in every later result. A screen with nothing
+	// selected returns "".
+	dropSelected() string
+	// restore, commit, unhide and hide act on the drop with this key, not on
+	// the oldest or newest one left: provider results are delivered in
+	// whatever order they finish, and two drops can be in flight at once.
+	// unhide is a landed triage or undo letting its message show again; hide
+	// puts it back when the undo was rejected and the message is still there.
+	restore(key string)
+	commit(key string)
+	unhide(key string)
+	hide(key string)
 }
 
 type root struct {
@@ -881,19 +895,32 @@ func (r *root) triage(what string) tea.Cmd {
 		ops, undo = restoreOps(ctx, r.d.Store, ts)
 	}
 	// The reader is the one screen with no rows of its own: the drop belongs
-	// to the thread underneath, which then says what to read next.
+	// to the thread underneath, which then says what to read next. The key
+	// names the row it dropped, and it follows the same path as the write.
 	var follow tea.Cmd
+	var key string
 	switch s := r.top().(type) {
 	case *reader:
-		follow = r.followOn(s)
+		follow, key = r.followOn(s)
 	case triageable:
-		s.dropSelected()
+		key = s.dropSelected()
 		if tv, ok := s.(*threadView); ok && len(tv.messages) == 0 {
-			follow = r.closeThread()
+			follow, key = r.closeThread()
 		}
 	}
+	// The row that went belongs to the screen left on top once the follow has
+	// run: a reader whose thread still has a message leaves the thread, and one
+	// that emptied leaves the list. Capture it now -- by result time the person
+	// may be somewhere else, and the write still has to commit or restore here.
+	drop := r.triageScreen()
+	if undo != nil {
+		// Undo is offered after this write lands, when the drop is off
+		// removed; the key is what lets undo lift out the same row it
+		// committed, not whichever landed last.
+		undo.drop, undo.key = drop, key
+	}
 	r.note(what + "…")
-	return tea.Batch(r.d.apply(what, ops, undo), follow)
+	return tea.Batch(r.d.applyDropping(what, ops, undo, drop, key), follow)
 }
 
 // deleteEvent is d on the calendar. The second return reports that the
@@ -938,16 +965,16 @@ func (r *root) deleteEvent() (tea.Cmd, bool) {
 // after each one. When the thread has nothing left, the reader and the thread
 // both close and the row goes with them, which is where a one-message thread
 // ends up: back on the list, one row shorter.
-func (r *root) followOn(rd *reader) tea.Cmd {
+func (r *root) followOn(rd *reader) (tea.Cmd, string) {
 	st := r.stack()
 	tv, _ := st[max(len(st)-2, 0)].(*threadView)
 	if tv == nil {
 		r.pop()
-		return nil
+		return nil, ""
 	}
-	tv.dropMessage(rd.remote)
+	key := tv.dropMessage(rd.remote)
 	if m := tv.selected(); m != nil {
-		return tea.Batch(rd.show(m.AccountID, m.RemoteID), r.markRead(m))
+		return tea.Batch(rd.show(m.AccountID, m.RemoteID), r.markRead(m)), key
 	}
 	r.pop() // out of the reader
 	return r.closeThread()
@@ -957,12 +984,12 @@ func (r *root) followOn(rd *reader) tea.Cmd {
 // just been archived or trashed, so the row on the list underneath goes too --
 // what a thread of one message amounts to, which is most of them, is that the
 // list is where the next thing to read is.
-func (r *root) closeThread() tea.Cmd {
+func (r *root) closeThread() (tea.Cmd, string) {
 	r.pop()
 	if t, ok := r.top().(triageable); ok {
-		t.dropSelected()
+		return nil, t.dropSelected()
 	}
-	return nil
+	return nil, ""
 }
 
 // markRead is the mark-read that comes with putting a message on screen. The
@@ -1025,11 +1052,30 @@ func (r *root) applyUndo() tea.Cmd {
 	u := r.undo
 	r.undo = nil
 	r.note("undoing " + u.label + "…")
-	// Put the row back straight away; the reload that follows confirms it.
-	if t := r.triageScreen(); t != nil {
-		t.restore()
+	// Undo is only offered once the write landed, and commit has already taken
+	// the row off the screen's removed: there is nothing to put back. The
+	// thread view still hides the message in gone, and the undo lifts it only
+	// once the write lands -- onApplied looks at the result -- so a failed
+	// undo does not uncover a message that is still in the trash. u.drop and
+	// u.key name the exact row the action dropped.
+	//
+	// The reload comes from the result too, not alongside the write: the two
+	// commands run concurrently, and a query that beats the write to the index
+	// only finds the row again on the next background reload.
+	return r.d.applyDropping("undo "+u.label, u.ops, nil, u.drop, u.key)
+}
+
+// triaged reports whether an action is one the screens dropped a row for.
+// Only those results own a pending drop: the mark-read that comes with
+// opening a message and the undo are writes too, but neither took a row off a
+// screen, and letting either claim the oldest pending drop takes a real
+// trash's row away before it is known whether it landed.
+func triaged(action string) bool {
+	switch action {
+	case "archive", "trash", "restore":
+		return true
 	}
-	return tea.Batch(r.d.apply("undo "+u.label, u.ops, nil), r.top().reload())
+	return false
 }
 
 // rereads reports whether a write changed what the screen now on top is
@@ -1039,26 +1085,45 @@ func (r *root) applyUndo() tea.Cmd {
 // An answered invitation is one: the event view's RSVP line and the reader's
 // card both say what the calendar says. A deleted event is the same thing from
 // the other end -- the agenda has one row fewer, and after a delete from the
-// detail view the agenda is what the pop left on top.
+// detail view the agenda is what the pop left on top. An undo is one too: the
+// row it puts back is only in the index by the time the write returns, which
+// is the point of reloading here rather than alongside it.
 func rereads(action string) bool {
 	switch model.Participation(action) {
 	case model.PartAccepted, model.PartDeclined, model.PartTentative:
 		return true
 	}
-	return action == actionEventDelete
+	return action == actionEventDelete || strings.HasPrefix(action, "undo ")
 }
 
 func (r *root) onApplied(a applied) tea.Cmd {
+	// On IMAP a move mints a new uid, and the id this drop keyed by stops
+	// naming the message. The thread view hides by remote id, so its gone and
+	// removed entries have to move to the new id before commit or restore
+	// look for the old one; undo's key has to follow as well.
+	if tv, ok := a.drop.(*threadView); ok && len(a.renames) > 0 {
+		old := a.key
+		a.key = tv.rename(a.renames, a.key)
+		if a.undo != nil && a.undo.drop == a.drop && a.undo.key == old {
+			a.undo.key = a.key
+		}
+	}
 	if a.err != nil {
-		if t := r.triageScreen(); t != nil {
-			t.restore()
+		if a.drop != nil && triaged(a.action) {
+			a.drop.restore(a.key)
 		}
 		r.note(a.action + " failed: " + a.err.Error())
 		r.undo = nil
 		return nil
 	}
-	if t := r.triageScreen(); t != nil {
-		t.commit()
+	if a.drop != nil && triaged(a.action) {
+		a.drop.commit(a.key)
+	}
+	// A landed undo is what lets the message its drop hid show again. Doing
+	// it here, on the result, is what keeps a failed undo from uncovering a
+	// message that is still in the trash.
+	if a.drop != nil && strings.HasPrefix(a.action, "undo ") {
+		a.drop.unhide(a.key)
 	}
 	var reload tea.Cmd
 	if rereads(a.action) {
@@ -1084,13 +1149,29 @@ func (r *root) onApplied(a applied) tea.Cmd {
 // to confirm: only a write that did not go through is worth interrupting for.
 //
 // A rejection has already been rolled back inside the engine, so the row is
-// back in the index and a reload is what puts it back on screen. A queued one
-// stands as it is — the outbox will push it — and only needs saying.
+// back in the index and a reload is what puts it back on screen. The reload
+// belongs to the screen that dropped the row: if the person has moved on, the
+// screen underneath still has to stop hiding what the rollback brought back.
+// A queued one stands as it is — the outbox will push it — and only needs
+// saying.
 func (r *root) onSettled(a applied) tea.Cmd {
 	switch {
 	case a.err != nil:
 		r.note(a.action + " did not go through: " + a.err.Error())
 		r.undo = nil
+		if a.drop != nil {
+			// A rejected action was rolled back into the mailbox it came
+			// from, so the thread view has to lift its message out of gone.
+			// A rejected undo was rolled back too, which means the message
+			// is still in the trash: hide it again. Either way act on the
+			// message this write dropped, not whichever landed last.
+			if triaged(a.action) {
+				a.drop.unhide(a.key)
+			} else if strings.HasPrefix(a.action, "undo ") {
+				a.drop.hide(a.key)
+			}
+			return a.drop.reload()
+		}
 		return r.top().reload()
 	case a.queued:
 		r.note(a.action + " queued — offline, it will go out on the next sync")

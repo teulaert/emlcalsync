@@ -1139,6 +1139,14 @@ type MessageFilter struct {
 	NewestFirst bool
 	// Limit <= 0 means unlimited. Offset is applied after ordering.
 	Limit, Offset int
+	// AfterLast, AfterThread and AfterAccount pin a page to the rows after
+	// one thread, by the sort key ListThreads orders by. Paging by offset
+	// walks the page past rows that leave the query and starts short of rows
+	// that stay in it; the key does not care about either. AfterThread is
+	// empty when there is nothing to start after.
+	AfterLast    time.Time
+	AfterThread  string
+	AfterAccount string
 }
 
 // where builds the SQL predicate for the filter over the alias `m`.

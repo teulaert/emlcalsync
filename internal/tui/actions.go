@@ -43,6 +43,11 @@ type undoRecord struct {
 	label string
 	when  time.Time
 	ops   []accountOp
+	// drop and key name the row the action took off a screen. Undo of a
+	// triaged write lifts that exact row out of gone; a flag or a mark-read
+	// leaves both empty, because it dropped nothing.
+	drop triageable
+	key  string
 }
 
 type accountOp struct {
@@ -266,12 +271,21 @@ const settledBuffer = 64
 // undo record, an open reader — has to be rewritten through it. IMAP is also
 // why such a write is never deferred: the renames have to be in hand.
 func (d Deps) apply(label string, ops []accountOp, undo *undoRecord) tea.Cmd {
+	return d.applyDropping(label, ops, undo, nil, "")
+}
+
+// applyDropping is apply for a write that took a row off a screen. The
+// screen and the row's key travel with the result, so commit, restore and
+// unhide land on the exact row that went, even after the person has pushed
+// another view or switched to the calendar: neither the top screen nor a FIFO
+// queue can say which drop this result belongs to.
+func (d Deps) applyDropping(label string, ops []accountOp, undo *undoRecord, drop triageable, key string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		res := applied{action: label, renames: map[string]string{}, undo: undo}
+		res := applied{action: label, renames: map[string]string{}, undo: undo, drop: drop, key: key}
 		for _, ao := range ops {
-			r, err := d.applyOne(ctx, label, ao)
+			r, err := d.applyOne(ctx, label, ao, drop, key)
 			if err != nil {
 				d.log().Warn("write failed: "+label, "account", ao.account, "err", err)
 				res.err = fmt.Errorf("%s: %w", ao.account, err)
@@ -297,7 +311,7 @@ func (d Deps) apply(label string, ops []accountOp, undo *undoRecord) tea.Cmd {
 
 // applyOne runs a single account's op, deferring the provider round trip when
 // there is somewhere to report it back to.
-func (d Deps) applyOne(ctx context.Context, label string, ao accountOp) (*sync.ApplyResult, error) {
+func (d Deps) applyOne(ctx context.Context, label string, ao accountOp, drop triageable, key string) (*sync.ApplyResult, error) {
 	if d.settled == nil {
 		return d.Engine.Apply(ctx, ao.account, ao.op)
 	}
@@ -305,7 +319,7 @@ func (d Deps) applyOne(ctx context.Context, label string, ao accountOp) (*sync.A
 		if err == nil && (res == nil || !res.Queued) {
 			return // It went through; the screen has said so for a while now.
 		}
-		msg := applied{action: label, account: ao.account, settled: true}
+		msg := applied{action: label, account: ao.account, settled: true, drop: drop, key: key}
 		if err != nil {
 			d.log().Warn("deferred write failed: "+label, "account", ao.account, "err", err)
 			msg.err = fmt.Errorf("%s: %w", ao.account, err)

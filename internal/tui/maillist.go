@@ -65,6 +65,32 @@ type mailList struct {
 	// removed holds rows taken out optimistically, so a failed action can put
 	// them back where they were.
 	removed []removedRow
+
+	// gone are the threads triaged away from this screen. The drop hides the
+	// row at once, but the write lands behind it, and every load that started
+	// before it -- the daemon commits every couple of seconds, so there is
+	// usually one in flight -- still has the row in its result. Without this
+	// the reload puts the message straight back, and the next reload a moment
+	// later takes it away again: the action looks like it flickered.
+	//
+	// Gone stops mattering when a load started after the write landed comes
+	// back, which is what landed records. That load was queried against the
+	// patched index, so its result is the truth: a thread trashed in the all
+	// view is still there and has to show again, while a reply to an archived
+	// one has to be able to bring it back. filter and restore take keys out.
+	gone map[string]bool
+
+	// landed maps a triaged-away thread to the load sequence it was landed at.
+	// commit records it with the seq of the newest load so far; the next load
+	// to come back with a greater seq started after the index patch and can
+	// stop hiding the thread. See the threadsLoaded case in Update.
+	landed map[string]int
+
+	// tail is the last row the store returned for the page in use, hidden or
+	// not. The next page starts after it, by sort key: rows that leave the
+	// query shift an offset by one, and rows that stay in it make one too
+	// short. The key does not care about either.
+	tail model.Thread
 }
 
 type removedRow struct {
@@ -90,9 +116,10 @@ func (m *mailList) Title() string {
 	return fmt.Sprintf("%s · %s", what, who)
 }
 
-// filter builds the store query for the current view.
-func (m *mailList) filter(offset int) store.MessageFilter {
-	f := store.MessageFilter{Limit: pageSize, Offset: offset, NewestFirst: true}
+// filter builds the store query for the current view. It starts at the top;
+// loadMore pins the next page behind tail instead of offsetting.
+func (m *mailList) filter() store.MessageFilter {
+	f := store.MessageFilter{Limit: pageSize, NewestFirst: true}
 	if m.account > 0 && m.account <= len(m.accounts) {
 		f.Accounts = []string{m.accounts[m.account-1]}
 	} else {
@@ -116,24 +143,38 @@ func (m *mailList) Init() tea.Cmd { return m.reload() }
 func (m *mailList) reload() tea.Cmd { return m.load(false) }
 
 // reloadFresh is reload for a view that has just changed -- another mailbox,
-// account or query -- where the old cursor means nothing.
-func (m *mailList) reloadFresh() tea.Cmd { return m.load(true) }
+// account or query -- where the old cursor means nothing. The triaged-away
+// rows are forgotten too: a thread trashed out of the inbox is exactly what
+// the all-mail view has to show, so the new view must not inherit the old
+// view's gone set.
+func (m *mailList) reloadFresh() tea.Cmd {
+	m.gone, m.landed = nil, nil
+	m.tail = model.Thread{}
+	return m.load(true)
+}
 
 func (m *mailList) load(reset bool) tea.Cmd {
 	m.seq++
 	m.loading = true
 	m.atEnd = false
 	m.resetCursor = reset
-	return m.d.loadThreads(m.seq, m.filter(0), m.query, false)
+	return m.d.loadThreads(m.seq, m.filter(), m.query, false)
 }
 
+// loadMore asks for the page after tail, by sort key. A row that left the
+// query (a trash in the inbox) shifts an offset by one, and a row that stays
+// in it (a trash in the all view) makes it one short; the key avoids both,
+// and a message that arrived since the page loaded lands before it.
 func (m *mailList) loadMore() tea.Cmd {
 	if m.loading || m.atEnd || m.query != "" {
 		return nil
 	}
+	f := m.filter()
+	f.AfterLast, f.AfterThread, f.AfterAccount =
+		m.tail.Last, m.tail.ThreadID, m.tail.AccountID
 	m.seq++
 	m.loading = true
-	return m.d.loadThreads(m.seq, m.filter(len(m.threads)), "", true)
+	return m.d.loadThreads(m.seq, f, "", true)
 }
 
 func (m *mailList) targets() []target {
@@ -172,11 +213,24 @@ func (m *mailList) selected() *model.Thread {
 	return &m.threads[m.cursor]
 }
 
-// dropSelected removes the row under the cursor, remembering it for restore.
-func (m *mailList) dropSelected() {
+// threadKey is how a row is named within the list, the same string anchor
+// and reanchor use.
+func threadKey(t model.Thread) string {
+	return t.AccountID + "\x00" + t.ThreadID
+}
+
+// dropSelected removes the row under the cursor, remembering it for restore,
+// and returns its key: the key names this drop in the write's result, which
+// arrives later and possibly after another drop of its own.
+func (m *mailList) dropSelected() string {
 	if m.cursor < 0 || m.cursor >= len(m.threads) {
-		return
+		return ""
 	}
+	key := threadKey(m.threads[m.cursor])
+	if m.gone == nil {
+		m.gone = map[string]bool{}
+	}
+	m.gone[key] = true
 	m.removed = append(m.removed, removedRow{at: m.cursor, t: m.threads[m.cursor]})
 	m.threads = append(m.threads[:m.cursor], m.threads[m.cursor+1:]...)
 	if m.cursor >= len(m.threads) {
@@ -185,15 +239,21 @@ func (m *mailList) dropSelected() {
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
+	return key
 }
 
-// restore puts the last optimistically removed row back.
-func (m *mailList) restore() {
-	if len(m.removed) == 0 {
+// restore puts the optimistically removed row named by key back. A result
+// only restores its own drop, so two writes in flight cannot put back each
+// other's row.
+func (m *mailList) restore(key string) {
+	i := m.indexOfRemoved(key)
+	if i < 0 {
 		return
 	}
-	r := m.removed[len(m.removed)-1]
-	m.removed = m.removed[:len(m.removed)-1]
+	r := m.removed[i]
+	m.removed = append(m.removed[:i], m.removed[i+1:]...)
+	delete(m.gone, key)
+	delete(m.landed, key)
 	if r.at > len(m.threads) {
 		r.at = len(m.threads)
 	}
@@ -201,7 +261,72 @@ func (m *mailList) restore() {
 	m.cursor = r.at
 }
 
-func (m *mailList) commit() { m.removed = nil }
+func (m *mailList) indexOfRemoved(key string) int {
+	for i := range m.removed {
+		if threadKey(m.removed[i].t) == key {
+			return i
+		}
+	}
+	return -1
+}
+
+// keep drops the threads this screen has triaged away from a load result.
+func (m *mailList) keep(threads []model.Thread) []model.Thread {
+	if len(m.gone) == 0 {
+		return threads
+	}
+	out := threads[:0]
+	for i := range threads {
+		if !m.gone[threadKey(threads[i])] {
+			out = append(out, threads[i])
+		}
+	}
+	return out
+}
+
+// commit says the write landed: from here on a failure cannot put the row
+// back, because the engine rolled nothing back. key names the row its own
+// write dropped, so results delivered out of order still commit the right
+// one. The thread stays in gone until a load started after this point comes
+// back: results already on their way were queried against the index before
+// the patch and still have it.
+func (m *mailList) commit(key string) {
+	i := m.indexOfRemoved(key)
+	if i < 0 {
+		return
+	}
+	m.removed = append(m.removed[:i], m.removed[i+1:]...)
+	if m.landed == nil {
+		m.landed = map[string]int{}
+	}
+	m.landed[key] = m.seq
+}
+
+// forgetLanded stops hiding the threads whose write landed before this load
+// was started. commit recorded the seq of the newest load in flight when the
+// index patch landed, so a result with a greater seq was queried after it:
+// whatever it says about the thread now is what the index holds, and gone has
+// nothing left to protect against.
+func (m *mailList) forgetLanded(seq int) {
+	for key, at := range m.landed {
+		if seq > at {
+			delete(m.gone, key)
+			delete(m.landed, key)
+		}
+	}
+}
+
+// unhide is a no-op here. The mail list hides a landed thread only from loads
+// that started before its write patched the index; undo's own reload starts
+// after that, so forgetLanded lifts the thread out before the result is
+// filtered. The thread view has no such load to lean on -- its reload shows a
+// message whatever mailbox it sits in -- so it lifts the message out itself.
+func (m *mailList) unhide(string) {}
+
+// hide is a no-op here too: the list's reload after a triaged drop is what
+// forgetLanded clears, and a rejected undo leaves the row in the mailbox it
+// was already in, which the list query already leaves out.
+func (m *mailList) hide(string) {}
 
 // anchor names the row the cursor is on, so it can be found again in the
 // result of a reload.
@@ -245,21 +370,34 @@ func (m *mailList) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 		if msg.err != nil {
 			return m, nil
 		}
+		m.forgetLanded(msg.seq)
 		if msg.append {
-			if len(msg.threads) == 0 {
+			// The page was full before anything was filtered out; atEnd is
+			// about what the store returned, not about what stayed.
+			n := len(msg.threads)
+			if n > 0 {
+				m.tail = msg.threads[n-1]
+			}
+			if n < pageSize {
 				m.atEnd = true
 			}
-			m.threads = append(m.threads, msg.threads...)
+			m.threads = append(m.threads, m.keep(msg.threads)...)
 		} else {
 			anchor, at := m.anchor()
-			m.threads = msg.threads
+			// The page was full before anything was filtered out; atEnd is
+			// about what the store returned, not about what stayed.
+			n := len(msg.threads)
+			if n > 0 {
+				m.tail = msg.threads[n-1]
+			}
+			m.threads = m.keep(msg.threads)
 			if m.resetCursor {
 				m.cursor, m.top = 0, 0
 			} else {
 				m.reanchor(anchor, at)
 				m.scroll(listRows(h))
 			}
-			if len(msg.threads) < pageSize {
+			if n < pageSize {
 				m.atEnd = true
 			}
 		}

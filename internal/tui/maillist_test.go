@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/teulaert/emlcalsync/internal/model"
 )
 
 // The unified list is the whole point of the application: one screen holding
@@ -239,11 +242,11 @@ func TestMailListDropAndRestore(t *testing.T) {
 	m := newMailList(d, d.Accounts)
 	ml := pump(t, m, m.Init(), defaultKeys(), 100, 24).(*mailList)
 
-	ml.dropSelected()
+	key := ml.dropSelected()
 	if len(ml.threads) != 1 || ml.threads[0].Subject != "Second" {
 		t.Fatalf("after drop: %+v", ml.threads)
 	}
-	ml.restore()
+	ml.restore(key)
 	if len(ml.threads) != 2 || ml.threads[0].Subject != "First" {
 		t.Fatalf("after restore: %+v", ml.threads)
 	}
@@ -339,6 +342,214 @@ func TestMailListCursorHoldsItsPlaceWhenTheThreadIsGone(t *testing.T) {
 	}
 	if got := ml.selected(); got == nil || got.ThreadID != next {
 		t.Fatalf("cursor is on %v at row %d, want thread %s at row 2", got, ml.cursor, next)
+	}
+}
+
+// A load that started before the drop lands after it, and the seq it carries
+// is still current -- dropping a row starts no query. Its result was computed
+// against the index before the write patched it, so it has the trashed thread
+// in it, and without filtering it the row comes straight back: the person
+// sees it go away, reappear a moment later, and vanish again on the next
+// commit. The threads this screen dropped stay out of every reload until a
+// failed write puts one back.
+func TestMailListStaleReloadDoesNotBringTheDroppedRowBack(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "First", "anna", 2*time.Hour, false)
+	addMessage(t, d, "work", "w2", "t2", "Second", "bram", time.Hour, false)
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	ml := pump(t, m, m.Init(), k, 100, 24).(*mailList)
+
+	dropped := ml.threads[0] // the newest, "Second"
+	stale := threadsLoaded{seq: ml.seq, threads: append([]model.Thread(nil), ml.threads...)}
+	key := ml.dropSelected()
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "First" {
+		t.Fatalf("after drop: %+v", ml.threads)
+	}
+
+	s, _ := ml.Update(stale, k, 100, 24)
+	ml = s.(*mailList)
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "First" {
+		t.Fatalf("a stale reload brought the dropped row back: %+v", ml.threads)
+	}
+
+	// A later reload that returns only the dropped row filters it out too.
+	s, _ = ml.Update(threadsLoaded{seq: ml.seq, threads: []model.Thread{dropped}}, k, 100, 24)
+	ml = s.(*mailList)
+	if len(ml.threads) != 0 {
+		t.Fatalf("a reload with only the trashed row kept it: %+v", ml.threads)
+	}
+
+	// A failed write puts the row back, and the reload after that keeps it.
+	ml.restore(key)
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "Second" {
+		t.Fatalf("after restore: %+v", ml.threads)
+	}
+	s, _ = ml.Update(threadsLoaded{seq: ml.seq, threads: []model.Thread{
+		{AccountID: "work", ThreadID: "t2", Subject: "Second"},
+		{AccountID: "work", ThreadID: "t1", Subject: "First"},
+	}}, k, 100, 24)
+	ml = s.(*mailList)
+	if len(ml.threads) != 2 || ml.threads[0].Subject != "Second" {
+		t.Fatalf("a reload after the restore lost the row: %+v", ml.threads)
+	}
+}
+
+// Two drops can be in flight at once, and each apply runs in its own
+// goroutine, so their results arrive in whatever order the provider finishes.
+// The result has to commit or restore the row its own write dropped: the
+// oldest pending row is not necessarily the one that landed, and the newest
+// is not necessarily the one that failed.
+func TestMailListOutOfOrderResultsCommitAndRestoreTheirOwnRows(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "First", "anna", 3*time.Hour, false)
+	addMessage(t, d, "work", "w2", "t2", "Second", "bram", 2*time.Hour, false)
+	addMessage(t, d, "work", "w3", "t3", "Third", "caio", time.Hour, false)
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	ml := pump(t, m, m.Init(), k, 100, 24).(*mailList)
+	if got := len(ml.threads); got != 3 {
+		t.Fatalf("list has %d threads, want 3", got)
+	}
+
+	first := ml.dropSelected()  // the newest, "Third"
+	second := ml.dropSelected() // the next, "Second"
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "First" {
+		t.Fatalf("after the drops: %+v", ml.threads)
+	}
+
+	// The second write lands first; the first one is then rejected.
+	ml.commit(second)
+	ml.restore(first)
+
+	if got := len(ml.removed); got != 0 {
+		t.Errorf("out-of-order results left %d drops pending", got)
+	}
+	if ml.gone[first] {
+		t.Error("the rejected row is still hidden")
+	}
+	if !ml.gone[second] {
+		t.Error("the row whose write landed was lifted out of gone")
+	}
+	if got := len(ml.threads); got != 2 ||
+		ml.threads[0].Subject != "Third" || ml.threads[1].Subject != "First" {
+		t.Fatalf("the wrong row was restored: %+v", ml.threads)
+	}
+}
+
+// A row that leaves the query shifts the rows behind it up by one, so an
+// offset starts the next page a row late and skips a thread. Paging after the
+// last row the store returned does not: the key is where that row sits, not
+// how many rows came before it.
+func TestMailListPagingAfterADropThatLeftsTheQueryDoesNotSkip(t *testing.T) {
+	d := newTestDeps(t, "work")
+	for i := 0; i < 101; i++ {
+		addMessage(t, d, "work", fmt.Sprintf("w%03d", i), fmt.Sprintf("t%03d", i),
+			fmt.Sprintf("Subject %03d", i), "anna", time.Duration(i)*time.Minute, false)
+	}
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	ml := pump(t, m, m.Init(), k, 100, 24).(*mailList)
+	if len(ml.threads) != pageSize {
+		t.Fatalf("first page has %d threads, want %d", len(ml.threads), pageSize)
+	}
+
+	key := ml.dropSelected() // a trash in the inbox leaves the query
+	ml.commit(key)
+
+	ml = pump(t, ml, ml.loadMore(), k, 100, 24).(*mailList)
+	if got, want := len(ml.threads), 100; got != want {
+		t.Fatalf("got %d threads after the second page, want %d", got, want)
+	}
+	seen := map[string]bool{}
+	for _, th := range ml.threads {
+		if seen[th.Subject] {
+			t.Errorf("%q is on the list twice", th.Subject)
+		}
+		seen[th.Subject] = true
+	}
+	if last := ml.threads[len(ml.threads)-1]; last.Subject != "Subject 100" {
+		t.Errorf("last thread = %q, want the row after the page boundary", last.Subject)
+	}
+}
+
+// A hidden row is still a row the store returned, and the next page has to
+// start after it. The all view is where a dropped row keeps matching the
+// query, so the store counts it even while gone hides it; the page after the
+// store's last row starts where that row sat, hidden or not.
+func TestMailListPagingAfterAHiddenRowDoesNotRepeat(t *testing.T) {
+	d := newTestDeps(t, "work")
+	for i := 0; i < 101; i++ {
+		addMessage(t, d, "work", fmt.Sprintf("w%03d", i), fmt.Sprintf("t%03d", i),
+			fmt.Sprintf("Subject %03d", i), "anna", time.Duration(i)*time.Minute, false)
+	}
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	ml := pump(t, m, m.Init(), k, 100, 24).(*mailList)
+	s, cmd := ml.Update(keyPress("M"), k, 100, 24) // inbox -> all
+	ml = pump(t, s, cmd, k, 100, 24).(*mailList)
+
+	firstPage := append([]model.Thread(nil), ml.threads...)
+	if len(firstPage) != pageSize {
+		t.Fatalf("first page has %d threads, want %d", len(firstPage), pageSize)
+	}
+	dropped := ml.threads[0]
+	key := ml.dropSelected()
+	ml.commit(key) // the write landed; only the loads already in flight are stale
+
+	// A load that started before the write landed comes back with all of the
+	// page the store returned, dropped row included; keep hides it.
+	s, _ = ml.Update(threadsLoaded{seq: ml.seq, threads: firstPage}, k, 100, 24)
+	ml = s.(*mailList)
+	if got := len(ml.threads); got != pageSize-1 {
+		t.Fatalf("a stale page left %d threads, want %d", got, pageSize-1)
+	}
+
+	ml = pump(t, ml, ml.loadMore(), k, 100, 24).(*mailList)
+	if got, want := len(ml.threads), 100; got != want {
+		t.Fatalf("got %d threads after the second page, want %d", got, want)
+	}
+	seen := map[string]bool{}
+	for _, th := range ml.threads {
+		if seen[th.Subject] {
+			t.Errorf("%q is on the list twice: the next page started a row early", th.Subject)
+		}
+		seen[th.Subject] = true
+	}
+	last := ml.threads[len(ml.threads)-1]
+	if last.Subject != "Subject 100" {
+		t.Errorf("last thread = %q, want the row after the page boundary", last.Subject)
+	}
+	if dropped.Subject == last.Subject {
+		t.Fatalf("the dropped row came back in the appended page: %q", dropped.Subject)
+	}
+}
+
+// Changing the view forgets what the old view triaged away. The all-mail view
+// is where a trashed thread is looked at again -- it is the only place
+// restore can start from -- so the gone set of the inbox must not filter it
+// out of the reload the switch starts.
+func TestMailListViewChangeShowsWhatWasTrashedAway(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Trash me", time.Hour)
+
+	r := newTestRoot(t, d)
+	send(t, r, "d")
+	ml := r.top().(*mailList)
+	if got := len(ml.threads); got != 0 {
+		t.Fatalf("after trash the list holds %d rows, want none", got)
+	}
+
+	send(t, r, "M") // inbox -> all, which shows trashed mail too
+	ml = r.top().(*mailList)
+	if got := len(ml.threads); got != 1 {
+		t.Fatalf("the all view holds %d rows, want the trashed thread back", got)
+	}
+	if _, boxes, _ := mail.Lookup("m1"); !contains(boxes, "TRASH") {
+		t.Errorf("the message is not in TRASH: %v", boxes)
 	}
 }
 

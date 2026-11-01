@@ -2,11 +2,14 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/teulaert/emlcalsync/internal/blob"
 	"github.com/teulaert/emlcalsync/internal/config"
@@ -17,9 +20,54 @@ import (
 	"github.com/teulaert/emlcalsync/internal/sync"
 )
 
+// renamingMail reports the new ids an IMAP move mints, the way the real
+// backend does: the provider moves the message, then says what the old id
+// became.
+type renamingMail struct {
+	provider.MailProvider
+	writeRenames []provider.Rename
+}
+
+func (r *renamingMail) SetMailboxesRemap(ctx context.Context, ids, add, remove []string) ([]provider.Rename, error) {
+	err := r.MailProvider.SetMailboxes(ctx, ids, add, remove)
+	return r.takeRenames(), err
+}
+
+func (r *renamingMail) TrashRemap(ctx context.Context, ids []string) ([]provider.Rename, error) {
+	err := r.MailProvider.Trash(ctx, ids)
+	return r.takeRenames(), err
+}
+
+func (r *renamingMail) RestoreRemap(ctx context.Context, ids []string) ([]provider.Rename, error) {
+	err := r.MailProvider.Restore(ctx, ids)
+	return r.takeRenames(), err
+}
+
+func (r *renamingMail) takeRenames() []provider.Rename {
+	out := r.writeRenames
+	r.writeRenames = nil
+	return out
+}
+
+// refusingMail fails the next mailbox write with a permanent rejection, the
+// way a provider answers an undo it will not accept.
+type refusingMail struct {
+	provider.MailProvider
+	failNext error
+}
+
+func (r *refusingMail) SetMailboxes(ctx context.Context, ids []string, add, remove []string) error {
+	if r.failNext != nil {
+		err := r.failNext
+		r.failNext = nil
+		return err
+	}
+	return r.MailProvider.SetMailboxes(ctx, ids, add, remove)
+}
+
 // fakeFactory hands the engine one in-memory mail provider and one calendar.
 type fakeFactory struct {
-	mail *fake.Mail
+	mail provider.MailProvider
 	cal  *fake.Calendar
 }
 
@@ -48,6 +96,15 @@ func newTriageDeps(t *testing.T) (Deps, *fake.Mail) {
 // engine writes to as well, for the actions that land there.
 func newTriageDepsWithCalendar(t *testing.T) (Deps, *fake.Mail, *fake.Calendar) {
 	t.Helper()
+	return newTriageDepsWithMail(t, model.BackendJMAP,
+		func(m *fake.Mail) provider.MailProvider { return m })
+}
+
+// newTriageDepsWithMail is newTriageDepsWithCalendar with a provider wrapper
+// and a backend, for the backends whose writes change the ids the engine hands
+// back and whose writes wait for the round trip rather than being deferred.
+func newTriageDepsWithMail(t *testing.T, backend model.Backend, providerFor func(*fake.Mail) provider.MailProvider) (Deps, *fake.Mail, *fake.Calendar) {
+	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "index.db"))
 	if err != nil {
@@ -62,6 +119,7 @@ func newTriageDepsWithCalendar(t *testing.T) (Deps, *fake.Mail, *fake.Calendar) 
 	}
 
 	acct := config.NewAccount("work", "work@example.com", model.VendorFastmail)
+	acct.Mail.Backend = backend
 	cfg := &config.Config{Accounts: []config.Account{acct}}
 
 	ctx := context.Background()
@@ -87,7 +145,7 @@ func newTriageDepsWithCalendar(t *testing.T) (Deps, *fake.Mail, *fake.Calendar) 
 		Store:     st,
 		Blobs:     blobs,
 		Config:    cfg,
-		Providers: &fakeFactory{mail: mail, cal: cal},
+		Providers: &fakeFactory{mail: providerFor(mail), cal: cal},
 		Logger:    slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
@@ -103,6 +161,30 @@ func newTriageDepsWithCalendar(t *testing.T) (Deps, *fake.Mail, *fake.Calendar) 
 		Now:      func() time.Time { return testNow },
 		Logger:   slog.New(slog.DiscardHandler),
 	}, mail, cal
+}
+
+// newTriageDepsRemapping is newTriageDeps with a provider that hands back the
+// new ids a move mints, the way IMAP does.
+func newTriageDepsRemapping(t *testing.T) (Deps, *fake.Mail, *renamingMail) {
+	t.Helper()
+	rm := &renamingMail{}
+	d, mail, _ := newTriageDepsWithMail(t, model.BackendIMAP, func(m *fake.Mail) provider.MailProvider {
+		rm.MailProvider = m
+		return rm
+	})
+	return d, mail, rm
+}
+
+// newTriageDepsRefusingUndo is newTriageDeps with a provider whose next
+// mailbox write can be rejected outright.
+func newTriageDepsRefusingUndo(t *testing.T) (Deps, *fake.Mail, *refusingMail) {
+	t.Helper()
+	rm := &refusingMail{}
+	d, mail, _ := newTriageDepsWithMail(t, model.BackendIMAP, func(m *fake.Mail) provider.MailProvider {
+		rm.MailProvider = m
+		return rm
+	})
+	return d, mail, rm
 }
 
 // addTriageMessage indexes one message and gives the fake provider the same
@@ -191,6 +273,12 @@ func TestArchiveFromTheListReachesTheProviderAndUndoRestoresIt(t *testing.T) {
 	if contains(boxes, "ARCHIVE") {
 		t.Errorf("after undo the provider still has ARCHIVE: %v", boxes)
 	}
+	// Undo is offered only after the archive landed, so the row had already
+	// been committed; the reload undo starts is the load that lifts it out
+	// of gone and puts it back on screen.
+	if got := len(r.top().(*mailList).threads); got != 1 {
+		t.Errorf("undo did not put the archived row back (%d rows)", got)
+	}
 }
 
 func TestTrashFromTheListReachesTheProvider(t *testing.T) {
@@ -236,6 +324,111 @@ func TestRestoreFromTheListReachesTheProvider(t *testing.T) {
 	}
 	if r.undo == nil {
 		t.Error("restore offered no undo")
+	}
+}
+
+// A message trashed in the inbox is gone, but the all view shows the trash
+// too: the row the screen dropped optimistically is still what the store has,
+// and once the write lands the next load has to stop hiding it. Without that,
+// the row is gone until the view changes -- and restoring, archiving and
+// trashing from a view that still holds the message all end the same way.
+func TestMailListAllViewKeepsItsRowAfterTheActionLands(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mailbox string
+		key     string
+	}{
+		{"trash", "INBOX", "d"},
+		{"archive", "INBOX", "e"},
+		{"restore", "TRASH", "i"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, mail := newTriageDeps(t)
+			addTriageMessageIn(t, d, mail, tc.mailbox, "m1", tc.name, time.Hour)
+
+			r := newTestRoot(t, d)
+			send(t, r, "M") // inbox -> all, which shows trash and archive too
+			send(t, r, tc.key)
+			ml := r.top().(*mailList)
+			if got := len(ml.threads); got != 0 {
+				t.Fatalf("after %s the list holds %d rows, want the dropped row gone", tc.name, got)
+			}
+
+			drain(t, r, ml.reload())
+			if got := len(ml.threads); got != 1 {
+				t.Fatalf("%s left the all view with %d rows, want the thread still on screen", tc.name, got)
+			}
+		})
+	}
+}
+
+// Archiving a thread out of the inbox does not make a reply that lands later
+// invisible. The landed row is only hidden from loads that were already in
+// flight against the unpatched index; a reply that makes the thread match the
+// query again has to show up on the next load.
+func TestMailListAReplyToAnArchivedThreadShowsUp(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Old question", 2*time.Hour)
+
+	r := newTestRoot(t, d)
+	send(t, r, "e")
+	ml := r.top().(*mailList)
+	if got := len(ml.threads); got != 0 {
+		t.Fatalf("after archive the list holds %d rows, want none", got)
+	}
+
+	addTriageMessage(t, d, mail, "m2", "Re: Old question", time.Minute)
+	inThread(t, d, "t-m1", "m2") // the reply lands in the thread that was archived
+
+	drain(t, r, ml.reload())
+	if got := len(ml.threads); got != 1 {
+		t.Fatalf("the reply left the inbox with %d rows, want the thread back", got)
+	}
+}
+
+// The result belongs to the screen that dropped the row, not to whatever is
+// on top when it arrives. In the gap before a write answers the person can
+// open a thread or switch to the calendar; the list still has a pending drop
+// of its own to commit, and leaving it uncommitted keeps the row hidden until
+// the view changes.
+func TestMailListOrphanedDropLandsOnTheListThatDroppedIt(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Trash me", time.Hour)
+
+	r := newTestRoot(t, d)
+	send(t, r, "M") // all view: a trashed thread still belongs to it
+	ml := r.top().(*mailList)
+
+	cmd := r.triage("trash")
+	r.push(newThreadView(d, "work", "t-m1", "Trash me", false))
+	r.Update(cmd()) // the answer comes while the thread is on top
+	settle(t, r)
+	r.pop()
+
+	drain(t, r, ml.reload())
+	if got := len(ml.threads); got != 1 {
+		t.Fatalf("the trashed row is still hidden after moving on and back (%d rows)", got)
+	}
+}
+
+// A failed write puts the row back even when the screen that dropped it is no
+// longer the top one. Otherwise the rollback leaves the message hidden until a
+// view change, which is the state the person came back to.
+func TestMailListOrphanedDropRestoresOnTheListWhenTheWriteFails(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "Trash me", "anna", time.Hour, false)
+
+	r := newTestRoot(t, d)
+	ml := r.top().(*mailList)
+	key := ml.dropSelected()
+	r.push(newThreadView(d, "work", "t1", "Trash me", false))
+
+	r.Update(applied{action: "trash", drop: ml, key: key, err: errors.New("rejected")})
+	r.pop()
+
+	drain(t, r, ml.reload())
+	if got := len(ml.threads); got != 1 {
+		t.Fatalf("the failed trash left the row hidden (%d rows)", got)
 	}
 }
 
@@ -359,6 +552,282 @@ func TestTrashFromTheThreadDropsTheMessageForGood(t *testing.T) {
 	drain(t, r, tv.reload())
 	if len(tv.messages) != 1 || tv.messages[0].RemoteID != "m1" {
 		t.Errorf("after the reload the thread holds %d messages, want only m1", len(tv.messages))
+	}
+}
+
+// Undoing a trash taken in the thread puts the message back where it was on
+// screen. The commit that landed took it off removed; gone is what still hides
+// it, and undo is what lifts it until the reload brings it back.
+func TestTrashFromTheThreadUndoShowsTheMessageAgain(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	send(t, r, "d")
+	if len(tv.messages) != 1 {
+		t.Fatalf("after trash the thread holds %d messages, want 1", len(tv.messages))
+	}
+
+	send(t, r, "z")
+	if _, boxes, _ := mail.Lookup("m2"); !contains(boxes, "INBOX") {
+		t.Errorf("after undo the message is not back in INBOX: %v", boxes)
+	}
+	if len(tv.messages) != 2 {
+		t.Fatalf("after undo the thread holds %d messages, want both", len(tv.messages))
+	}
+}
+
+// A deferred write the provider later rejects has already committed its drop.
+// The engine rolled the index back, but the thread view still hides the
+// message in gone: the settled error has to lift it before reloading, or the
+// conversation stays one message short.
+func TestThreadViewSettledFailureShowsTheMessageAgain(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	cmd := r.triage("trash")
+	res := cmd().(applied)
+	r.Update(res) // the drop lands, so commit takes it off removed
+	settle(t, r)
+	if len(tv.messages) != 1 {
+		t.Fatalf("after the drop the thread holds %d messages, want 1", len(tv.messages))
+	}
+
+	drain(t, r, r.onSettled(applied{
+		action: "trash", drop: tv, key: res.key, settled: true, err: errors.New("rejected"),
+	}))
+	if len(tv.messages) != 2 {
+		t.Fatalf("the rejected write left the thread at %d messages, want both back", len(tv.messages))
+	}
+}
+
+// Two drops in one thread, results delivered out of order, and the first
+// write rejected: the settled error has to lift the message it dropped. The
+// last one that landed is not the one that failed, so unhide must go by the
+// key carried in the result, not by whatever commit saw last.
+func TestThreadViewSettledFailureUnhidesItsOwnMessage(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Oldest", 3*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Middle", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m3", "Newest", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2", "m3")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	if len(tv.messages) != 3 {
+		t.Fatalf("thread has %d messages, want 3", len(tv.messages))
+	}
+
+	first := r.triage("trash")  // drops m3
+	second := r.triage("trash") // drops m2, leaving m1
+	resFirst := first().(applied)
+	resSecond := second().(applied)
+	if resFirst.key == resSecond.key {
+		t.Fatalf("both drops use the key %q", resFirst.key)
+	}
+	// The second write answers first; the first answers after it.
+	r.Update(resSecond)
+	r.Update(resFirst)
+	settle(t, r)
+	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Fatalf("after the drops the thread holds %+v, want only m1", tv.messages)
+	}
+
+	drain(t, r, r.onSettled(applied{
+		action: "trash", drop: tv, key: resFirst.key, settled: true, err: errors.New("rejected"),
+	}))
+	if got := len(tv.messages); got != 2 ||
+		tv.messages[0].RemoteID != "m3" || tv.messages[1].RemoteID != "m1" {
+		t.Fatalf("the rejected write uncovered %+v, want m3 back and m2 still gone", tv.messages)
+	}
+}
+
+// The thread view has the same out-of-order problem as the list: a failed
+// result has to put back its own message, not whichever drop happened last.
+func TestThreadViewOutOfOrderResultsRestoreTheRightMessage(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Oldest", 3*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Middle", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m3", "Newest", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2", "m3")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+
+	first := tv.dropSelected()  // m3
+	second := tv.dropSelected() // m2
+	tv.commit(second)
+	tv.restore(first)
+
+	if got := len(tv.removed); got != 0 {
+		t.Errorf("out-of-order results left %d drops pending", got)
+	}
+	if tv.gone[first] {
+		t.Error("the rejected message is still hidden")
+	}
+	if !tv.gone[second] {
+		t.Error("the message whose write landed was lifted out of gone")
+	}
+	if got := len(tv.messages); got != 2 ||
+		tv.messages[0].RemoteID != "m3" || tv.messages[1].RemoteID != "m1" {
+		t.Fatalf("the wrong message was restored: %+v", tv.messages)
+	}
+}
+
+// On IMAP a move mints a new uid. The thread view hides a trashed message by
+// remote id, so gone and the drop key have to follow the rename; otherwise
+// the reload returns the message under its new id and gone does not hide it,
+// putting the trashed message back in the thread for good.
+func TestThreadTrashFollowsTheRenamedIDOnReload(t *testing.T) {
+	d, mail, rm := newTriageDepsRemapping(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	if len(tv.messages) != 2 {
+		t.Fatalf("thread has %d messages, want 2", len(tv.messages))
+	}
+
+	rm.writeRenames = []provider.Rename{{Old: "m2", New: "m2-new"}}
+	send(t, r, "d")
+
+	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Fatalf("after the trash the thread holds %+v, want only m1", tv.messages)
+	}
+	if r.undo == nil {
+		t.Fatal("the trash offered no undo")
+	}
+	if r.undo.key != "m2-new" {
+		t.Errorf("undo key = %q, want the renamed id", r.undo.key)
+	}
+	if tv.gone["m2"] {
+		t.Error("gone still hides the old id")
+	}
+	if !tv.gone["m2-new"] {
+		t.Error("gone does not hide the renamed id")
+	}
+
+	drain(t, r, tv.reload())
+	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Fatalf("the renamed trashed message came back: %+v", tv.messages)
+	}
+}
+
+// The reload undo starts has to run after the undo write has landed: the two
+// commands used to run side by side, and a query that beat the write to the
+// index only found the row again on the next background reload. The write is
+// a single command, and the reload is what its result hands back.
+func TestUndoReloadsOnceTheUndoHasLanded(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Archive me", time.Hour)
+
+	r := newTestRoot(t, d)
+	send(t, r, "e")
+	ml := r.top().(*mailList)
+	if got := len(ml.threads); got != 0 {
+		t.Fatalf("after archive the list holds %d rows", got)
+	}
+
+	_, cmd := r.Update(keyPress("z"))
+	if cmd == nil {
+		t.Fatal("z did nothing")
+	}
+	msg := cmd()
+	if _, batch := msg.(tea.BatchMsg); batch {
+		t.Fatal("undo still batches the reload with the write")
+	}
+	ap, ok := msg.(applied)
+	if !ok {
+		t.Fatalf("undo returned %T, want applied", msg)
+	}
+	drain(t, r, r.onApplied(ap))
+	if got := len(ml.threads); got != 1 || ml.threads[0].Subject != "Archive me" {
+		t.Fatalf("after undo the list holds %+v", ml.threads)
+	}
+}
+
+// A rejected undo leaves the message in the trash. The thread reload shows a
+// message whatever mailbox it sits in, so lifting the message out of gone
+// before the undo lands -- or without checking that it landed -- puts it back
+// on screen while it is still trashed.
+func TestFailedUndoLeavesTheTrashedMessageHidden(t *testing.T) {
+	d, mail, rm := newTriageDepsRefusingUndo(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	send(t, r, "d")
+	if !tv.gone["m2"] {
+		t.Fatal("the trashed message is not hidden")
+	}
+	if r.undo == nil {
+		t.Fatal("the trash offered no undo")
+	}
+
+	rm.failNext = errors.New("rejected")
+	send(t, r, "z")
+	if !tv.gone["m2"] {
+		t.Fatal("a failed undo lifted the message out of gone")
+	}
+	if r.undo != nil {
+		t.Error("a failed undo left its record offered")
+	}
+
+	drain(t, r, tv.reload())
+	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Fatalf("the failed undo put the trashed message back: %+v", tv.messages)
+	}
+}
+
+// An undo that lands and then fails at the provider is rolled back to the
+// trash. The unhide on the undo's applied has already shown the message, so
+// the settled rejection has to put it under gone again.
+func TestSettledUndoFailureKeepsTheMessageHidden(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	send(t, r, "d")
+	if !tv.gone["m2"] {
+		t.Fatal("the trashed message is not hidden")
+	}
+
+	// The undo result: applied, so the message is lifted out of gone.
+	drain(t, r, r.onApplied(applied{action: "undo trash", drop: tv, key: "m2"}))
+	if tv.gone["m2"] {
+		t.Fatal("a landed undo did not lift the message out of gone")
+	}
+
+	// Then the provider rejects it, and the engine rolls the patch back.
+	drain(t, r, r.onSettled(applied{
+		action: "undo trash", drop: tv, key: "m2", settled: true, err: errors.New("rejected"),
+	}))
+	if !tv.gone["m2"] {
+		t.Fatal("a rejected undo did not hide the still-trashed message")
+	}
+	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Fatalf("the rejected undo left %+v on screen", tv.messages)
 	}
 }
 

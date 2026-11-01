@@ -352,13 +352,22 @@ func (s *Store) ListThreads(ctx context.Context, f MessageFilter) ([]model.Threa
 
 func (tx *Tx) ListThreads(ctx context.Context, f MessageFilter) ([]model.Thread, error) {
 	where, args := f.where()
+	// Keyset pagination: rows that leave or join the query ahead of the page
+	// shift an offset, but not a key. It is on t, so it belongs in the outer
+	// WHERE, evaluated once per thread rather than once per message.
+	paged := ""
+	if f.AfterThread != "" {
+		paged = ` AND (t.last_utc < ? OR (t.last_utc = ? AND
+			(t.thread_id < ? OR (t.thread_id = ? AND t.account_id < ?))))`
+		args = append(args, f.AfterLast.Unix(), f.AfterLast.Unix(), f.AfterThread, f.AfterThread, f.AfterAccount)
+	}
 	limit, limitArgs := f.limitClause()
 	rows, err := tx.q.QueryContext(ctx,
 		`SELECT `+threadCols+` FROM threads t
 		  WHERE EXISTS (SELECT 1 FROM messages m
 		                 WHERE m.account_id = t.account_id AND m.thread_id = t.thread_id
-		                   AND `+where+`)
-		  ORDER BY t.last_utc DESC, t.thread_id DESC`+limit,
+		                   AND `+where+`)`+paged+`
+		  ORDER BY t.last_utc DESC, t.thread_id DESC, t.account_id DESC`+limit,
 		append(args, limitArgs...)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list threads: %w", err)

@@ -167,14 +167,15 @@ func (t *threadView) setExpanded(v bool) tea.Cmd {
 	return nil
 }
 
-func (t *threadView) dropSelected() {
+func (t *threadView) dropSelected() string {
 	if t.cursor < 0 || t.cursor >= len(t.messages) {
-		return
+		return ""
 	}
+	key := t.messages[t.cursor].RemoteID
 	if t.gone == nil {
 		t.gone = map[string]bool{}
 	}
-	t.gone[t.messages[t.cursor].RemoteID] = true
+	t.gone[key] = true
 	t.removed = append(t.removed, removedMsg{at: t.cursor, m: t.messages[t.cursor]})
 	t.messages = append(t.messages[:t.cursor], t.messages[t.cursor+1:]...)
 	if t.cursor >= len(t.messages) {
@@ -184,28 +185,33 @@ func (t *threadView) dropSelected() {
 		t.cursor = 0
 	}
 	t.dirty, t.off = true, -1
+	return key
 }
 
-// dropMessage removes one named message, wherever the cursor happens to sit.
-// It is the drop for an action taken a level deeper, in the reader: the
-// message being read is the one that goes, and the cursor lands on whatever
-// takes its place -- the next one down, the thread being newest first.
-func (t *threadView) dropMessage(remote string) {
+// dropMessage removes one named message, wherever the cursor happens to sit,
+// and returns its remote. It is the drop for an action taken a level deeper,
+// in the reader: the message being read is the one that goes, and the cursor
+// lands on whatever takes its place -- the next one down, the thread being
+// newest first.
+func (t *threadView) dropMessage(remote string) string {
 	i := t.indexOf(remote)
+	if i < 0 {
+		return ""
+	}
+	t.cursor = i
+	return t.dropSelected()
+}
+
+// restore puts the removed message named by key back. A result only restores
+// its own drop, so two writes in flight cannot put back each other's message.
+func (t *threadView) restore(key string) {
+	i := t.indexOfRemoved(key)
 	if i < 0 {
 		return
 	}
-	t.cursor = i
-	t.dropSelected()
-}
-
-func (t *threadView) restore() {
-	if len(t.removed) == 0 {
-		return
-	}
-	r := t.removed[len(t.removed)-1]
-	t.removed = t.removed[:len(t.removed)-1]
-	delete(t.gone, r.m.RemoteID)
+	r := t.removed[i]
+	t.removed = append(t.removed[:i], t.removed[i+1:]...)
+	delete(t.gone, key)
 	if r.at > len(t.messages) {
 		r.at = len(t.messages)
 	}
@@ -214,7 +220,80 @@ func (t *threadView) restore() {
 	t.dirty, t.off = true, -1
 }
 
-func (t *threadView) commit() { t.removed = nil }
+func (t *threadView) indexOfRemoved(key string) int {
+	for i := range t.removed {
+		if t.removed[i].m.RemoteID == key {
+			return i
+		}
+	}
+	return -1
+}
+
+// commit says the write named by key landed: a failure after this must not
+// put that message back, the engine rolled nothing back. The key is how this
+// result finds its own drop even when another write's result lands in between.
+func (t *threadView) commit(key string) {
+	i := t.indexOfRemoved(key)
+	if i < 0 {
+		return
+	}
+	t.removed = append(t.removed[:i], t.removed[i+1:]...)
+}
+
+// unhide lifts the message named by key out of gone, for undo or a settled
+// rejection. By then commit has taken the message off removed -- a failure
+// after the write landed must not put it back -- but the undo's reload has to
+// see it all the same: GetThread returns the message whatever mailbox it sits
+// in, and gone is what would keep it hidden. The reload puts it back where it
+// belongs; no optimistic reinsert is needed. The key keeps two drops in the
+// same thread straight: lifting the one whose write failed must not uncover
+// another that landed.
+func (t *threadView) unhide(key string) {
+	delete(t.gone, key)
+}
+
+// hide puts a message back under gone when its undo was rejected: the engine
+// rolled the undo patch back, so the message is still in the trash, and a
+// thread reload shows it whatever mailbox it sits in.
+func (t *threadView) hide(key string) {
+	if t.gone == nil {
+		t.gone = map[string]bool{}
+	}
+	t.gone[key] = true
+}
+
+// rename follows a moved message's new remote id through gone and removed,
+// and through key when it names the dropped message. On IMAP a move mints a
+// uid: the id the drop keyed by stops naming anything, and the reload returns
+// the message under its new id. Without moving gone with it the trashed
+// message comes back and stays back, which is the flicker this screen exists
+// to prevent.
+func (t *threadView) rename(renames map[string]string, key string) string {
+	for pub, to := range renames {
+		from, err := model.ParseID(pub)
+		if err != nil || from.Account != t.accountID {
+			continue
+		}
+		next, err := model.ParseID(to)
+		if err != nil || next.Account != t.accountID ||
+			from.Kind != model.KindMessage || next.Kind != model.KindMessage {
+			continue
+		}
+		if t.gone[from.Remote] {
+			delete(t.gone, from.Remote)
+			t.gone[next.Remote] = true
+		}
+		for i := range t.removed {
+			if t.removed[i].m.RemoteID == from.Remote {
+				t.removed[i].m.RemoteID = next.Remote
+			}
+		}
+		if key == from.Remote {
+			key = next.Remote
+		}
+	}
+	return key
+}
 
 // keepUnread stops the expanded view from marking one message read again. The
 // user has just marked it unread by hand and the cursor is still on it, so the
