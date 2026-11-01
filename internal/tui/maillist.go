@@ -323,6 +323,11 @@ func (m *mailList) forgetLanded(seq int) {
 // message whatever mailbox it sits in -- so it lifts the message out itself.
 func (m *mailList) unhide(string) {}
 
+// hide is a no-op here too: the list's reload after a triaged drop is what
+// forgetLanded clears, and a rejected undo leaves the row in the mailbox it
+// was already in, which the list query already leaves out.
+func (m *mailList) hide(string) {}
+
 // anchor names the row the cursor is on, so it can be found again in the
 // result of a reload.
 func (m *mailList) anchor() (string, int) {

@@ -49,6 +49,22 @@ func (r *renamingMail) takeRenames() []provider.Rename {
 	return out
 }
 
+// refusingMail fails the next mailbox write with a permanent rejection, the
+// way a provider answers an undo it will not accept.
+type refusingMail struct {
+	provider.MailProvider
+	failNext error
+}
+
+func (r *refusingMail) SetMailboxes(ctx context.Context, ids []string, add, remove []string) error {
+	if r.failNext != nil {
+		err := r.failNext
+		r.failNext = nil
+		return err
+	}
+	return r.MailProvider.SetMailboxes(ctx, ids, add, remove)
+}
+
 // fakeFactory hands the engine one in-memory mail provider and one calendar.
 type fakeFactory struct {
 	mail provider.MailProvider
@@ -152,6 +168,18 @@ func newTriageDepsWithMail(t *testing.T, backend model.Backend, providerFor func
 func newTriageDepsRemapping(t *testing.T) (Deps, *fake.Mail, *renamingMail) {
 	t.Helper()
 	rm := &renamingMail{}
+	d, mail, _ := newTriageDepsWithMail(t, model.BackendIMAP, func(m *fake.Mail) provider.MailProvider {
+		rm.MailProvider = m
+		return rm
+	})
+	return d, mail, rm
+}
+
+// newTriageDepsRefusingUndo is newTriageDeps with a provider whose next
+// mailbox write can be rejected outright.
+func newTriageDepsRefusingUndo(t *testing.T) (Deps, *fake.Mail, *refusingMail) {
+	t.Helper()
+	rm := &refusingMail{}
 	d, mail, _ := newTriageDepsWithMail(t, model.BackendIMAP, func(m *fake.Mail) provider.MailProvider {
 		rm.MailProvider = m
 		return rm
@@ -729,6 +757,77 @@ func TestUndoReloadsOnceTheUndoHasLanded(t *testing.T) {
 	drain(t, r, r.onApplied(ap))
 	if got := len(ml.threads); got != 1 || ml.threads[0].Subject != "Archive me" {
 		t.Fatalf("after undo the list holds %+v", ml.threads)
+	}
+}
+
+// A rejected undo leaves the message in the trash. The thread reload shows a
+// message whatever mailbox it sits in, so lifting the message out of gone
+// before the undo lands -- or without checking that it landed -- puts it back
+// on screen while it is still trashed.
+func TestFailedUndoLeavesTheTrashedMessageHidden(t *testing.T) {
+	d, mail, rm := newTriageDepsRefusingUndo(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	send(t, r, "d")
+	if !tv.gone["m2"] {
+		t.Fatal("the trashed message is not hidden")
+	}
+	if r.undo == nil {
+		t.Fatal("the trash offered no undo")
+	}
+
+	rm.failNext = errors.New("rejected")
+	send(t, r, "z")
+	if !tv.gone["m2"] {
+		t.Fatal("a failed undo lifted the message out of gone")
+	}
+	if r.undo != nil {
+		t.Error("a failed undo left its record offered")
+	}
+
+	drain(t, r, tv.reload())
+	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Fatalf("the failed undo put the trashed message back: %+v", tv.messages)
+	}
+}
+
+// An undo that lands and then fails at the provider is rolled back to the
+// trash. The unhide on the undo's applied has already shown the message, so
+// the settled rejection has to put it under gone again.
+func TestSettledUndoFailureKeepsTheMessageHidden(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	send(t, r, "d")
+	if !tv.gone["m2"] {
+		t.Fatal("the trashed message is not hidden")
+	}
+
+	// The undo result: applied, so the message is lifted out of gone.
+	drain(t, r, r.onApplied(applied{action: "undo trash", drop: tv, key: "m2"}))
+	if tv.gone["m2"] {
+		t.Fatal("a landed undo did not lift the message out of gone")
+	}
+
+	// Then the provider rejects it, and the engine rolls the patch back.
+	drain(t, r, r.onSettled(applied{
+		action: "undo trash", drop: tv, key: "m2", settled: true, err: errors.New("rejected"),
+	}))
+	if !tv.gone["m2"] {
+		t.Fatal("a rejected undo did not hide the still-trashed message")
+	}
+	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Fatalf("the rejected undo left %+v on screen", tv.messages)
 	}
 }
 

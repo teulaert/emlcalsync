@@ -47,12 +47,15 @@ type triageable interface {
 	// which names that drop in every later result. A screen with nothing
 	// selected returns "".
 	dropSelected() string
-	// restore, commit and unhide act on the drop with this key, not on the
-	// oldest or newest one left: provider results are delivered in whatever
-	// order they finish, and two drops can be in flight at once.
+	// restore, commit, unhide and hide act on the drop with this key, not on
+	// the oldest or newest one left: provider results are delivered in
+	// whatever order they finish, and two drops can be in flight at once.
+	// unhide is a landed triage or undo letting its message show again; hide
+	// puts it back when the undo was rejected and the message is still there.
 	restore(key string)
 	commit(key string)
 	unhide(key string)
+	hide(key string)
 }
 
 type root struct {
@@ -1051,18 +1054,15 @@ func (r *root) applyUndo() tea.Cmd {
 	r.note("undoing " + u.label + "…")
 	// Undo is only offered once the write landed, and commit has already taken
 	// the row off the screen's removed: there is nothing to put back. The
-	// thread view still hides the message in gone until undo lifts it; the
-	// mail list needs no lift, because the reload undo starts is itself a load
-	// that began after the landing and forgetLanded stops hiding the thread
-	// before its result is filtered. u.key names the exact row the action
-	// dropped, so undo lifts that one even if other writes landed since.
-	if u.drop != nil {
-		u.drop.unhide(u.key)
-	}
-	// The reload comes once the undo has landed, not alongside it: the two
+	// thread view still hides the message in gone, and the undo lifts it only
+	// once the write lands -- onApplied looks at the result -- so a failed
+	// undo does not uncover a message that is still in the trash. u.drop and
+	// u.key name the exact row the action dropped.
+	//
+	// The reload comes from the result too, not alongside the write: the two
 	// commands run concurrently, and a query that beats the write to the index
 	// only finds the row again on the next background reload.
-	return r.d.apply("undo "+u.label, u.ops, nil)
+	return r.d.applyDropping("undo "+u.label, u.ops, nil, u.drop, u.key)
 }
 
 // triaged reports whether an action is one the screens dropped a row for.
@@ -1119,6 +1119,12 @@ func (r *root) onApplied(a applied) tea.Cmd {
 	if a.drop != nil && triaged(a.action) {
 		a.drop.commit(a.key)
 	}
+	// A landed undo is what lets the message its drop hid show again. Doing
+	// it here, on the result, is what keeps a failed undo from uncovering a
+	// message that is still in the trash.
+	if a.drop != nil && strings.HasPrefix(a.action, "undo ") {
+		a.drop.unhide(a.key)
+	}
 	var reload tea.Cmd
 	if rereads(a.action) {
 		reload = r.top().reload()
@@ -1154,11 +1160,16 @@ func (r *root) onSettled(a applied) tea.Cmd {
 		r.note(a.action + " did not go through: " + a.err.Error())
 		r.undo = nil
 		if a.drop != nil {
-			// The thread view hides the rolled-back message in gone; the mail
-			// list lets its reload clear the landed row. Either way lift the
-			// message this write dropped, not whichever landed last, before
-			// going back to look.
-			a.drop.unhide(a.key)
+			// A rejected action was rolled back into the mailbox it came
+			// from, so the thread view has to lift its message out of gone.
+			// A rejected undo was rolled back too, which means the message
+			// is still in the trash: hide it again. Either way act on the
+			// message this write dropped, not whichever landed last.
+			if triaged(a.action) {
+				a.drop.unhide(a.key)
+			} else if strings.HasPrefix(a.action, "undo ") {
+				a.drop.hide(a.key)
+			}
 			return a.drop.reload()
 		}
 		return r.top().reload()

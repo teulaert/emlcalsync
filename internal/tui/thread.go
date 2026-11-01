@@ -252,6 +252,16 @@ func (t *threadView) unhide(key string) {
 	delete(t.gone, key)
 }
 
+// hide puts a message back under gone when its undo was rejected: the engine
+// rolled the undo patch back, so the message is still in the trash, and a
+// thread reload shows it whatever mailbox it sits in.
+func (t *threadView) hide(key string) {
+	if t.gone == nil {
+		t.gone = map[string]bool{}
+	}
+	t.gone[key] = true
+}
+
 // rename follows a moved message's new remote id through gone and removed,
 // and through key when it names the dropped message. On IMAP a move mints a
 // uid: the id the drop keyed by stops naming anything, and the reload returns

@@ -409,6 +409,54 @@ func TestThreadSummaryTracksAttachments(t *testing.T) {
 	}
 }
 
+// Two accounts can carry the same thread id and the same last second (a mail
+// sent to two of your own addresses). The sort has to name the account too,
+// or the keyset and the ORDER BY disagree on which row is after which and a
+// page boundary can serve one twice or skip one.
+func TestListThreadsKeysetPagingBreaksTiesOnAccount(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "work")
+	seedAccount(t, s, "personal")
+
+	for _, account := range []string{"work", "personal"} {
+		putMessage(t, s, &model.Message{
+			AccountID: account, RemoteID: account + "-m", ThreadID: "th-shared",
+			Received: base, MailboxRemotes: []string{"mb-inbox"},
+		}, &mime.Parsed{
+			Subject: "Shared thread", From: addr("A", "a@x.example"), TextBody: "one",
+		})
+	}
+
+	all, err := s.ListThreads(ctx, MessageFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[0].AccountID != "work" || all[1].AccountID != "personal" {
+		t.Fatalf("ListThreads = %+v, want work before personal on the tiebreak", all)
+	}
+
+	first, err := s.ListThreads(ctx, MessageFilter{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0].AccountID != "work" {
+		t.Fatalf("first page = %+v, want work", first)
+	}
+	next, err := s.ListThreads(ctx, MessageFilter{
+		Limit:        1,
+		AfterLast:    first[0].Last,
+		AfterThread:  first[0].ThreadID,
+		AfterAccount: first[0].AccountID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next) != 1 || next[0].AccountID != "personal" {
+		t.Fatalf("second page = %+v, want personal", next)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Search
 
