@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -304,6 +305,52 @@ func TestMailListAReplyToAnArchivedThreadShowsUp(t *testing.T) {
 	}
 }
 
+// The result belongs to the screen that dropped the row, not to whatever is
+// on top when it arrives. In the gap before a write answers the person can
+// open a thread or switch to the calendar; the list still has a pending drop
+// of its own to commit, and leaving it uncommitted keeps the row hidden until
+// the view changes.
+func TestMailListOrphanedDropLandsOnTheListThatDroppedIt(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Trash me", time.Hour)
+
+	r := newTestRoot(t, d)
+	send(t, r, "M") // all view: a trashed thread still belongs to it
+	ml := r.top().(*mailList)
+
+	cmd := r.triage("trash")
+	r.push(newThreadView(d, "work", "t-m1", "Trash me", false))
+	r.Update(cmd()) // the answer comes while the thread is on top
+	settle(t, r)
+	r.pop()
+
+	drain(t, r, ml.reload())
+	if got := len(ml.threads); got != 1 {
+		t.Fatalf("the trashed row is still hidden after moving on and back (%d rows)", got)
+	}
+}
+
+// A failed write puts the row back even when the screen that dropped it is no
+// longer the top one. Otherwise the rollback leaves the message hidden until a
+// view change, which is the state the person came back to.
+func TestMailListOrphanedDropRestoresOnTheListWhenTheWriteFails(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "Trash me", "anna", time.Hour, false)
+
+	r := newTestRoot(t, d)
+	ml := r.top().(*mailList)
+	ml.dropSelected()
+	r.push(newThreadView(d, "work", "t1", "Trash me", false))
+
+	r.Update(applied{action: "trash", drop: ml, err: errors.New("rejected")})
+	r.pop()
+
+	drain(t, r, ml.reload())
+	if got := len(ml.threads); got != 1 {
+		t.Fatalf("the failed trash left the row hidden (%d rows)", got)
+	}
+}
+
 func TestStarFromTheListReachesTheProvider(t *testing.T) {
 	d, mail := newTriageDeps(t)
 	addTriageMessage(t, d, mail, "m1", "Star me", time.Hour)
@@ -450,6 +497,34 @@ func TestTrashFromTheThreadUndoShowsTheMessageAgain(t *testing.T) {
 	}
 	if len(tv.messages) != 2 {
 		t.Fatalf("after undo the thread holds %d messages, want both", len(tv.messages))
+	}
+}
+
+// A deferred write the provider later rejects has already committed its drop.
+// The engine rolled the index back, but the thread view still hides the
+// message in gone: the settled error has to lift it before reloading, or the
+// conversation stays one message short.
+func TestThreadViewSettledFailureShowsTheMessageAgain(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	cmd := r.triage("trash")
+	r.Update(cmd()) // the drop lands, so commit takes it off removed
+	settle(t, r)
+	if len(tv.messages) != 1 {
+		t.Fatalf("after the drop the thread holds %d messages, want 1", len(tv.messages))
+	}
+
+	drain(t, r, r.onSettled(applied{
+		action: "trash", drop: tv, settled: true, err: errors.New("rejected"),
+	}))
+	if len(tv.messages) != 2 {
+		t.Fatalf("the rejected write left the thread at %d messages, want both back", len(tv.messages))
 	}
 }
 

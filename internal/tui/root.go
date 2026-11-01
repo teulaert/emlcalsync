@@ -42,6 +42,7 @@ type capturing interface{ capturingKeys() bool }
 // back where it was, undo lifts the message of a landed write out of the
 // screen's gone set so the reload it starts can see it again.
 type triageable interface {
+	screen
 	dropSelected()
 	restore()
 	commit()
@@ -896,8 +897,13 @@ func (r *root) triage(what string) tea.Cmd {
 			follow = r.closeThread()
 		}
 	}
+	// The row that went belongs to the screen left on top once the follow has
+	// run: a reader whose thread still has a message leaves the thread, and one
+	// that emptied leaves the list. Capture it now -- by result time the person
+	// may be somewhere else, and the write still has to commit or restore here.
+	drop := r.triageScreen()
 	r.note(what + "…")
-	return tea.Batch(r.d.apply(what, ops, undo), follow)
+	return tea.Batch(r.d.applyDropping(what, ops, undo, drop), follow)
 }
 
 // deleteEvent is d on the calendar. The second return reports that the
@@ -1071,17 +1077,16 @@ func rereads(action string) bool {
 }
 
 func (r *root) onApplied(a applied) tea.Cmd {
-	t := r.triageScreen()
 	if a.err != nil {
-		if t != nil && triaged(a.action) {
-			t.restore()
+		if a.drop != nil && triaged(a.action) {
+			a.drop.restore()
 		}
 		r.note(a.action + " failed: " + a.err.Error())
 		r.undo = nil
 		return nil
 	}
-	if t != nil && triaged(a.action) {
-		t.commit()
+	if a.drop != nil && triaged(a.action) {
+		a.drop.commit()
 	}
 	var reload tea.Cmd
 	if rereads(a.action) {
@@ -1107,13 +1112,23 @@ func (r *root) onApplied(a applied) tea.Cmd {
 // to confirm: only a write that did not go through is worth interrupting for.
 //
 // A rejection has already been rolled back inside the engine, so the row is
-// back in the index and a reload is what puts it back on screen. A queued one
-// stands as it is — the outbox will push it — and only needs saying.
+// back in the index and a reload is what puts it back on screen. The reload
+// belongs to the screen that dropped the row: if the person has moved on, the
+// screen underneath still has to stop hiding what the rollback brought back.
+// A queued one stands as it is — the outbox will push it — and only needs
+// saying.
 func (r *root) onSettled(a applied) tea.Cmd {
 	switch {
 	case a.err != nil:
 		r.note(a.action + " did not go through: " + a.err.Error())
 		r.undo = nil
+		if a.drop != nil {
+			// The thread view hides the rolled-back message in gone; the mail
+			// list lets its reload clear the landed row. Either way undo the
+			// hide before going back to look.
+			a.drop.unhide()
+			return a.drop.reload()
+		}
 		return r.top().reload()
 	case a.queued:
 		r.note(a.action + " queued — offline, it will go out on the next sync")

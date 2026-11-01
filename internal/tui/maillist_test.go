@@ -350,8 +350,8 @@ func TestMailListCursorHoldsItsPlaceWhenTheThreadIsGone(t *testing.T) {
 // against the index before the write patched it, so it has the trashed thread
 // in it, and without filtering it the row comes straight back: the person
 // sees it go away, reappear a moment later, and vanish again on the next
-// commit. The threads this screen dropped stay out of every reload until
-// undo asks for one of them back.
+// commit. The threads this screen dropped stay out of every reload until a
+// failed write puts one back.
 func TestMailListStaleReloadDoesNotBringTheDroppedRowBack(t *testing.T) {
 	d := newTestDeps(t, "work")
 	addMessage(t, d, "work", "w1", "t1", "First", "anna", 2*time.Hour, false)
@@ -373,14 +373,14 @@ func TestMailListStaleReloadDoesNotBringTheDroppedRowBack(t *testing.T) {
 		t.Fatalf("a stale reload brought the dropped row back: %+v", ml.threads)
 	}
 
-	// The reload that follows the landed write does not have the row either.
+	// A later reload that returns only the dropped row filters it out too.
 	s, _ = ml.Update(threadsLoaded{seq: ml.seq, threads: []model.Thread{dropped}}, k, 100, 24)
 	ml = s.(*mailList)
 	if len(ml.threads) != 0 {
-		t.Fatalf("a committed reload kept the trashed row: %+v", ml.threads)
+		t.Fatalf("a reload with only the trashed row kept it: %+v", ml.threads)
 	}
 
-	// Undo puts it back, and a reload after that keeps it.
+	// A failed write puts the row back, and the reload after that keeps it.
 	ml.restore()
 	if len(ml.threads) != 1 || ml.threads[0].Subject != "Second" {
 		t.Fatalf("after restore: %+v", ml.threads)
@@ -391,7 +391,7 @@ func TestMailListStaleReloadDoesNotBringTheDroppedRowBack(t *testing.T) {
 	}}, k, 100, 24)
 	ml = s.(*mailList)
 	if len(ml.threads) != 2 || ml.threads[0].Subject != "Second" {
-		t.Fatalf("a reload after undo lost the restored row: %+v", ml.threads)
+		t.Fatalf("a reload after the restore lost the row: %+v", ml.threads)
 	}
 }
 

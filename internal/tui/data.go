@@ -171,6 +171,12 @@ type applied struct {
 	// settled marks the second, late answer to a deferred write: the provider
 	// has now spoken, and only a write that did not go through says so.
 	settled bool
+	// drop is the screen whose row the action took off optimistically. The
+	// result goes back to that screen, not to whatever happens to be on top
+	// when it arrives: a person can push a thread or switch to the calendar
+	// while an IMAP round trip runs, and the dropped row still has to be
+	// committed or restored on the screen that lost it.
+	drop triageable
 }
 
 // dbChanged is emitted when another connection — in practice the sync daemon —
