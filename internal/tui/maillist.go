@@ -86,11 +86,11 @@ type mailList struct {
 	// stop hiding the thread. See the threadsLoaded case in Update.
 	landed map[string]int
 
-	// loaded is how many rows the store has returned for the view so far,
-	// before keep took any out. The next page starts after those, not after
-	// len(threads): a hidden row is still a row the store counted, and one
-	// short offset would serve it again.
-	loaded int
+	// tail is the last row the store returned for the page in use, hidden or
+	// not. The next page starts after it, by sort key: rows that leave the
+	// query shift an offset by one, and rows that stay in it make one too
+	// short. The key does not care about either.
+	tail model.Thread
 }
 
 type removedRow struct {
@@ -116,9 +116,10 @@ func (m *mailList) Title() string {
 	return fmt.Sprintf("%s · %s", what, who)
 }
 
-// filter builds the store query for the current view.
-func (m *mailList) filter(offset int) store.MessageFilter {
-	f := store.MessageFilter{Limit: pageSize, Offset: offset, NewestFirst: true}
+// filter builds the store query for the current view. It starts at the top;
+// loadMore pins the next page behind tail instead of offsetting.
+func (m *mailList) filter() store.MessageFilter {
+	f := store.MessageFilter{Limit: pageSize, NewestFirst: true}
 	if m.account > 0 && m.account <= len(m.accounts) {
 		f.Accounts = []string{m.accounts[m.account-1]}
 	} else {
@@ -148,7 +149,7 @@ func (m *mailList) reload() tea.Cmd { return m.load(false) }
 // view's gone set.
 func (m *mailList) reloadFresh() tea.Cmd {
 	m.gone, m.landed = nil, nil
-	m.loaded = 0
+	m.tail = model.Thread{}
 	return m.load(true)
 }
 
@@ -157,16 +158,23 @@ func (m *mailList) load(reset bool) tea.Cmd {
 	m.loading = true
 	m.atEnd = false
 	m.resetCursor = reset
-	return m.d.loadThreads(m.seq, m.filter(0), m.query, false)
+	return m.d.loadThreads(m.seq, m.filter(), m.query, false)
 }
 
+// loadMore asks for the page after tail, by sort key. A row that left the
+// query (a trash in the inbox) shifts an offset by one, and a row that stays
+// in it (a trash in the all view) makes it one short; the key avoids both,
+// and a message that arrived since the page loaded lands before it.
 func (m *mailList) loadMore() tea.Cmd {
 	if m.loading || m.atEnd || m.query != "" {
 		return nil
 	}
+	f := m.filter()
+	f.AfterLast, f.AfterThread, f.AfterAccount =
+		m.tail.Last, m.tail.ThreadID, m.tail.AccountID
 	m.seq++
 	m.loading = true
-	return m.d.loadThreads(m.seq, m.filter(m.loaded), "", true)
+	return m.d.loadThreads(m.seq, f, "", true)
 }
 
 func (m *mailList) targets() []target {
@@ -362,7 +370,9 @@ func (m *mailList) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 			// The page was full before anything was filtered out; atEnd is
 			// about what the store returned, not about what stayed.
 			n := len(msg.threads)
-			m.loaded += n
+			if n > 0 {
+				m.tail = msg.threads[n-1]
+			}
 			if n < pageSize {
 				m.atEnd = true
 			}
@@ -372,7 +382,9 @@ func (m *mailList) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 			// The page was full before anything was filtered out; atEnd is
 			// about what the store returned, not about what stayed.
 			n := len(msg.threads)
-			m.loaded = n
+			if n > 0 {
+				m.tail = msg.threads[n-1]
+			}
 			m.threads = m.keep(msg.threads)
 			if m.resetCursor {
 				m.cursor, m.top = 0, 0

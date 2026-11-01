@@ -352,6 +352,13 @@ func (s *Store) ListThreads(ctx context.Context, f MessageFilter) ([]model.Threa
 
 func (tx *Tx) ListThreads(ctx context.Context, f MessageFilter) ([]model.Thread, error) {
 	where, args := f.where()
+	// Keyset pagination: rows that leave or join the query ahead of the page
+	// shift an offset, but not a key. Same sort order as the one below.
+	if f.AfterThread != "" {
+		where += ` AND (t.last_utc < ? OR (t.last_utc = ? AND
+			(t.thread_id < ? OR (t.thread_id = ? AND t.account_id < ?))))`
+		args = append(args, f.AfterLast.Unix(), f.AfterLast.Unix(), f.AfterThread, f.AfterThread, f.AfterAccount)
+	}
 	limit, limitArgs := f.limitClause()
 	rows, err := tx.q.QueryContext(ctx,
 		`SELECT `+threadCols+` FROM threads t

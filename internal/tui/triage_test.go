@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/teulaert/emlcalsync/internal/blob"
 	"github.com/teulaert/emlcalsync/internal/config"
 	"github.com/teulaert/emlcalsync/internal/model"
@@ -694,6 +696,39 @@ func TestThreadTrashFollowsTheRenamedIDOnReload(t *testing.T) {
 	drain(t, r, tv.reload())
 	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
 		t.Fatalf("the renamed trashed message came back: %+v", tv.messages)
+	}
+}
+
+// The reload undo starts has to run after the undo write has landed: the two
+// commands used to run side by side, and a query that beat the write to the
+// index only found the row again on the next background reload. The write is
+// a single command, and the reload is what its result hands back.
+func TestUndoReloadsOnceTheUndoHasLanded(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Archive me", time.Hour)
+
+	r := newTestRoot(t, d)
+	send(t, r, "e")
+	ml := r.top().(*mailList)
+	if got := len(ml.threads); got != 0 {
+		t.Fatalf("after archive the list holds %d rows", got)
+	}
+
+	_, cmd := r.Update(keyPress("z"))
+	if cmd == nil {
+		t.Fatal("z did nothing")
+	}
+	msg := cmd()
+	if _, batch := msg.(tea.BatchMsg); batch {
+		t.Fatal("undo still batches the reload with the write")
+	}
+	ap, ok := msg.(applied)
+	if !ok {
+		t.Fatalf("undo returned %T, want applied", msg)
+	}
+	drain(t, r, r.onApplied(ap))
+	if got := len(ml.threads); got != 1 || ml.threads[0].Subject != "Archive me" {
+		t.Fatalf("after undo the list holds %+v", ml.threads)
 	}
 }
 

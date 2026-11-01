@@ -1059,7 +1059,10 @@ func (r *root) applyUndo() tea.Cmd {
 	if u.drop != nil {
 		u.drop.unhide(u.key)
 	}
-	return tea.Batch(r.d.apply("undo "+u.label, u.ops, nil), r.top().reload())
+	// The reload comes once the undo has landed, not alongside it: the two
+	// commands run concurrently, and a query that beats the write to the index
+	// only finds the row again on the next background reload.
+	return r.d.apply("undo "+u.label, u.ops, nil)
 }
 
 // triaged reports whether an action is one the screens dropped a row for.
@@ -1082,13 +1085,15 @@ func triaged(action string) bool {
 // An answered invitation is one: the event view's RSVP line and the reader's
 // card both say what the calendar says. A deleted event is the same thing from
 // the other end -- the agenda has one row fewer, and after a delete from the
-// detail view the agenda is what the pop left on top.
+// detail view the agenda is what the pop left on top. An undo is one too: the
+// row it puts back is only in the index by the time the write returns, which
+// is the point of reloading here rather than alongside it.
 func rereads(action string) bool {
 	switch model.Participation(action) {
 	case model.PartAccepted, model.PartDeclined, model.PartTentative:
 		return true
 	}
-	return action == actionEventDelete
+	return action == actionEventDelete || strings.HasPrefix(action, "undo ")
 }
 
 func (r *root) onApplied(a applied) tea.Cmd {

@@ -438,11 +438,47 @@ func TestMailListOutOfOrderResultsCommitAndRestoreTheirOwnRows(t *testing.T) {
 	}
 }
 
+// A row that leaves the query shifts the rows behind it up by one, so an
+// offset starts the next page a row late and skips a thread. Paging after the
+// last row the store returned does not: the key is where that row sits, not
+// how many rows came before it.
+func TestMailListPagingAfterADropThatLeftsTheQueryDoesNotSkip(t *testing.T) {
+	d := newTestDeps(t, "work")
+	for i := 0; i < 101; i++ {
+		addMessage(t, d, "work", fmt.Sprintf("w%03d", i), fmt.Sprintf("t%03d", i),
+			fmt.Sprintf("Subject %03d", i), "anna", time.Duration(i)*time.Minute, false)
+	}
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	ml := pump(t, m, m.Init(), k, 100, 24).(*mailList)
+	if len(ml.threads) != pageSize {
+		t.Fatalf("first page has %d threads, want %d", len(ml.threads), pageSize)
+	}
+
+	key := ml.dropSelected() // a trash in the inbox leaves the query
+	ml.commit(key)
+
+	ml = pump(t, ml, ml.loadMore(), k, 100, 24).(*mailList)
+	if got, want := len(ml.threads), 100; got != want {
+		t.Fatalf("got %d threads after the second page, want %d", got, want)
+	}
+	seen := map[string]bool{}
+	for _, th := range ml.threads {
+		if seen[th.Subject] {
+			t.Errorf("%q is on the list twice", th.Subject)
+		}
+		seen[th.Subject] = true
+	}
+	if last := ml.threads[len(ml.threads)-1]; last.Subject != "Subject 100" {
+		t.Errorf("last thread = %q, want the row after the page boundary", last.Subject)
+	}
+}
+
 // A hidden row is still a row the store returned, and the next page has to
-// start after it. Counting what is left on screen (as len(threads) does)
-// starts the page one row early per hidden row and serves those again. The
-// all view is where a dropped row keeps matching the query, so the store
-// counts it even while gone hides it.
+// start after it. The all view is where a dropped row keeps matching the
+// query, so the store counts it even while gone hides it; the page after the
+// store's last row starts where that row sat, hidden or not.
 func TestMailListPagingAfterAHiddenRowDoesNotRepeat(t *testing.T) {
 	d := newTestDeps(t, "work")
 	for i := 0; i < 101; i++ {
