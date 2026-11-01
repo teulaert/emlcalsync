@@ -39,8 +39,8 @@ type capturing interface{ capturingKeys() bool }
 // triageable is implemented by the screens whose rows can be acted on, so the
 // root can update them optimistically without knowing which one it holds.
 // restore and unhide differ in who calls them: a failed write puts its row
-// back where it was, undo lifts the row of a landed write out of the screen's
-// gone set so the reload it starts can see it again.
+// back where it was, undo lifts the message of a landed write out of the
+// screen's gone set so the reload it starts can see it again.
 type triageable interface {
 	dropSelected()
 	restore()
@@ -1029,15 +1029,29 @@ func (r *root) applyUndo() tea.Cmd {
 	u := r.undo
 	r.undo = nil
 	r.note("undoing " + u.label + "…")
-	// Put the row back straight away when the write has not landed yet; the
-	// reload that follows confirms it. When it has, commit took the row off
-	// the screen's removed already, and undo instead lifts it out of gone so
-	// this reload sees it.
+	// Undo is only offered once the write landed, and commit has already taken
+	// the row off the screen's removed: there is nothing to put back. The
+	// thread view still hides the message in gone until undo lifts it; the
+	// mail list needs no lift, because the reload undo starts is itself a load
+	// that began after the landing and forgetLanded stops hiding the thread
+	// before its result is filtered.
 	if t := r.triageScreen(); t != nil {
-		t.restore()
 		t.unhide()
 	}
 	return tea.Batch(r.d.apply("undo "+u.label, u.ops, nil), r.top().reload())
+}
+
+// triaged reports whether an action is one the screens dropped a row for.
+// Only those results own a pending drop: the mark-read that comes with
+// opening a message and the undo are writes too, but neither took a row off a
+// screen, and letting either claim the oldest pending drop takes a real
+// trash's row away before it is known whether it landed.
+func triaged(action string) bool {
+	switch action {
+	case "archive", "trash", "restore":
+		return true
+	}
+	return false
 }
 
 // rereads reports whether a write changed what the screen now on top is
@@ -1057,15 +1071,16 @@ func rereads(action string) bool {
 }
 
 func (r *root) onApplied(a applied) tea.Cmd {
+	t := r.triageScreen()
 	if a.err != nil {
-		if t := r.triageScreen(); t != nil {
+		if t != nil && triaged(a.action) {
 			t.restore()
 		}
 		r.note(a.action + " failed: " + a.err.Error())
 		r.undo = nil
 		return nil
 	}
-	if t := r.triageScreen(); t != nil {
+	if t != nil && triaged(a.action) {
 		t.commit()
 	}
 	var reload tea.Cmd

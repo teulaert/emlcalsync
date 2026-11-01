@@ -239,6 +239,65 @@ func TestRestoreFromTheListReachesTheProvider(t *testing.T) {
 	}
 }
 
+// A message trashed in the inbox is gone, but the all view shows the trash
+// too: the row the screen dropped optimistically is still what the store has,
+// and once the write lands the next load has to stop hiding it. Without that,
+// the row is gone until the view changes -- and restoring, archiving and
+// trashing from a view that still holds the message all end the same way.
+func TestMailListAllViewKeepsItsRowAfterTheActionLands(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mailbox string
+		key     string
+	}{
+		{"trash", "INBOX", "d"},
+		{"archive", "INBOX", "e"},
+		{"restore", "TRASH", "i"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, mail := newTriageDeps(t)
+			addTriageMessageIn(t, d, mail, tc.mailbox, "m1", tc.name, time.Hour)
+
+			r := newTestRoot(t, d)
+			send(t, r, "M") // inbox -> all, which shows trash and archive too
+			send(t, r, tc.key)
+			ml := r.top().(*mailList)
+			if got := len(ml.threads); got != 0 {
+				t.Fatalf("after %s the list holds %d rows, want the dropped row gone", tc.name, got)
+			}
+
+			drain(t, r, ml.reload())
+			if got := len(ml.threads); got != 1 {
+				t.Fatalf("%s left the all view with %d rows, want the thread still on screen", tc.name, got)
+			}
+		})
+	}
+}
+
+// Archiving a thread out of the inbox does not make a reply that lands later
+// invisible. The landed row is only hidden from loads that were already in
+// flight against the unpatched index; a reply that makes the thread match the
+// query again has to show up on the next load.
+func TestMailListARepliesToAnArchivedThreadShowsUp(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Old question", 2*time.Hour)
+
+	r := newTestRoot(t, d)
+	send(t, r, "e")
+	ml := r.top().(*mailList)
+	if got := len(ml.threads); got != 0 {
+		t.Fatalf("after archive the list holds %d rows, want none", got)
+	}
+
+	addTriageMessage(t, d, mail, "m2", "Re: Old question", time.Minute)
+	inThread(t, d, "t-m1", "m2") // the reply lands in the thread that was archived
+
+	drain(t, r, ml.reload())
+	if got := len(ml.threads); got != 1 {
+		t.Fatalf("the reply left the inbox with %d rows, want the thread back", got)
+	}
+}
+
 func TestStarFromTheListReachesTheProvider(t *testing.T) {
 	d, mail := newTriageDeps(t)
 	addTriageMessage(t, d, mail, "m1", "Star me", time.Hour)
@@ -359,6 +418,32 @@ func TestTrashFromTheThreadDropsTheMessageForGood(t *testing.T) {
 	drain(t, r, tv.reload())
 	if len(tv.messages) != 1 || tv.messages[0].RemoteID != "m1" {
 		t.Errorf("after the reload the thread holds %d messages, want only m1", len(tv.messages))
+	}
+}
+
+// Undoing a trash taken in the thread puts the message back where it was on
+// screen. The commit that landed took it off removed; gone is what still hides
+// it, and undo is what lifts it until the reload brings it back.
+func TestTrashFromTheThreadUndoShowsTheMessageAgain(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	send(t, r, "d")
+	if len(tv.messages) != 1 {
+		t.Fatalf("after trash the thread holds %d messages, want 1", len(tv.messages))
+	}
+
+	send(t, r, "z")
+	if _, boxes, _ := mail.Lookup("m2"); !contains(boxes, "INBOX") {
+		t.Errorf("after undo the message is not back in INBOX: %v", boxes)
+	}
+	if len(tv.messages) != 2 {
+		t.Fatalf("after undo the thread holds %d messages, want both", len(tv.messages))
 	}
 }
 

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -391,6 +392,60 @@ func TestMailListStaleReloadDoesNotBringTheDroppedRowBack(t *testing.T) {
 	ml = s.(*mailList)
 	if len(ml.threads) != 2 || ml.threads[0].Subject != "Second" {
 		t.Fatalf("a reload after undo lost the restored row: %+v", ml.threads)
+	}
+}
+
+// A hidden row is still a row the store returned, and the next page has to
+// start after it. Counting what is left on screen (as len(threads) does)
+// starts the page one row early per hidden row and serves those again. The
+// all view is where a dropped row keeps matching the query, so the store
+// counts it even while gone hides it.
+func TestMailListPagingAfterAHiddenRowDoesNotRepeat(t *testing.T) {
+	d := newTestDeps(t, "work")
+	for i := 0; i < 101; i++ {
+		addMessage(t, d, "work", fmt.Sprintf("w%03d", i), fmt.Sprintf("t%03d", i),
+			fmt.Sprintf("Subject %03d", i), "anna", time.Duration(i)*time.Minute, false)
+	}
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	ml := pump(t, m, m.Init(), k, 100, 24).(*mailList)
+	s, cmd := ml.Update(keyPress("M"), k, 100, 24) // inbox -> all
+	ml = pump(t, s, cmd, k, 100, 24).(*mailList)
+
+	firstPage := append([]model.Thread(nil), ml.threads...)
+	if len(firstPage) != pageSize {
+		t.Fatalf("first page has %d threads, want %d", len(firstPage), pageSize)
+	}
+	dropped := ml.threads[0]
+	ml.dropSelected()
+	ml.commit() // the write landed; only the loads already in flight are stale
+
+	// A load that started before the write landed comes back with all of the
+	// page the store returned, dropped row included; keep hides it.
+	s, _ = ml.Update(threadsLoaded{seq: ml.seq, threads: firstPage}, k, 100, 24)
+	ml = s.(*mailList)
+	if got := len(ml.threads); got != pageSize-1 {
+		t.Fatalf("a stale page left %d threads, want %d", got, pageSize-1)
+	}
+
+	ml = pump(t, ml, ml.loadMore(), k, 100, 24).(*mailList)
+	if got, want := len(ml.threads), 100; got != want {
+		t.Fatalf("got %d threads after the second page, want %d", got, want)
+	}
+	seen := map[string]bool{}
+	for _, th := range ml.threads {
+		if seen[th.Subject] {
+			t.Errorf("%q is on the list twice: the next page started a row early", th.Subject)
+		}
+		seen[th.Subject] = true
+	}
+	last := ml.threads[len(ml.threads)-1]
+	if last.Subject != "Subject 100" {
+		t.Errorf("last thread = %q, want the row after the page boundary", last.Subject)
+	}
+	if dropped.Subject == last.Subject {
+		t.Fatalf("the dropped row came back in the appended page: %q", dropped.Subject)
 	}
 }
 

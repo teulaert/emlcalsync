@@ -66,23 +66,31 @@ type mailList struct {
 	// them back where they were.
 	removed []removedRow
 
-	// done is the thread key of the last drop whose write landed. Undo has to
-	// lift that row out of gone -- see unhide -- but commit has taken it off
-	// removed by then, because a failure after the landing must not put it
-	// back. The key is all undo needs: the row itself comes back in the
-	// reload the undo starts.
-	done string
-
 	// gone are the threads triaged away from this screen. The drop hides the
 	// row at once, but the write lands behind it, and every load that started
 	// before it -- the daemon commits every couple of seconds, so there is
 	// usually one in flight -- still has the row in its result. Without this
 	// the reload puts the message straight back, and the next reload a moment
-	// later takes it away again: the action looks like it flickered. The set
-	// outlives commit, because the row is not out of the query until the
-	// index patch lands; restore and unhide take keys out, so undo brings
-	// them back.
+	// later takes it away again: the action looks like it flickered.
+	//
+	// Gone stops mattering when a load started after the write landed comes
+	// back, which is what landed records. That load was queried against the
+	// patched index, so its result is the truth: a thread trashed in the all
+	// view is still there and has to show again, while a reply to an archived
+	// one has to be able to bring it back. filter and restore take keys out.
 	gone map[string]bool
+
+	// landed maps a triaged-away thread to the load sequence it was landed at.
+	// commit records it with the seq of the newest load so far; the next load
+	// to come back with a greater seq started after the index patch and can
+	// stop hiding the thread. See the threadsLoaded case in Update.
+	landed map[string]int
+
+	// loaded is how many rows the store has returned for the view so far,
+	// before keep took any out. The next page starts after those, not after
+	// len(threads): a hidden row is still a row the store counted, and one
+	// short offset would serve it again.
+	loaded int
 }
 
 type removedRow struct {
@@ -139,7 +147,8 @@ func (m *mailList) reload() tea.Cmd { return m.load(false) }
 // the all-mail view has to show, so the new view must not inherit the old
 // view's gone set.
 func (m *mailList) reloadFresh() tea.Cmd {
-	m.gone, m.done = nil, ""
+	m.gone, m.landed = nil, nil
+	m.loaded = 0
 	return m.load(true)
 }
 
@@ -157,7 +166,7 @@ func (m *mailList) loadMore() tea.Cmd {
 	}
 	m.seq++
 	m.loading = true
-	return m.d.loadThreads(m.seq, m.filter(len(m.threads)), "", true)
+	return m.d.loadThreads(m.seq, m.filter(m.loaded), "", true)
 }
 
 func (m *mailList) targets() []target {
@@ -228,7 +237,9 @@ func (m *mailList) restore() {
 	}
 	r := m.removed[len(m.removed)-1]
 	m.removed = m.removed[:len(m.removed)-1]
-	delete(m.gone, threadKey(r.t))
+	key := threadKey(r.t)
+	delete(m.gone, key)
+	delete(m.landed, key)
 	if r.at > len(m.threads) {
 		r.at = len(m.threads)
 	}
@@ -252,29 +263,41 @@ func (m *mailList) keep(threads []model.Thread) []model.Thread {
 
 // commit says the write landed: from here on a failure cannot put the row
 // back, because the engine rolled nothing back. The oldest drop still waiting
-// is the one that landed -- the writes go out in order -- and undo still needs
-// its key to lift the row out of gone, so it moves to done rather than away.
+// is the one that landed -- the writes go out in order. The thread stays in
+// gone until a load started after this point comes back: results already on
+// their way were queried against the index before the patch and still have it.
 func (m *mailList) commit() {
 	if len(m.removed) == 0 {
 		return
 	}
-	m.done = threadKey(m.removed[0].t)
+	r := m.removed[0]
 	m.removed = m.removed[1:]
+	if m.landed == nil {
+		m.landed = map[string]int{}
+	}
+	m.landed[threadKey(r.t)] = m.seq
 }
 
-// unhide lifts the last landed row out of gone, for undo. By the time undo
-// runs, commit has taken the row off removed -- a failure after the write
-// landed must not put it back -- but the undo's reload has to see it all the
-// same: the engine patched the index before apply returned, so the query
-// returns the row, and gone is what would keep it hidden. The reload puts it
-// back where it belongs; no optimistic reinsert is needed.
-func (m *mailList) unhide() {
-	if m.done == "" {
-		return
+// forgetLanded stops hiding the threads whose write landed before this load
+// was started. commit recorded the seq of the newest load in flight when the
+// index patch landed, so a result with a greater seq was queried after it:
+// whatever it says about the thread now is what the index holds, and gone has
+// nothing left to protect against.
+func (m *mailList) forgetLanded(seq int) {
+	for key, at := range m.landed {
+		if seq > at {
+			delete(m.gone, key)
+			delete(m.landed, key)
+		}
 	}
-	delete(m.gone, m.done)
-	m.done = ""
 }
+
+// unhide is a no-op here. The mail list hides a landed thread only from loads
+// that started before its write patched the index; undo's own reload starts
+// after that, so forgetLanded lifts the thread out before the result is
+// filtered. The thread view has no such load to lean on -- its reload shows a
+// message whatever mailbox it sits in -- so it lifts the message out itself.
+func (m *mailList) unhide() {}
 
 // anchor names the row the cursor is on, so it can be found again in the
 // result of a reload.
@@ -318,8 +341,13 @@ func (m *mailList) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 		if msg.err != nil {
 			return m, nil
 		}
+		m.forgetLanded(msg.seq)
 		if msg.append {
-			if len(msg.threads) == 0 {
+			// The page was full before anything was filtered out; atEnd is
+			// about what the store returned, not about what stayed.
+			n := len(msg.threads)
+			m.loaded += n
+			if n < pageSize {
 				m.atEnd = true
 			}
 			m.threads = append(m.threads, m.keep(msg.threads)...)
@@ -328,6 +356,7 @@ func (m *mailList) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 			// The page was full before anything was filtered out; atEnd is
 			// about what the store returned, not about what stayed.
 			n := len(msg.threads)
+			m.loaded = n
 			m.threads = m.keep(msg.threads)
 			if m.resetCursor {
 				m.cursor, m.top = 0, 0

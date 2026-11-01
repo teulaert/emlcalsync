@@ -61,8 +61,9 @@ type threadView struct {
 	gone map[string]bool
 
 	// done is the remote of the last drop whose write landed, what undo needs
-	// to lift out of gone once commit has taken the row off removed. See the
-	// mailList field of the same name.
+	// to lift out of gone once commit has taken the row off removed. A thread
+	// reload shows every message whatever mailbox it sits in, so gone has to
+	// keep hiding a triaged-away one until undo asks for it back.
 	done string
 
 	seq     int
