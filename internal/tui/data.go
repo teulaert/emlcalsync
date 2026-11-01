@@ -177,6 +177,11 @@ type applied struct {
 	// while an IMAP round trip runs, and the dropped row still has to be
 	// committed or restored on the screen that lost it.
 	drop triageable
+	// key names that row on drop: a thread key on the mail list, a remote id
+	// in a thread. Results come back in whatever order the provider answers,
+	// so the key, not the oldest pending drop, is what commit, restore and
+	// unhide act on.
+	key string
 }
 
 // dbChanged is emitted when another connection — in practice the sync daemon —

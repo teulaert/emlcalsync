@@ -339,10 +339,10 @@ func TestMailListOrphanedDropRestoresOnTheListWhenTheWriteFails(t *testing.T) {
 
 	r := newTestRoot(t, d)
 	ml := r.top().(*mailList)
-	ml.dropSelected()
+	key := ml.dropSelected()
 	r.push(newThreadView(d, "work", "t1", "Trash me", false))
 
-	r.Update(applied{action: "trash", drop: ml, err: errors.New("rejected")})
+	r.Update(applied{action: "trash", drop: ml, key: key, err: errors.New("rejected")})
 	r.pop()
 
 	drain(t, r, ml.reload())
@@ -514,17 +514,93 @@ func TestThreadViewSettledFailureShowsTheMessageAgain(t *testing.T) {
 	send(t, r, "enter")
 	tv := r.top().(*threadView)
 	cmd := r.triage("trash")
-	r.Update(cmd()) // the drop lands, so commit takes it off removed
+	res := cmd().(applied)
+	r.Update(res) // the drop lands, so commit takes it off removed
 	settle(t, r)
 	if len(tv.messages) != 1 {
 		t.Fatalf("after the drop the thread holds %d messages, want 1", len(tv.messages))
 	}
 
 	drain(t, r, r.onSettled(applied{
-		action: "trash", drop: tv, settled: true, err: errors.New("rejected"),
+		action: "trash", drop: tv, key: res.key, settled: true, err: errors.New("rejected"),
 	}))
 	if len(tv.messages) != 2 {
 		t.Fatalf("the rejected write left the thread at %d messages, want both back", len(tv.messages))
+	}
+}
+
+// Two drops in one thread, results delivered out of order, and the first
+// write rejected: the settled error has to lift the message it dropped. The
+// last one that landed is not the one that failed, so unhide must go by the
+// key carried in the result, not by whatever commit saw last.
+func TestThreadViewSettledFailureUnhidesItsOwnMessage(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Oldest", 3*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Middle", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m3", "Newest", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2", "m3")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	if len(tv.messages) != 3 {
+		t.Fatalf("thread has %d messages, want 3", len(tv.messages))
+	}
+
+	first := r.triage("trash")  // drops m3
+	second := r.triage("trash") // drops m2, leaving m1
+	resFirst := first().(applied)
+	resSecond := second().(applied)
+	if resFirst.key == resSecond.key {
+		t.Fatalf("both drops use the key %q", resFirst.key)
+	}
+	// The second write answers first; the first answers after it.
+	r.Update(resSecond)
+	r.Update(resFirst)
+	settle(t, r)
+	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Fatalf("after the drops the thread holds %+v, want only m1", tv.messages)
+	}
+
+	drain(t, r, r.onSettled(applied{
+		action: "trash", drop: tv, key: resFirst.key, settled: true, err: errors.New("rejected"),
+	}))
+	if got := len(tv.messages); got != 2 ||
+		tv.messages[0].RemoteID != "m3" || tv.messages[1].RemoteID != "m1" {
+		t.Fatalf("the rejected write uncovered %+v, want m3 back and m2 still gone", tv.messages)
+	}
+}
+
+// The thread view has the same out-of-order problem as the list: a failed
+// result has to put back its own message, not whichever drop happened last.
+func TestThreadViewOutOfOrderResultsRestoreTheRightMessage(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Oldest", 3*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Middle", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m3", "Newest", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2", "m3")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+
+	first := tv.dropSelected()  // m3
+	second := tv.dropSelected() // m2
+	tv.commit(second)
+	tv.restore(first)
+
+	if got := len(tv.removed); got != 0 {
+		t.Errorf("out-of-order results left %d drops pending", got)
+	}
+	if tv.gone[first] {
+		t.Error("the rejected message is still hidden")
+	}
+	if !tv.gone[second] {
+		t.Error("the message whose write landed was lifted out of gone")
+	}
+	if got := len(tv.messages); got != 2 ||
+		tv.messages[0].RemoteID != "m3" || tv.messages[1].RemoteID != "m1" {
+		t.Fatalf("the wrong message was restored: %+v", tv.messages)
 	}
 }
 

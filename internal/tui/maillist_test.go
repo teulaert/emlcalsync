@@ -242,11 +242,11 @@ func TestMailListDropAndRestore(t *testing.T) {
 	m := newMailList(d, d.Accounts)
 	ml := pump(t, m, m.Init(), defaultKeys(), 100, 24).(*mailList)
 
-	ml.dropSelected()
+	key := ml.dropSelected()
 	if len(ml.threads) != 1 || ml.threads[0].Subject != "Second" {
 		t.Fatalf("after drop: %+v", ml.threads)
 	}
-	ml.restore()
+	ml.restore(key)
 	if len(ml.threads) != 2 || ml.threads[0].Subject != "First" {
 		t.Fatalf("after restore: %+v", ml.threads)
 	}
@@ -362,7 +362,7 @@ func TestMailListStaleReloadDoesNotBringTheDroppedRowBack(t *testing.T) {
 
 	dropped := ml.threads[0] // the newest, "Second"
 	stale := threadsLoaded{seq: ml.seq, threads: append([]model.Thread(nil), ml.threads...)}
-	ml.dropSelected()
+	key := ml.dropSelected()
 	if len(ml.threads) != 1 || ml.threads[0].Subject != "First" {
 		t.Fatalf("after drop: %+v", ml.threads)
 	}
@@ -381,7 +381,7 @@ func TestMailListStaleReloadDoesNotBringTheDroppedRowBack(t *testing.T) {
 	}
 
 	// A failed write puts the row back, and the reload after that keeps it.
-	ml.restore()
+	ml.restore(key)
 	if len(ml.threads) != 1 || ml.threads[0].Subject != "Second" {
 		t.Fatalf("after restore: %+v", ml.threads)
 	}
@@ -392,6 +392,49 @@ func TestMailListStaleReloadDoesNotBringTheDroppedRowBack(t *testing.T) {
 	ml = s.(*mailList)
 	if len(ml.threads) != 2 || ml.threads[0].Subject != "Second" {
 		t.Fatalf("a reload after the restore lost the row: %+v", ml.threads)
+	}
+}
+
+// Two drops can be in flight at once, and each apply runs in its own
+// goroutine, so their results arrive in whatever order the provider finishes.
+// The result has to commit or restore the row its own write dropped: the
+// oldest pending row is not necessarily the one that landed, and the newest
+// is not necessarily the one that failed.
+func TestMailListOutOfOrderResultsCommitAndRestoreTheirOwnRows(t *testing.T) {
+	d := newTestDeps(t, "work")
+	addMessage(t, d, "work", "w1", "t1", "First", "anna", 3*time.Hour, false)
+	addMessage(t, d, "work", "w2", "t2", "Second", "bram", 2*time.Hour, false)
+	addMessage(t, d, "work", "w3", "t3", "Third", "caio", time.Hour, false)
+
+	k := defaultKeys()
+	m := newMailList(d, d.Accounts)
+	ml := pump(t, m, m.Init(), k, 100, 24).(*mailList)
+	if got := len(ml.threads); got != 3 {
+		t.Fatalf("list has %d threads, want 3", got)
+	}
+
+	first := ml.dropSelected()  // the newest, "Third"
+	second := ml.dropSelected() // the next, "Second"
+	if len(ml.threads) != 1 || ml.threads[0].Subject != "First" {
+		t.Fatalf("after the drops: %+v", ml.threads)
+	}
+
+	// The second write lands first; the first one is then rejected.
+	ml.commit(second)
+	ml.restore(first)
+
+	if got := len(ml.removed); got != 0 {
+		t.Errorf("out-of-order results left %d drops pending", got)
+	}
+	if ml.gone[first] {
+		t.Error("the rejected row is still hidden")
+	}
+	if !ml.gone[second] {
+		t.Error("the row whose write landed was lifted out of gone")
+	}
+	if got := len(ml.threads); got != 2 ||
+		ml.threads[0].Subject != "Third" || ml.threads[1].Subject != "First" {
+		t.Fatalf("the wrong row was restored: %+v", ml.threads)
 	}
 }
 
@@ -418,8 +461,8 @@ func TestMailListPagingAfterAHiddenRowDoesNotRepeat(t *testing.T) {
 		t.Fatalf("first page has %d threads, want %d", len(firstPage), pageSize)
 	}
 	dropped := ml.threads[0]
-	ml.dropSelected()
-	ml.commit() // the write landed; only the loads already in flight are stale
+	key := ml.dropSelected()
+	ml.commit(key) // the write landed; only the loads already in flight are stale
 
 	// A load that started before the write landed comes back with all of the
 	// page the store returned, dropped row included; keep hides it.

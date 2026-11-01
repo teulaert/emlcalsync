@@ -211,15 +211,18 @@ func threadKey(t model.Thread) string {
 	return t.AccountID + "\x00" + t.ThreadID
 }
 
-// dropSelected removes the row under the cursor, remembering it for restore.
-func (m *mailList) dropSelected() {
+// dropSelected removes the row under the cursor, remembering it for restore,
+// and returns its key: the key names this drop in the write's result, which
+// arrives later and possibly after another drop of its own.
+func (m *mailList) dropSelected() string {
 	if m.cursor < 0 || m.cursor >= len(m.threads) {
-		return
+		return ""
 	}
+	key := threadKey(m.threads[m.cursor])
 	if m.gone == nil {
 		m.gone = map[string]bool{}
 	}
-	m.gone[threadKey(m.threads[m.cursor])] = true
+	m.gone[key] = true
 	m.removed = append(m.removed, removedRow{at: m.cursor, t: m.threads[m.cursor]})
 	m.threads = append(m.threads[:m.cursor], m.threads[m.cursor+1:]...)
 	if m.cursor >= len(m.threads) {
@@ -228,16 +231,19 @@ func (m *mailList) dropSelected() {
 	if m.cursor < 0 {
 		m.cursor = 0
 	}
+	return key
 }
 
-// restore puts the last optimistically removed row back.
-func (m *mailList) restore() {
-	if len(m.removed) == 0 {
+// restore puts the optimistically removed row named by key back. A result
+// only restores its own drop, so two writes in flight cannot put back each
+// other's row.
+func (m *mailList) restore(key string) {
+	i := m.indexOfRemoved(key)
+	if i < 0 {
 		return
 	}
-	r := m.removed[len(m.removed)-1]
-	m.removed = m.removed[:len(m.removed)-1]
-	key := threadKey(r.t)
+	r := m.removed[i]
+	m.removed = append(m.removed[:i], m.removed[i+1:]...)
 	delete(m.gone, key)
 	delete(m.landed, key)
 	if r.at > len(m.threads) {
@@ -245,6 +251,15 @@ func (m *mailList) restore() {
 	}
 	m.threads = append(m.threads[:r.at], append([]model.Thread{r.t}, m.threads[r.at:]...)...)
 	m.cursor = r.at
+}
+
+func (m *mailList) indexOfRemoved(key string) int {
+	for i := range m.removed {
+		if threadKey(m.removed[i].t) == key {
+			return i
+		}
+	}
+	return -1
 }
 
 // keep drops the threads this screen has triaged away from a load result.
@@ -262,20 +277,21 @@ func (m *mailList) keep(threads []model.Thread) []model.Thread {
 }
 
 // commit says the write landed: from here on a failure cannot put the row
-// back, because the engine rolled nothing back. The oldest drop still waiting
-// is the one that landed -- the writes go out in order. The thread stays in
-// gone until a load started after this point comes back: results already on
-// their way were queried against the index before the patch and still have it.
-func (m *mailList) commit() {
-	if len(m.removed) == 0 {
+// back, because the engine rolled nothing back. key names the row its own
+// write dropped, so results delivered out of order still commit the right
+// one. The thread stays in gone until a load started after this point comes
+// back: results already on their way were queried against the index before
+// the patch and still have it.
+func (m *mailList) commit(key string) {
+	i := m.indexOfRemoved(key)
+	if i < 0 {
 		return
 	}
-	r := m.removed[0]
-	m.removed = m.removed[1:]
+	m.removed = append(m.removed[:i], m.removed[i+1:]...)
 	if m.landed == nil {
 		m.landed = map[string]int{}
 	}
-	m.landed[threadKey(r.t)] = m.seq
+	m.landed[key] = m.seq
 }
 
 // forgetLanded stops hiding the threads whose write landed before this load
@@ -297,7 +313,7 @@ func (m *mailList) forgetLanded(seq int) {
 // after that, so forgetLanded lifts the thread out before the result is
 // filtered. The thread view has no such load to lean on -- its reload shows a
 // message whatever mailbox it sits in -- so it lifts the message out itself.
-func (m *mailList) unhide() {}
+func (m *mailList) unhide(string) {}
 
 // anchor names the row the cursor is on, so it can be found again in the
 // result of a reload.
