@@ -60,6 +60,11 @@ type threadView struct {
 	// the action looks like it did nothing.
 	gone map[string]bool
 
+	// done is the remote of the last drop whose write landed, what undo needs
+	// to lift out of gone once commit has taken the row off removed. See the
+	// mailList field of the same name.
+	done string
+
 	seq     int
 	loading bool
 	loadErr error
@@ -214,7 +219,32 @@ func (t *threadView) restore() {
 	t.dirty, t.off = true, -1
 }
 
-func (t *threadView) commit() { t.removed = nil }
+// commit says the write landed: a failure after this must not put the message
+// back, the engine rolled nothing back. The oldest drop still waiting is the
+// one that landed -- the writes go out in order -- and undo still needs its
+// remote to lift the message out of gone, so it moves to done rather than
+// away.
+func (t *threadView) commit() {
+	if len(t.removed) == 0 {
+		return
+	}
+	t.done = t.removed[0].m.RemoteID
+	t.removed = t.removed[1:]
+}
+
+// unhide lifts the last landed message out of gone, for undo. By the time
+// undo runs, commit has taken the message off removed -- a failure after the
+// write landed must not put it back -- but the undo's reload has to see it all
+// the same: GetThread returns the message whatever mailbox it sits in, and
+// gone is what would keep it hidden. The reload puts it back where it belongs;
+// no optimistic reinsert is needed.
+func (t *threadView) unhide() {
+	if t.done == "" {
+		return
+	}
+	delete(t.gone, t.done)
+	t.done = ""
+}
 
 // keepUnread stops the expanded view from marking one message read again. The
 // user has just marked it unread by hand and the cursor is still on it, so the

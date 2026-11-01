@@ -65,6 +65,24 @@ type mailList struct {
 	// removed holds rows taken out optimistically, so a failed action can put
 	// them back where they were.
 	removed []removedRow
+
+	// done is the thread key of the last drop whose write landed. Undo has to
+	// lift that row out of gone -- see unhide -- but commit has taken it off
+	// removed by then, because a failure after the landing must not put it
+	// back. The key is all undo needs: the row itself comes back in the
+	// reload the undo starts.
+	done string
+
+	// gone are the threads triaged away from this screen. The drop hides the
+	// row at once, but the write lands behind it, and every load that started
+	// before it -- the daemon commits every couple of seconds, so there is
+	// usually one in flight -- still has the row in its result. Without this
+	// the reload puts the message straight back, and the next reload a moment
+	// later takes it away again: the action looks like it flickered. The set
+	// outlives commit, because the row is not out of the query until the
+	// index patch lands; restore and unhide take keys out, so undo brings
+	// them back.
+	gone map[string]bool
 }
 
 type removedRow struct {
@@ -116,8 +134,14 @@ func (m *mailList) Init() tea.Cmd { return m.reload() }
 func (m *mailList) reload() tea.Cmd { return m.load(false) }
 
 // reloadFresh is reload for a view that has just changed -- another mailbox,
-// account or query -- where the old cursor means nothing.
-func (m *mailList) reloadFresh() tea.Cmd { return m.load(true) }
+// account or query -- where the old cursor means nothing. The triaged-away
+// rows are forgotten too: a thread trashed out of the inbox is exactly what
+// the all-mail view has to show, so the new view must not inherit the old
+// view's gone set.
+func (m *mailList) reloadFresh() tea.Cmd {
+	m.gone, m.done = nil, ""
+	return m.load(true)
+}
 
 func (m *mailList) load(reset bool) tea.Cmd {
 	m.seq++
@@ -172,11 +196,21 @@ func (m *mailList) selected() *model.Thread {
 	return &m.threads[m.cursor]
 }
 
+// threadKey is how a row is named within the list, the same string anchor
+// and reanchor use.
+func threadKey(t model.Thread) string {
+	return t.AccountID + "\x00" + t.ThreadID
+}
+
 // dropSelected removes the row under the cursor, remembering it for restore.
 func (m *mailList) dropSelected() {
 	if m.cursor < 0 || m.cursor >= len(m.threads) {
 		return
 	}
+	if m.gone == nil {
+		m.gone = map[string]bool{}
+	}
+	m.gone[threadKey(m.threads[m.cursor])] = true
 	m.removed = append(m.removed, removedRow{at: m.cursor, t: m.threads[m.cursor]})
 	m.threads = append(m.threads[:m.cursor], m.threads[m.cursor+1:]...)
 	if m.cursor >= len(m.threads) {
@@ -194,6 +228,7 @@ func (m *mailList) restore() {
 	}
 	r := m.removed[len(m.removed)-1]
 	m.removed = m.removed[:len(m.removed)-1]
+	delete(m.gone, threadKey(r.t))
 	if r.at > len(m.threads) {
 		r.at = len(m.threads)
 	}
@@ -201,7 +236,45 @@ func (m *mailList) restore() {
 	m.cursor = r.at
 }
 
-func (m *mailList) commit() { m.removed = nil }
+// keep drops the threads this screen has triaged away from a load result.
+func (m *mailList) keep(threads []model.Thread) []model.Thread {
+	if len(m.gone) == 0 {
+		return threads
+	}
+	out := threads[:0]
+	for i := range threads {
+		if !m.gone[threadKey(threads[i])] {
+			out = append(out, threads[i])
+		}
+	}
+	return out
+}
+
+// commit says the write landed: from here on a failure cannot put the row
+// back, because the engine rolled nothing back. The oldest drop still waiting
+// is the one that landed -- the writes go out in order -- and undo still needs
+// its key to lift the row out of gone, so it moves to done rather than away.
+func (m *mailList) commit() {
+	if len(m.removed) == 0 {
+		return
+	}
+	m.done = threadKey(m.removed[0].t)
+	m.removed = m.removed[1:]
+}
+
+// unhide lifts the last landed row out of gone, for undo. By the time undo
+// runs, commit has taken the row off removed -- a failure after the write
+// landed must not put it back -- but the undo's reload has to see it all the
+// same: the engine patched the index before apply returned, so the query
+// returns the row, and gone is what would keep it hidden. The reload puts it
+// back where it belongs; no optimistic reinsert is needed.
+func (m *mailList) unhide() {
+	if m.done == "" {
+		return
+	}
+	delete(m.gone, m.done)
+	m.done = ""
+}
 
 // anchor names the row the cursor is on, so it can be found again in the
 // result of a reload.
@@ -249,17 +322,20 @@ func (m *mailList) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) {
 			if len(msg.threads) == 0 {
 				m.atEnd = true
 			}
-			m.threads = append(m.threads, msg.threads...)
+			m.threads = append(m.threads, m.keep(msg.threads)...)
 		} else {
 			anchor, at := m.anchor()
-			m.threads = msg.threads
+			// The page was full before anything was filtered out; atEnd is
+			// about what the store returned, not about what stayed.
+			n := len(msg.threads)
+			m.threads = m.keep(msg.threads)
 			if m.resetCursor {
 				m.cursor, m.top = 0, 0
 			} else {
 				m.reanchor(anchor, at)
 				m.scroll(listRows(h))
 			}
-			if len(msg.threads) < pageSize {
+			if n < pageSize {
 				m.atEnd = true
 			}
 		}

@@ -38,10 +38,14 @@ type capturing interface{ capturingKeys() bool }
 
 // triageable is implemented by the screens whose rows can be acted on, so the
 // root can update them optimistically without knowing which one it holds.
+// restore and unhide differ in who calls them: a failed write puts its row
+// back where it was, undo lifts the row of a landed write out of the screen's
+// gone set so the reload it starts can see it again.
 type triageable interface {
 	dropSelected()
 	restore()
 	commit()
+	unhide()
 }
 
 type root struct {
@@ -1025,9 +1029,13 @@ func (r *root) applyUndo() tea.Cmd {
 	u := r.undo
 	r.undo = nil
 	r.note("undoing " + u.label + "…")
-	// Put the row back straight away; the reload that follows confirms it.
+	// Put the row back straight away when the write has not landed yet; the
+	// reload that follows confirms it. When it has, commit took the row off
+	// the screen's removed already, and undo instead lifts it out of gone so
+	// this reload sees it.
 	if t := r.triageScreen(); t != nil {
 		t.restore()
+		t.unhide()
 	}
 	return tea.Batch(r.d.apply("undo "+u.label, u.ops, nil), r.top().reload())
 }
