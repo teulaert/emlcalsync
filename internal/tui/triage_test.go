@@ -191,6 +191,12 @@ func TestArchiveFromTheListReachesTheProviderAndUndoRestoresIt(t *testing.T) {
 	if contains(boxes, "ARCHIVE") {
 		t.Errorf("after undo the provider still has ARCHIVE: %v", boxes)
 	}
+	// Undo is offered only after the archive landed, so the row had already
+	// been committed; the reload undo starts is the load that lifts it out
+	// of gone and puts it back on screen.
+	if got := len(r.top().(*mailList).threads); got != 1 {
+		t.Errorf("undo did not put the archived row back (%d rows)", got)
+	}
 }
 
 func TestTrashFromTheListReachesTheProvider(t *testing.T) {
@@ -278,7 +284,7 @@ func TestMailListAllViewKeepsItsRowAfterTheActionLands(t *testing.T) {
 // invisible. The landed row is only hidden from loads that were already in
 // flight against the unpatched index; a reply that makes the thread match the
 // query again has to show up on the next load.
-func TestMailListARepliesToAnArchivedThreadShowsUp(t *testing.T) {
+func TestMailListAReplyToAnArchivedThreadShowsUp(t *testing.T) {
 	d, mail := newTriageDeps(t)
 	addTriageMessage(t, d, mail, "m1", "Old question", 2*time.Hour)
 
