@@ -1092,6 +1092,17 @@ func rereads(action string) bool {
 }
 
 func (r *root) onApplied(a applied) tea.Cmd {
+	// On IMAP a move mints a new uid, and the id this drop keyed by stops
+	// naming the message. The thread view hides by remote id, so its gone and
+	// removed entries have to move to the new id before commit or restore
+	// look for the old one; undo's key has to follow as well.
+	if tv, ok := a.drop.(*threadView); ok && len(a.renames) > 0 {
+		old := a.key
+		a.key = tv.rename(a.renames, a.key)
+		if a.undo != nil && a.undo.drop == a.drop && a.undo.key == old {
+			a.undo.key = a.key
+		}
+	}
 	if a.err != nil {
 		if a.drop != nil && triaged(a.action) {
 			a.drop.restore(a.key)

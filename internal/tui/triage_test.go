@@ -18,9 +18,38 @@ import (
 	"github.com/teulaert/emlcalsync/internal/sync"
 )
 
+// renamingMail reports the new ids an IMAP move mints, the way the real
+// backend does: the provider moves the message, then says what the old id
+// became.
+type renamingMail struct {
+	provider.MailProvider
+	writeRenames []provider.Rename
+}
+
+func (r *renamingMail) SetMailboxesRemap(ctx context.Context, ids, add, remove []string) ([]provider.Rename, error) {
+	err := r.MailProvider.SetMailboxes(ctx, ids, add, remove)
+	return r.takeRenames(), err
+}
+
+func (r *renamingMail) TrashRemap(ctx context.Context, ids []string) ([]provider.Rename, error) {
+	err := r.MailProvider.Trash(ctx, ids)
+	return r.takeRenames(), err
+}
+
+func (r *renamingMail) RestoreRemap(ctx context.Context, ids []string) ([]provider.Rename, error) {
+	err := r.MailProvider.Restore(ctx, ids)
+	return r.takeRenames(), err
+}
+
+func (r *renamingMail) takeRenames() []provider.Rename {
+	out := r.writeRenames
+	r.writeRenames = nil
+	return out
+}
+
 // fakeFactory hands the engine one in-memory mail provider and one calendar.
 type fakeFactory struct {
-	mail *fake.Mail
+	mail provider.MailProvider
 	cal  *fake.Calendar
 }
 
@@ -49,6 +78,15 @@ func newTriageDeps(t *testing.T) (Deps, *fake.Mail) {
 // engine writes to as well, for the actions that land there.
 func newTriageDepsWithCalendar(t *testing.T) (Deps, *fake.Mail, *fake.Calendar) {
 	t.Helper()
+	return newTriageDepsWithMail(t, model.BackendJMAP,
+		func(m *fake.Mail) provider.MailProvider { return m })
+}
+
+// newTriageDepsWithMail is newTriageDepsWithCalendar with a provider wrapper
+// and a backend, for the backends whose writes change the ids the engine hands
+// back and whose writes wait for the round trip rather than being deferred.
+func newTriageDepsWithMail(t *testing.T, backend model.Backend, providerFor func(*fake.Mail) provider.MailProvider) (Deps, *fake.Mail, *fake.Calendar) {
+	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "index.db"))
 	if err != nil {
@@ -63,6 +101,7 @@ func newTriageDepsWithCalendar(t *testing.T) (Deps, *fake.Mail, *fake.Calendar) 
 	}
 
 	acct := config.NewAccount("work", "work@example.com", model.VendorFastmail)
+	acct.Mail.Backend = backend
 	cfg := &config.Config{Accounts: []config.Account{acct}}
 
 	ctx := context.Background()
@@ -88,7 +127,7 @@ func newTriageDepsWithCalendar(t *testing.T) (Deps, *fake.Mail, *fake.Calendar) 
 		Store:     st,
 		Blobs:     blobs,
 		Config:    cfg,
-		Providers: &fakeFactory{mail: mail, cal: cal},
+		Providers: &fakeFactory{mail: providerFor(mail), cal: cal},
 		Logger:    slog.New(slog.DiscardHandler),
 	})
 	if err != nil {
@@ -104,6 +143,18 @@ func newTriageDepsWithCalendar(t *testing.T) (Deps, *fake.Mail, *fake.Calendar) 
 		Now:      func() time.Time { return testNow },
 		Logger:   slog.New(slog.DiscardHandler),
 	}, mail, cal
+}
+
+// newTriageDepsRemapping is newTriageDeps with a provider that hands back the
+// new ids a move mints, the way IMAP does.
+func newTriageDepsRemapping(t *testing.T) (Deps, *fake.Mail, *renamingMail) {
+	t.Helper()
+	rm := &renamingMail{}
+	d, mail, _ := newTriageDepsWithMail(t, model.BackendIMAP, func(m *fake.Mail) provider.MailProvider {
+		rm.MailProvider = m
+		return rm
+	})
+	return d, mail, rm
 }
 
 // addTriageMessage indexes one message and gives the fake provider the same
@@ -601,6 +652,48 @@ func TestThreadViewOutOfOrderResultsRestoreTheRightMessage(t *testing.T) {
 	if got := len(tv.messages); got != 2 ||
 		tv.messages[0].RemoteID != "m3" || tv.messages[1].RemoteID != "m1" {
 		t.Fatalf("the wrong message was restored: %+v", tv.messages)
+	}
+}
+
+// On IMAP a move mints a new uid. The thread view hides a trashed message by
+// remote id, so gone and the drop key have to follow the rename; otherwise
+// the reload returns the message under its new id and gone does not hide it,
+// putting the trashed message back in the thread for good.
+func TestThreadTrashFollowsTheRenamedIDOnReload(t *testing.T) {
+	d, mail, rm := newTriageDepsRemapping(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	if len(tv.messages) != 2 {
+		t.Fatalf("thread has %d messages, want 2", len(tv.messages))
+	}
+
+	rm.writeRenames = []provider.Rename{{Old: "m2", New: "m2-new"}}
+	send(t, r, "d")
+
+	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Fatalf("after the trash the thread holds %+v, want only m1", tv.messages)
+	}
+	if r.undo == nil {
+		t.Fatal("the trash offered no undo")
+	}
+	if r.undo.key != "m2-new" {
+		t.Errorf("undo key = %q, want the renamed id", r.undo.key)
+	}
+	if tv.gone["m2"] {
+		t.Error("gone still hides the old id")
+	}
+	if !tv.gone["m2-new"] {
+		t.Error("gone does not hide the renamed id")
+	}
+
+	drain(t, r, tv.reload())
+	if got := len(tv.messages); got != 1 || tv.messages[0].RemoteID != "m1" {
+		t.Fatalf("the renamed trashed message came back: %+v", tv.messages)
 	}
 }
 

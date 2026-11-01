@@ -252,6 +252,39 @@ func (t *threadView) unhide(key string) {
 	delete(t.gone, key)
 }
 
+// rename follows a moved message's new remote id through gone and removed,
+// and through key when it names the dropped message. On IMAP a move mints a
+// uid: the id the drop keyed by stops naming anything, and the reload returns
+// the message under its new id. Without moving gone with it the trashed
+// message comes back and stays back, which is the flicker this screen exists
+// to prevent.
+func (t *threadView) rename(renames map[string]string, key string) string {
+	for pub, to := range renames {
+		from, err := model.ParseID(pub)
+		if err != nil || from.Account != t.accountID {
+			continue
+		}
+		next, err := model.ParseID(to)
+		if err != nil || next.Account != t.accountID ||
+			from.Kind != model.KindMessage || next.Kind != model.KindMessage {
+			continue
+		}
+		if t.gone[from.Remote] {
+			delete(t.gone, from.Remote)
+			t.gone[next.Remote] = true
+		}
+		for i := range t.removed {
+			if t.removed[i].m.RemoteID == from.Remote {
+				t.removed[i].m.RemoteID = next.Remote
+			}
+		}
+		if key == from.Remote {
+			key = next.Remote
+		}
+	}
+	return key
+}
+
 // keepUnread stops the expanded view from marking one message read again. The
 // user has just marked it unread by hand and the cursor is still on it, so the
 // next keystroke would otherwise undo them.
