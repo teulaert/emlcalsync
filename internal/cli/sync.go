@@ -47,7 +47,8 @@ The first pass is a resumable backfill of the whole account; later passes only
 apply the provider's delta. --watch turns the command into the daemon: push
 streams where the provider has them, polling where it does not, plus outbox
 retries. Running a manual sync while the daemon is up nudges the daemon instead
-of fighting it for the lock.
+of fighting it for the lock; with --full it also asks the daemon to make that
+pass a full one, which then runs in the background.
 
 A backfill of a large mailbox takes hours, so losing the network is treated as
 a pause rather than a failure: the pass waits up to --wait-offline for it to
@@ -104,19 +105,23 @@ func coreSyncOnce(app *App, opts sync.SyncOptions, quiet bool) error {
 		reports, err = eng.SyncAll(ctx, opts)
 	} else {
 		for _, name := range names {
-			var r *sync.Report
-			r, err = eng.SyncAccount(ctx, name, opts)
+			r, aerr := eng.SyncAccount(ctx, name, opts)
 			if r != nil {
 				reports = append(reports, r)
 			}
-			if err != nil {
-				break
+			if aerr != nil {
+				err = aerr
+				// The daemon holding one account's lock says nothing about
+				// the next one, which may still be ours to sync.
+				if !errors.Is(aerr, sync.ErrLocked) {
+					break
+				}
 			}
 		}
 	}
 	coreClearProgress(app)
 	if err != nil && errors.Is(err, sync.ErrLocked) {
-		return coreNudgeDaemon(app)
+		return coreNudgeDaemon(app, eng, opts, reports)
 	}
 	if err != nil && len(reports) == 0 {
 		return err
@@ -128,7 +133,7 @@ func coreSyncOnce(app *App, opts sync.SyncOptions, quiet bool) error {
 	}
 	if worst != nil {
 		if errors.Is(worst, sync.ErrLocked) {
-			return coreNudgeDaemon(app)
+			return coreNudgeDaemon(app, eng, opts, reports)
 		}
 		if provider.IsOffline(worst) {
 			return output.Errorf(output.ExitOffline, "sync: %v", worst)
@@ -211,10 +216,26 @@ func coreClearProgress(app *App) {
 
 // coreNudgeDaemon signals a running daemon to sync now. Not finding one is an
 // error: the lock was held by something, and silently exiting 0 would lie.
-func coreNudgeDaemon(app *App) error {
+//
+// A nudge carries no options, so --full is handed over separately: a request
+// stored for every account whose lock was held, which the daemon's pass
+// honours. Without it the daemon ran an ordinary delta and --full was lost.
+func coreNudgeDaemon(app *App, eng *sync.Engine, opts sync.SyncOptions, reports []*sync.Report) error {
 	cfg, err := app.Config()
 	if err != nil {
 		return err
+	}
+	var requested []string
+	if opts.Full {
+		for _, r := range reports {
+			if r == nil || !errors.Is(r.Err, sync.ErrLocked) {
+				continue
+			}
+			if err := eng.RequestFull(app.Context(), r.Account, opts); err != nil {
+				return err
+			}
+			requested = append(requested, r.Account)
+		}
 	}
 	pid, err := sync.NudgeDaemon(sync.PidPath(cfg))
 	switch {
@@ -226,6 +247,11 @@ func coreNudgeDaemon(app *App) error {
 			"another sync holds the lock but the daemon pid file is stale (pid %d is a different process); retry in a moment", pid)
 	case err != nil:
 		return output.Errorf(output.ExitGeneric, "another sync holds the lock (pid %d): %v", pid, err)
+	}
+	if len(requested) > 0 {
+		fmt.Fprintf(app.Stdout, "daemon active — full sync of %s requested, nudged (pid %d); it runs in the background\n",
+			strings.Join(requested, ", "), pid)
+		return nil
 	}
 	fmt.Fprintf(app.Stdout, "daemon active — nudged (pid %d)\n", pid)
 	return nil

@@ -258,7 +258,8 @@ func (e *Engine) syncAccount(ctx context.Context, acct config.Account, o SyncOpt
 		default:
 			// --full only applies to the first attempt: once a backfill row
 			// exists, a retry has to resume it rather than start over.
-			full := o.Full
+			requested := e.fullRequested(ctx, acct.Name, resourceMail)
+			full := o.Full || requested
 			r, err := e.syncResource(ctx, acct, o, resourceMail, func(c context.Context) (*ResourceReport, error) {
 				rr, err := e.syncMail(c, acct, full)
 				if rr != nil && (rr.Kind == KindBackfill || rr.Kind == KindResume) {
@@ -267,6 +268,9 @@ func (e *Engine) syncAccount(ctx context.Context, acct config.Account, o SyncOpt
 				return rr, err
 			})
 			rep.Mail = r
+			if err == nil && requested {
+				e.fullDone(ctx, acct.Name, resourceMail)
+			}
 			if err != nil {
 				if errors.Is(err, provider.ErrNotSupported) {
 					e.log.Info("mail sync skipped", "account", acct.Name, "reason", err)
@@ -287,10 +291,14 @@ func (e *Engine) syncAccount(ctx context.Context, acct config.Account, o SyncOpt
 		case len(acct.Calendars) == 0:
 			// Nothing selected: not disabled, just empty.
 		default:
+			requested := e.fullRequested(ctx, acct.Name, resourceCalendar)
 			r, err := e.syncResource(ctx, acct, o, resourceCalendar, func(c context.Context) (*ResourceReport, error) {
-				return e.syncCalendar(c, acct, o.Full)
+				return e.syncCalendar(c, acct, o.Full || requested)
 			})
 			rep.Calendar = r
+			if err == nil && requested {
+				e.fullDone(ctx, acct.Name, resourceCalendar)
+			}
 			if err != nil {
 				if errors.Is(err, provider.ErrNotSupported) {
 					e.log.Info("calendar sync skipped", "account", acct.Name, "reason", err)
@@ -303,6 +311,49 @@ func (e *Engine) syncAccount(ctx context.Context, acct config.Account, o SyncOpt
 		}
 	}
 	return rep, nil
+}
+
+// fullRequestPrefix marks a sync_state row that asks for a full pass rather
+// than holding a delta state: "full:mail", "full:calendar".
+const fullRequestPrefix = "full:"
+
+// RequestFull asks for the next pass over an account to be a full one, for
+// the resources o selects. It is how `sync --full` reaches a daemon that holds
+// the account's lock: the request is stored, the daemon is nudged, and its
+// pass picks the request up. A request outlives a daemon that is not running,
+// so whichever sync runs next honours it.
+func (e *Engine) RequestFull(ctx context.Context, account string, o SyncOptions) error {
+	o = o.resolved()
+	for _, res := range []struct {
+		on   bool
+		name string
+	}{{o.Mail, resourceMail}, {o.Calendar, resourceCalendar}} {
+		if !res.on {
+			continue
+		}
+		if err := e.st.SetState(ctx, account, fullRequestPrefix+res.name, "requested"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// fullRequested reports whether RequestFull asked for a full pass over the
+// resource. A failed read is logged and taken as no: the pass still runs.
+func (e *Engine) fullRequested(ctx context.Context, account, resource string) bool {
+	st, err := e.st.GetState(ctx, account, fullRequestPrefix+resource)
+	if err != nil {
+		e.log.Warn("read full-sync request", "account", account, "resource", resource, "err", err)
+		return false
+	}
+	return st != ""
+}
+
+// fullDone retires a request once a full pass has honoured it.
+func (e *Engine) fullDone(ctx context.Context, account, resource string) {
+	if err := e.st.ClearState(ctx, account, fullRequestPrefix+resource); err != nil {
+		e.log.Warn("clear full-sync request", "account", account, "resource", resource, "err", err)
+	}
 }
 
 // syncResource runs one resource of one account, riding out network outages

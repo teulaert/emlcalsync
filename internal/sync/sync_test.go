@@ -580,3 +580,22 @@ func (h *harness) sentMessages() [][]byte {
 	defer h.mail.mu.Unlock()
 	return append([][]byte(nil), h.mail.sentRaw...)
 }
+
+// `sync --full` against a daemon that holds the lock can only nudge it, and a
+// nudge carries no options. RequestFull is how the flag gets there: the next
+// pass is a full one, and only that one.
+func TestRequestFullMakesTheNextPassAFullOne(t *testing.T) {
+	h := newHarness(t)
+	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one")})
+	h.sync(SyncOptions{Mail: true})
+
+	if err := h.eng.RequestFull(context.Background(), "work", SyncOptions{Mail: true}); err != nil {
+		t.Fatalf("RequestFull: %v", err)
+	}
+	if rep := h.sync(SyncOptions{Mail: true}); rep.Mail.Kind != KindReconcile {
+		t.Fatalf("pass after the request = %q, want %q", rep.Mail.Kind, KindReconcile)
+	}
+	if rep := h.sync(SyncOptions{Mail: true}); rep.Mail.Kind != KindDelta {
+		t.Fatalf("pass after that = %q, want %q (the request is spent)", rep.Mail.Kind, KindDelta)
+	}
+}
