@@ -877,8 +877,21 @@ func (r *root) onSubmitted(s submitted) tea.Cmd {
 }
 
 // triage archives, trashes or restores what the top screen has selected.
+//
+// A thread laid out as one document (the expanded view) reads as the
+// conversation, the way its row on the list does, so there the key takes
+// every message and closes the thread, as it would have from the list.
+// Taking only the message under the cursor -- the newest, where the view
+// opens -- left the rest of the conversation in the inbox and its row on the
+// list. The compact index keeps triaging one row at a time, and so does the
+// reader.
 func (r *root) triage(what string) tea.Cmd {
 	ts := r.top().targets()
+	tv, _ := r.top().(*threadView)
+	whole := tv != nil && tv.expanded
+	if whole {
+		ts = tv.threadTargets()
+	}
 	if len(ts) == 0 {
 		return nil
 	}
@@ -902,11 +915,18 @@ func (r *root) triage(what string) tea.Cmd {
 	switch s := r.top().(type) {
 	case *reader:
 		follow, key = r.followOn(s)
-	case triageable:
+	case *threadView:
+		if whole {
+			// The row the drop belongs to is the thread's on the list.
+			follow, key = r.closeThread()
+			break
+		}
 		key = s.dropSelected()
-		if tv, ok := s.(*threadView); ok && len(tv.messages) == 0 {
+		if len(s.messages) == 0 {
 			follow, key = r.closeThread()
 		}
+	case triageable:
+		key = s.dropSelected()
 	}
 	// The row that went belongs to the screen left on top once the follow has
 	// run: a reader whose thread still has a message leaves the thread, and one

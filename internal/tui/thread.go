@@ -115,6 +115,16 @@ func (t *threadView) targets() []target {
 	return []target{targetOf(m)}
 }
 
+// threadTargets is every message the thread shows, for the triage that takes
+// the whole conversation (see root.triage).
+func (t *threadView) threadTargets() []target {
+	out := make([]target, 0, len(t.messages))
+	for i := range t.messages {
+		out = append(out, targetOf(&t.messages[i]))
+	}
+	return out
+}
+
 // invite is the calendar card of the message under the cursor, or nil.
 func (t *threadView) invite() *readerInvite {
 	m := t.selected()

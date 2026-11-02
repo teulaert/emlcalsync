@@ -1475,11 +1475,14 @@ first full build and the two adversarial reviews (`docs/reviews/`).
     read, the same rule as opening one in the reader — its text is on screen.
     The collapsed view leaves the flag alone: a row is not a message you have
     read.
-  - **Triage moves on.** `e`/`d` in a thread drops the message and leaves the
-    cursor on the next one down; in the reader it drops the message from the
-    thread underneath and reads on. Either way, a thread with nothing left
-    closes and takes its row on the list with it — which is what a
-    one-message thread, most of them, amounts to. The reader has no rows of
+  - **Triage takes what the screen shows.** In the expanded thread, which
+    lays the conversation out as one document, `e`/`d` take every message in
+    it and close the thread, as the same key on its row of the list would.
+    In the compact index they drop the message under the cursor and leave
+    the cursor on the next one down; in the reader they drop the message
+    from the thread underneath and read on. Either way, a thread with
+    nothing left closes and takes its row on the list with it — which is
+    what a one-message thread, most of them, amounts to. The reader has no rows of
     its own, so its optimistic drop — and the restore or commit that follows
     it — is applied to the screen one level down, which is also what keeps
     `z` working from in there.

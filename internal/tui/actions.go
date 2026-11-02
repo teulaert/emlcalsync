@@ -18,9 +18,9 @@ import (
 type target struct {
 	account string
 	remote  string
-	// mailboxes is the message's membership set before the action. Trash wipes
-	// it (mailboxPatch sets clearOthers), so an exact undo is only possible if
-	// it was captured first.
+	// mailboxes is the message's membership set before the action. Trash on a
+	// folder store wipes it (mailboxPatch sets clearOthers), so an exact undo
+	// is only possible if it was captured first.
 	mailboxes []string
 	flags     model.Flags
 }
@@ -128,8 +128,9 @@ func archiveOps(ctx context.Context, st *store.Store, ts []target) ([]accountOp,
 
 // trashOps builds the trash, plus the inverse.
 //
-// OpTrash sets clearOthers, so every other membership is dropped locally; the
-// only honest undo is to replay the set each message had beforehand. Trash
+// On a folder store OpTrash drops every other membership locally, and on
+// Gmail it drops INBOX; either way the only honest undo is to replay the set
+// each message had beforehand. Trash
 // itself is recoverable on both providers — Gmail adds the TRASH label, JMAP
 // files into the trash mailbox — so the message really does come back.
 func trashOps(ctx context.Context, st *store.Store, ts []target) ([]accountOp, *undoRecord) {

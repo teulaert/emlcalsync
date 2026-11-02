@@ -527,10 +527,74 @@ func TestTrashFromTheReaderClosesAThreadWithNothingLeft(t *testing.T) {
 	}
 }
 
-// The thread view is where a message is read now that threads open expanded,
-// so trashing from there is the common case. The reload that lands a second
-// later must not bring the message back: GetThread hands over the whole
-// conversation whatever mailbox each message sits in.
+// The expanded thread reads as the conversation, the way its row on the list
+// does, so e there archives every message and closes the thread -- as it
+// would have from the list. It used to take only the newest message, the one
+// the view opens on, which left the rest in the inbox and the row on the list.
+func TestArchiveFromTheExpandedThreadTakesTheWholeConversation(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	if tv, ok := r.top().(*threadView); !ok || !tv.expanded {
+		t.Fatalf("top = %T, want the expanded thread", r.top())
+	}
+
+	send(t, r, "e")
+
+	for _, id := range []string{"m1", "m2"} {
+		if _, boxes, _ := mail.Lookup(id); contains(boxes, "INBOX") || !contains(boxes, "ARCHIVE") {
+			t.Errorf("%s after archive: %v, want ARCHIVE and no INBOX", id, boxes)
+		}
+	}
+	ml, ok := r.top().(*mailList)
+	if !ok {
+		t.Fatalf("after archive top = %T, want to be back on the list", r.top())
+	}
+	drain(t, r, ml.reload())
+	if got := len(ml.threads); got != 0 {
+		t.Errorf("the archived conversation is still on the list (%d rows)", got)
+	}
+
+	send(t, r, "z")
+	for _, id := range []string{"m1", "m2"} {
+		if _, boxes, _ := mail.Lookup(id); !contains(boxes, "INBOX") {
+			t.Errorf("%s after undo: %v, want INBOX", id, boxes)
+		}
+	}
+	if got := len(r.top().(*mailList).threads); got != 1 {
+		t.Errorf("after undo the list has %d rows, want the conversation back", got)
+	}
+}
+
+// Only archive, trash and restore take the conversation; a star in the
+// expanded thread still lands on the message under the cursor.
+func TestStarInTheExpandedThreadStaysOnOneMessage(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
+	addTriageMessage(t, d, mail, "m2", "Newer", time.Hour)
+	inThread(t, d, "t-shared", "m1", "m2")
+
+	r := newTestRoot(t, d)
+	send(t, r, "enter")
+	tv := r.top().(*threadView)
+	cur := tv.selected().RemoteID
+	send(t, r, "s")
+
+	for _, id := range []string{"m1", "m2"} {
+		flags, _, _ := mail.Lookup(id)
+		if flags.Flagged != (id == cur) {
+			t.Errorf("%s flagged = %v; only %s should be starred", id, flags.Flagged, cur)
+		}
+	}
+}
+
+// Trashing one message from the thread index: the reload that lands a second
+// later must not bring the message back, because GetThread hands over the
+// whole conversation whatever mailbox each message sits in.
 func TestTrashFromTheThreadDropsTheMessageForGood(t *testing.T) {
 	d, mail := newTriageDeps(t)
 	addTriageMessage(t, d, mail, "m1", "Older", 2*time.Hour)
@@ -539,6 +603,7 @@ func TestTrashFromTheThreadDropsTheMessageForGood(t *testing.T) {
 
 	r := newTestRoot(t, d)
 	send(t, r, "enter")
+	send(t, r, "t") // the one-row index triages a message at a time
 	tv := r.top().(*threadView)
 	if len(tv.messages) != 2 {
 		t.Fatalf("thread has %d messages, want 2", len(tv.messages))
@@ -566,6 +631,7 @@ func TestTrashFromTheThreadUndoShowsTheMessageAgain(t *testing.T) {
 
 	r := newTestRoot(t, d)
 	send(t, r, "enter")
+	send(t, r, "t") // the one-row index triages a message at a time
 	tv := r.top().(*threadView)
 	send(t, r, "d")
 	if len(tv.messages) != 1 {
@@ -593,6 +659,7 @@ func TestThreadViewSettledFailureShowsTheMessageAgain(t *testing.T) {
 
 	r := newTestRoot(t, d)
 	send(t, r, "enter")
+	send(t, r, "t") // the one-row index triages a message at a time
 	tv := r.top().(*threadView)
 	cmd := r.triage("trash")
 	res := cmd().(applied)
@@ -623,6 +690,7 @@ func TestThreadViewSettledFailureUnhidesItsOwnMessage(t *testing.T) {
 
 	r := newTestRoot(t, d)
 	send(t, r, "enter")
+	send(t, r, "t") // the one-row index triages a message at a time
 	tv := r.top().(*threadView)
 	if len(tv.messages) != 3 {
 		t.Fatalf("thread has %d messages, want 3", len(tv.messages))
@@ -663,6 +731,7 @@ func TestThreadViewOutOfOrderResultsRestoreTheRightMessage(t *testing.T) {
 
 	r := newTestRoot(t, d)
 	send(t, r, "enter")
+	send(t, r, "t") // the one-row index triages a message at a time
 	tv := r.top().(*threadView)
 
 	first := tv.dropSelected()  // m3
@@ -697,6 +766,7 @@ func TestThreadTrashFollowsTheRenamedIDOnReload(t *testing.T) {
 
 	r := newTestRoot(t, d)
 	send(t, r, "enter")
+	send(t, r, "t") // the one-row index triages a message at a time
 	tv := r.top().(*threadView)
 	if len(tv.messages) != 2 {
 		t.Fatalf("thread has %d messages, want 2", len(tv.messages))
@@ -772,6 +842,7 @@ func TestFailedUndoLeavesTheTrashedMessageHidden(t *testing.T) {
 
 	r := newTestRoot(t, d)
 	send(t, r, "enter")
+	send(t, r, "t") // the one-row index triages a message at a time
 	tv := r.top().(*threadView)
 	send(t, r, "d")
 	if !tv.gone["m2"] {
@@ -807,6 +878,7 @@ func TestSettledUndoFailureKeepsTheMessageHidden(t *testing.T) {
 
 	r := newTestRoot(t, d)
 	send(t, r, "enter")
+	send(t, r, "t") // the one-row index triages a message at a time
 	tv := r.top().(*threadView)
 	send(t, r, "d")
 	if !tv.gone["m2"] {
