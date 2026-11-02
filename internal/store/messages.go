@@ -748,6 +748,8 @@ const localPatchWindow = 2 * time.Minute
 
 // fence is the state a recent local write left on a row.
 type fence struct {
+	// set is whether the row carries a fence at all, live or expired.
+	set       bool
 	live      bool
 	flags     model.Flags
 	mailboxes []string
@@ -793,10 +795,13 @@ func (tx *Tx) fenceOf(ctx context.Context, id int64) (fence, error) {
 	if err != nil {
 		return fence{}, fmt.Errorf("store: read local patch %d: %w", id, err)
 	}
-	if !at.Valid || time.Since(time.Unix(at.Int64, 0)) >= localPatchWindow {
+	if !at.Valid {
 		return fence{}, nil
 	}
-	f := fence{live: true, flags: model.Flags{
+	if time.Since(time.Unix(at.Int64, 0)) >= localPatchWindow {
+		return fence{set: true}, nil
+	}
+	f := fence{set: true, live: true, flags: model.Flags{
 		Unread: unread != 0, Flagged: flagged != 0, Draft: draft != 0, Answered: answered != 0,
 	}}
 	f.mailboxes, err = tx.mailboxRemotesOf(ctx, id)
@@ -897,15 +902,67 @@ func (tx *Tx) ApplyRemoteState(ctx context.Context, accountID, remote string, fl
 	if err != nil {
 		return false, err
 	}
-	if f.live {
-		if !f.agreesWith(flags, mailboxRemotes) {
-			return false, nil
-		}
+	if f.live && !f.agreesWith(flags, mailboxRemotes) {
+		return false, nil
+	}
+	// The provider's word is final now: either it agrees with the fence, or
+	// the fence has expired. An expired one is dropped too, so that
+	// StaleLocalPatches stops offering the row for a recheck.
+	if f.set {
 		if err := tx.setLocalPatch(ctx, id, time.Time{}); err != nil {
 			return false, err
 		}
 	}
 	return true, tx.UpdateMessageState(ctx, accountID, remote, flags, mailboxRemotes)
+}
+
+// StaleLocalPatches lists, oldest first, up to limit live messages whose fence
+// outlived localPatchWindow without the provider ever agreeing with it.
+//
+// A fence only comes down when a provider-side update matches it, and an
+// update that disagrees while the fence is live is dropped. When the local
+// patch was wrong -- or the write never went through -- the provider has
+// nothing further to say about the message, no later delta mentions it, and
+// the row would keep the patched state for good. The sync pass re-reads these
+// rows from the provider instead.
+func (s *Store) StaleLocalPatches(ctx context.Context, accountID string, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT remote_id FROM messages
+		 WHERE account_id = ? AND local_patch_at IS NOT NULL AND local_patch_at < ?
+		   AND deleted_at IS NULL
+		 ORDER BY local_patch_at LIMIT ?`,
+		accountID, time.Now().Add(-localPatchWindow).Unix(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: stale local patches: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var remote string
+		if err := rows.Scan(&remote); err != nil {
+			return nil, err
+		}
+		out = append(out, remote)
+	}
+	return out, rows.Err()
+}
+
+// ClearStaleLocalPatches drops the expired fences on the given messages, for
+// those the provider no longer returns. A fence raised since (a new local
+// write) is left alone.
+func (s *Store) ClearStaleLocalPatches(ctx context.Context, accountID string, remotes []string) error {
+	cutoff := time.Now().Add(-localPatchWindow).Unix()
+	return s.Tx(ctx, func(tx *Tx) error {
+		for _, remote := range remotes {
+			if _, err := tx.q.ExecContext(ctx, `
+				UPDATE messages SET local_patch_at = NULL
+				 WHERE account_id = ? AND remote_id = ? AND local_patch_at < ?`,
+				accountID, remote, cutoff); err != nil {
+				return fmt.Errorf("store: clear stale local patch %s:%s: %w", accountID, remote, err)
+			}
+		}
+		return nil
+	})
 }
 
 // ClearLocalPatch drops the fence for a local write that turned out not to

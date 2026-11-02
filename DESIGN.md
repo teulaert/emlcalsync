@@ -694,6 +694,15 @@ a rollback drops it too — a rejected write never happened, so the server is th
 truth again. Everything else a fetch brings (body, subject, thread) is written
 as it stands.
 
+A fence that expires without the provider ever agreeing is a patch the provider
+does not share: a wrong guess at what the write does (a Gmail trash once
+cleared every label locally, where Gmail keeps all but `INBOX`), or a write the
+outbox gave up on. Nothing in a later delta mentions the message, so the row
+would keep the patch for good. Every mail delta therefore re-reads the rows
+`store.StaleLocalPatches` returns — expired, unconfirmed fences — through the
+provider's envelope fetch, skipping messages a pending outbox write still
+names, and drops their fences.
+
 ### 7.4.2 Deferred writes
 
 `Engine.Apply` waits for the provider before returning. `Engine.ApplyLater`

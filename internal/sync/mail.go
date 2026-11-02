@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	stdsync "sync"
 	"time"
 
@@ -876,6 +877,10 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 		}
 	}
 
+	if canRefresh {
+		rep.Updated += r.recheckFences(ctx, ef, m)
+	}
+
 	rep.StateAfter = ch.NewState
 	if rep.StateAfter == "" {
 		rep.StateAfter = since
@@ -1091,6 +1096,45 @@ func (r *mailRun) reconcile(ctx context.Context, before string) (*ResourceReport
 	rep.Duration = time.Since(started)
 	r.finish(ctx, KindReconcile, started, rep, nil)
 	return rep, nil
+}
+
+// fenceRecheckBatch caps how many stale fences one delta re-reads.
+const fenceRecheckBatch = 200
+
+// recheckFences re-reads, from the provider, the messages whose local-write
+// fence expired without the provider ever confirming it (see
+// store.StaleLocalPatches): a wrong optimistic patch, or a write that never
+// went through. A message with a write still in the outbox is left alone --
+// its patch is what the user asked for and the provider has not been told
+// yet. Failures are logged, not returned: the delta itself has committed, and
+// the next pass asks again.
+func (r *mailRun) recheckFences(ctx context.Context, ef envelopeFetcher, m *meter) int {
+	ids, err := r.e.st.StaleLocalPatches(ctx, r.account(), fenceRecheckBatch)
+	if err == nil && len(ids) > 0 {
+		var queued map[string]bool
+		queued, err = r.e.queuedMessageIDs(ctx, r.account())
+		ids = slices.DeleteFunc(ids, func(id string) bool { return queued[id] })
+	}
+	if err != nil {
+		r.e.log.Warn("stale fence recheck", "account", r.account(), "err", err)
+		return 0
+	}
+	if len(ids) == 0 {
+		return 0
+	}
+	n, err := r.refreshEnvelopes(ctx, ef, ids, m)
+	if err != nil {
+		r.e.log.Warn("stale fence recheck", "account", r.account(), "err", err)
+		return n
+	}
+	// refreshEnvelopes dropped the fence of every message the provider
+	// returned; the rest are gone there, which is the delta's business.
+	if err := r.e.st.ClearStaleLocalPatches(ctx, r.account(), ids); err != nil {
+		r.e.log.Warn("stale fence recheck", "account", r.account(), "err", err)
+	}
+	r.e.log.Info("stale local patches re-read", "account", r.account(),
+		"messages", len(ids), "updated", n)
+	return n
 }
 
 // refreshEnvelopes re-applies current flags/mailboxes for ids in chunks.

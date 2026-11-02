@@ -136,6 +136,7 @@ func (e *Engine) Apply(ctx context.Context, account string, op Op) (*ApplyResult
 	if !ok {
 		return nil, fmt.Errorf("sync: unknown account %q", account)
 	}
+	op.normalize()
 	id, undo, err := e.enqueue(ctx, *acct, op)
 	if err != nil {
 		return nil, err
@@ -169,6 +170,7 @@ func (e *Engine) ApplyLater(ctx context.Context, account string, op Op, done fun
 	if !ok {
 		return nil, fmt.Errorf("sync: unknown account %q", account)
 	}
+	op.normalize()
 	if !deferrable(*acct, op) {
 		res, err := e.Apply(ctx, account, op)
 		if done != nil {
@@ -346,6 +348,43 @@ func (e *Engine) failPermanently(ctx context.Context, id int64, cause error) {
 		e.log.Warn("outbox", "err", err)
 	}
 	e.forgetAttempt(id)
+}
+
+// queuedMessageIDs is the set of message ids a pending outbox write of the
+// account still has to push.
+func (e *Engine) queuedMessageIDs(ctx context.Context, account string) (map[string]bool, error) {
+	items, err := e.st.ListOutbox(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]bool)
+	for _, it := range items {
+		if it.AccountID != account {
+			continue
+		}
+		var op Op
+		if err := json.Unmarshal(it.Payload, &op); err != nil {
+			continue // RetryOutbox retires it; it names nothing we can protect
+		}
+		for _, id := range op.IDs {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
+// normalize rewrites an op into the form every later step agrees on: the
+// outbox payload, the local patch and the provider call.
+//
+// Adding and removing the same mailbox in one write is a no-op on that
+// mailbox, and the local patch (remove, then add) leaves the message in it.
+// Gmail rejects such a request outright ("Cannot both add and remove the same
+// label"), so the removal is dropped: the provider is told what the patch
+// already shows.
+func (op *Op) normalize() {
+	if op.Kind == OpMailboxes {
+		op.RemoveMailboxes = withoutAll(op.RemoveMailboxes, op.AddMailboxes)
+	}
 }
 
 func (op *Op) validate() error {
@@ -568,7 +607,8 @@ func (e *Engine) rollback(ctx context.Context, acct config.Account, rb *rollback
 }
 
 // mailboxPatch resolves an op into the mailbox remote ids to add and remove.
-// clearOthers is set for a trash, where the message ends up in trash only.
+// clearOthers is set for a trash on a folder store (IMAP, JMAP), where the
+// message ends up in the trash only.
 func (e *Engine) mailboxPatch(ctx context.Context, tx *store.Tx, acct config.Account, op Op) (add, remove []string, clearOthers bool, err error) {
 	switch op.Kind {
 	case OpMailboxes:
@@ -599,6 +639,22 @@ func (e *Engine) mailboxPatch(ctx context.Context, tx *store.Tx, acct config.Acc
 		if trash != "" {
 			add = append(add, trash)
 		}
+		if acct.Mail != nil && acct.Mail.Backend == model.BackendGmail {
+			// Gmail's messages.trash adds TRASH and takes the message out of
+			// the inbox, but every other label (categories, IMPORTANT, DRAFT,
+			// user labels) stays on it. Clearing them here left a patch the
+			// provider never agrees with, and once the fence expired nothing
+			// put them back.
+			inbox, err := roleRemote(ctx, tx, acct.Name, model.RoleInbox)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			if inbox != "" {
+				remove = append(remove, inbox)
+			}
+			return add, remove, false, nil
+		}
+		// A folder store moves the message: it ends up in the trash only.
 		return add, nil, true, nil
 
 	case OpRestore:

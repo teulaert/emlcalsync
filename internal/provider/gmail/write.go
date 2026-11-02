@@ -71,8 +71,9 @@ func (m *Mail) batchModify(ctx context.Context, ids, add, remove []string) error
 }
 
 // Trash moves messages to the trash. messages.trash is used rather than a
-// label edit so Gmail applies its own semantics (removing the message from
-// every label, keeping it restorable).
+// label edit so Gmail applies its own semantics: TRASH is added and INBOX
+// dropped, while every other label (categories, IMPORTANT, DRAFT, user
+// labels) stays on the message, and it stays restorable.
 func (m *Mail) Trash(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -95,11 +96,11 @@ func (m *Mail) Trash(ctx context.Context, ids []string) error {
 	return g.Wait()
 }
 
-// Restore moves messages back to the inbox. It untrashes first, because Trash
-// below strips every label, not just INBOX, and untrash is the one call that
-// puts them back. Untrash does not add INBOX to a message that was merely
-// archived (it is a no-op for anything not in the trash), so INBOX is then
-// added explicitly to every message that still exists.
+// Restore moves messages back to the inbox. It untrashes first, because
+// untrash is the call that takes a message out of the trash. Untrash does not
+// add INBOX to a message that was merely archived (it is a no-op for anything
+// not in the trash), so INBOX is then added explicitly to every message that
+// still exists.
 func (m *Mail) Restore(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil

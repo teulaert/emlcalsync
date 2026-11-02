@@ -185,7 +185,10 @@ func TestRetryOutboxBacksOff(t *testing.T) {
 	}
 }
 
-func TestTrashClearsOtherMailboxesLocally(t *testing.T) {
+// Gmail's messages.trash only swaps INBOX for TRASH; the message keeps every
+// other label. The local patch used to clear them all, which the provider
+// never agreed with, so the labels stayed gone on the machine that trashed.
+func TestTrashOnGmailKeepsOtherLabelsLocally(t *testing.T) {
 	h := newHarness(t)
 	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one"), mailboxes: []string{"INBOX", "WORK"}})
 	h.sync(SyncOptions{Mail: true})
@@ -194,8 +197,129 @@ func TestTrashClearsOtherMailboxesLocally(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 	got := h.message("m1").MailboxRemotes
-	if len(got) != 1 || got[0] != "TRASH" {
+	if !contains(got, "TRASH") || !contains(got, "WORK") || contains(got, "INBOX") {
+		t.Fatalf("mailboxes = %v, want TRASH and WORK", got)
+	}
+	// The patch is what the provider ends up with, so the next pass agrees.
+	h.sync(SyncOptions{Mail: true})
+	if got := h.message("m1").MailboxRemotes; !contains(got, "TRASH") || !contains(got, "WORK") || len(got) != 2 {
+		t.Fatalf("after sync, mailboxes = %v, want [TRASH WORK]", got)
+	}
+}
+
+// A folder store moves a trashed message: it ends up in the trash only.
+func TestTrashOnAFolderStoreClearsOtherMailboxesLocally(t *testing.T) {
+	h := newHarness(t)
+	h.cfg.Accounts[0].Mail.Backend = model.BackendJMAP
+	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one"), mailboxes: []string{"INBOX", "WORK"}})
+	h.sync(SyncOptions{Mail: true})
+
+	if _, err := h.eng.Apply(context.Background(), "work", Op{Kind: OpTrash, IDs: []string{"m1"}}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := h.message("m1").MailboxRemotes; len(got) != 1 || got[0] != "TRASH" {
 		t.Fatalf("mailboxes = %v, want [TRASH]", got)
+	}
+}
+
+// ageFences moves every local-write fence an hour back, well past the
+// store's localPatchWindow.
+func ageFences(t *testing.T, h *harness) {
+	t.Helper()
+	if _, err := h.st.DB().ExecContext(context.Background(),
+		`UPDATE messages SET local_patch_at = local_patch_at - 3600 WHERE local_patch_at IS NOT NULL`); err != nil {
+		t.Fatalf("age fences: %v", err)
+	}
+}
+
+// A write the outbox gives up on leaves its optimistic patch behind, and the
+// provider, which never changed, has nothing to report about the message. The
+// delta re-reads such a row once its fence has expired.
+func TestDeltaRereadsAPatchTheProviderNeverConfirmed(t *testing.T) {
+	h := newHarness(t)
+	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one"), flags: model.Flags{Unread: true}})
+	h.sync(SyncOptions{Mail: true})
+
+	h.mail.FailNext(1)
+	op := Op{Kind: OpFlags, IDs: []string{"m1"}}
+	op.Flags.Clear = model.Flags{Unread: true}
+	res, err := h.eng.Apply(context.Background(), "work", op)
+	if err != nil || !res.Queued {
+		t.Fatalf("Apply = %+v, %v; want queued", res, err)
+	}
+	// Exhaust the retry budget: the next pass retires the row.
+	if _, err := h.st.DB().ExecContext(context.Background(),
+		`UPDATE outbox SET attempts = ?`, maxOutboxAttempts); err != nil {
+		t.Fatalf("exhaust attempts: %v", err)
+	}
+	if _, err := h.eng.RetryOutbox(context.Background(), "work"); err != nil {
+		t.Fatalf("RetryOutbox: %v", err)
+	}
+	if h.message("m1").Flags.Unread {
+		t.Fatal("precondition: the patch should still say read")
+	}
+
+	// Inside the window the fence still stands.
+	h.sync(SyncOptions{Mail: true})
+	if h.message("m1").Flags.Unread {
+		t.Fatal("a live fence was overridden")
+	}
+
+	ageFences(t, h)
+	h.sync(SyncOptions{Mail: true})
+	if !h.message("m1").Flags.Unread {
+		t.Fatal("the stale patch survived the delta; want the provider's unread back")
+	}
+	stale, err := h.st.StaleLocalPatches(context.Background(), "work", 10)
+	if err != nil || len(stale) != 0 {
+		t.Fatalf("StaleLocalPatches = %v, %v; want none left", stale, err)
+	}
+}
+
+// A write that is still waiting in the outbox is what the user asked for; an
+// expired fence must not hand the row back to the provider's older state.
+func TestDeltaLeavesAQueuedWritesPatchAlone(t *testing.T) {
+	h := newHarness(t)
+	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one")})
+	h.sync(SyncOptions{Mail: true})
+
+	h.mail.FailNext(1)
+	res, err := h.eng.Apply(context.Background(), "work", Op{Kind: OpArchive, IDs: []string{"m1"}})
+	if err != nil || !res.Queued {
+		t.Fatalf("Apply = %+v, %v; want queued", res, err)
+	}
+	ageFences(t, h)
+	h.sync(SyncOptions{Mail: true})
+	if got := h.message("m1").MailboxRemotes; contains(got, "INBOX") {
+		t.Fatalf("mailboxes = %v; the queued archive was undone", got)
+	}
+}
+
+// Moving a message to a mailbox it is already in produced add INBOX + remove
+// INBOX, which Gmail rejects; the removal is dropped before anything is sent.
+func TestMailboxesOpDropsARemovalItAlsoAdds(t *testing.T) {
+	h := newHarness(t)
+	h.mail.Add(&fakeMsg{id: "m1", raw: mailRaw(t, "one", "one"), mailboxes: []string{"INBOX"}})
+	h.sync(SyncOptions{Mail: true})
+
+	res, err := h.eng.Apply(context.Background(), "work", Op{Kind: OpMailboxes, IDs: []string{"m1"},
+		AddMailboxes: []string{"INBOX"}, RemoveMailboxes: []string{"INBOX", "WORK"}})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	item, err := h.st.GetOutbox(context.Background(), res.OutboxID)
+	if err != nil {
+		t.Fatalf("GetOutbox: %v", err)
+	}
+	var stored Op
+	if err := json.Unmarshal(item.Payload, &stored); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if len(stored.RemoveMailboxes) != 1 || stored.RemoveMailboxes[0] != "WORK" {
+		t.Fatalf("stored removals = %v, want [WORK]", stored.RemoveMailboxes)
+	}
+	if got := h.message("m1").MailboxRemotes; !contains(got, "INBOX") {
+		t.Fatalf("mailboxes = %v, want INBOX kept", got)
 	}
 }
 

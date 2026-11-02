@@ -507,8 +507,10 @@ func (f *fakeMail) SetMailboxes(ctx context.Context, ids []string, add, remove [
 	return nil
 }
 
+// Trash behaves like Gmail's messages.trash, the harness account's backend:
+// TRASH is added and INBOX dropped, every other label stays.
 func (f *fakeMail) Trash(ctx context.Context, ids []string) error {
-	return f.SetMailboxes(ctx, ids, []string{"TRASH"}, []string{"INBOX", "ARCHIVE", "WORK"})
+	return f.SetMailboxes(ctx, ids, []string{"TRASH"}, []string{"INBOX"})
 }
 
 func (f *fakeMail) Restore(ctx context.Context, ids []string) error {
