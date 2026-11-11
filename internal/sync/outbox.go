@@ -991,6 +991,10 @@ func (e *Engine) executeEvent(ctx context.Context, acct config.Account, cp provi
 // afterExecute reconciles the index with what the provider actually created.
 func (e *Engine) afterExecute(ctx context.Context, acct config.Account, op Op, remote string) error {
 	switch op.Kind {
+	case OpSend:
+		e.trashSupersededDrafts(ctx, acct, op, remote)
+		return nil
+
 	case OpEventCreate:
 		if op.Event == nil {
 			return nil

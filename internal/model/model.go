@@ -149,6 +149,28 @@ type Flags struct {
 	Answered bool `json:"answered"`
 }
 
+// LiveDraft reports whether a message with these flags and mailboxes is an
+// unfinished draft: flagged draft, in the drafts mailbox, and not in the
+// trash. The flag alone is not enough -- a draft sent or thrown away still
+// carries it -- and neither is the drafts mailbox, because on Gmail a spent
+// draft keeps DRAFT while it gains TRASH. An account whose mailboxes have
+// not been synced (draftsRemote empty) has no live drafts.
+func LiveDraft(f Flags, mailboxes []string, draftsRemote, trashRemote string) bool {
+	if !f.Draft || draftsRemote == "" {
+		return false
+	}
+	in := false
+	for _, mb := range mailboxes {
+		if trashRemote != "" && mb == trashRemote {
+			return false
+		}
+		if mb == draftsRemote {
+			in = true
+		}
+	}
+	return in
+}
+
 // Message is the indexed form of a mail message.
 type Message struct {
 	ID          int64 // local row id

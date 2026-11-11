@@ -108,8 +108,20 @@ func roleRemote(ctx context.Context, st *store.Store, account string, role model
 }
 
 // archiveOps builds the archive, plus the inverse that puts it back.
+//
+// A live draft is discarded instead. Archiving only takes a message out of
+// the inbox, which a draft never was in: it stays in Drafts (on Gmail it
+// cannot even lose the DRAFT label), so it would be back on the next reload.
+// What archiving a draft can only mean is "get it out of the way", and trash
+// is that, recoverably -- the undo puts it back where it was.
 func archiveOps(ctx context.Context, st *store.Store, ts []target) ([]accountOp, *undoRecord) {
 	var fwd, back []accountOp
+	ts, drafts := splitLiveDrafts(ctx, st, ts)
+	if len(drafts) > 0 {
+		tf, tu := trashOps(ctx, st, drafts)
+		fwd = append(fwd, tf...)
+		back = append(back, tu.ops...)
+	}
 	for _, g := range group(ts) {
 		fwd = append(fwd, accountOp{g.account, sync.Op{Kind: sync.OpArchive, IDs: g.remotes}})
 		inbox := roleRemote(ctx, st, g.account, model.RoleInbox)
@@ -124,6 +136,28 @@ func archiveOps(ctx context.Context, st *store.Store, ts []target) ([]accountOp,
 		back = append(back, accountOp{g.account, op})
 	}
 	return fwd, &undoRecord{label: "archive", ops: back}
+}
+
+// splitLiveDrafts separates the live drafts from the rest of ts.
+func splitLiveDrafts(ctx context.Context, st *store.Store, ts []target) (rest, drafts []target) {
+	type roles struct{ drafts, trash string }
+	of := map[string]roles{}
+	for _, t := range ts {
+		r, ok := of[t.account]
+		if !ok {
+			r = roles{
+				drafts: roleRemote(ctx, st, t.account, model.RoleDrafts),
+				trash:  roleRemote(ctx, st, t.account, model.RoleTrash),
+			}
+			of[t.account] = r
+		}
+		if model.LiveDraft(t.flags, t.mailboxes, r.drafts, r.trash) {
+			drafts = append(drafts, t)
+		} else {
+			rest = append(rest, t)
+		}
+	}
+	return rest, drafts
 }
 
 // trashOps builds the trash, plus the inverse.

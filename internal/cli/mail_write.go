@@ -30,41 +30,43 @@ func mailApply(cmd *cobra.Command, app *App, ids []string, opFor func(group IDGr
 	if err != nil {
 		return err
 	}
+	return mailApplyGroups(cmd, app, groups, func(g IDGroup) ([]sync.Op, error) {
+		op, err := opFor(g)
+		if err != nil {
+			return nil, err
+		}
+		op.IDs = g.Remotes
+		return []sync.Op{op}, nil
+	})
+}
+
+// mailApplyGroups applies the ops opsFor builds for each account group, each
+// carrying its own IDs, and prints one row per message.
+func mailApplyGroups(cmd *cobra.Command, app *App, groups []IDGroup, opsFor func(group IDGroup) ([]sync.Op, error)) error {
 	eng, err := app.Engine()
 	if err != nil {
 		return err
 	}
-	rows := make([]mailWriteRow, 0, len(ids))
+	var rows []mailWriteRow
 	queued := 0
 	for _, g := range groups {
-		op, err := opFor(g)
+		ops, err := opsFor(g)
 		if err != nil {
 			return err
 		}
-		op.IDs = g.Remotes
-		res, err := eng.Apply(cmd.Context(), g.Account, op)
-		if err != nil {
-			return err
-		}
-		if res.Queued {
-			queued++
-		}
-		moved := map[string]string{}
-		for _, rn := range res.Renames {
-			moved[rn.Old] = rn.New
-		}
-		for _, r := range g.Remotes {
-			row := mailWriteRow{
-				ID:       PublicMessageID(g.Account, r),
-				OK:       !res.Queued,
-				Queued:   res.Queued,
-				RemoteID: res.RemoteID,
+		for _, op := range ops {
+			if len(op.IDs) == 0 {
+				continue
 			}
-			if to, ok := moved[r]; ok && to != r {
-				row.NewID = PublicMessageID(g.Account, to)
+			n, err := mailApplyOne(cmd, eng, g.Account, op, &rows)
+			if err != nil {
+				return err
 			}
-			rows = append(rows, row)
+			queued += n
 		}
+	}
+	if rows == nil {
+		rows = []mailWriteRow{}
 	}
 	if err := app.Printer().Print(rows); err != nil {
 		return err
@@ -73,6 +75,35 @@ func mailApply(cmd *cobra.Command, app *App, ids []string, opFor func(group IDGr
 		return Queued(queued)
 	}
 	return nil
+}
+
+// mailApplyOne applies op and appends a row per message to rows. It reports
+// whether the write was queued.
+func mailApplyOne(cmd *cobra.Command, eng *sync.Engine, account string, op sync.Op, rows *[]mailWriteRow) (int, error) {
+	res, err := eng.Apply(cmd.Context(), account, op)
+	if err != nil {
+		return 0, err
+	}
+	moved := map[string]string{}
+	for _, rn := range res.Renames {
+		moved[rn.Old] = rn.New
+	}
+	for _, r := range op.IDs {
+		row := mailWriteRow{
+			ID:       PublicMessageID(account, r),
+			OK:       !res.Queued,
+			Queued:   res.Queued,
+			RemoteID: res.RemoteID,
+		}
+		if to, ok := moved[r]; ok && to != r {
+			row.NewID = PublicMessageID(account, to)
+		}
+		*rows = append(*rows, row)
+	}
+	if res.Queued {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -151,13 +182,50 @@ func mailArchiveCmd(app *App) *cobra.Command {
 	return &cobra.Command{
 		Use:   "archive <id>...",
 		Short: "Archive messages (out of the inbox)",
-		Args:  cobra.MinimumNArgs(1),
+		Long: `Archive messages: take them out of the inbox.
+
+A draft is discarded (moved to the trash) instead. Archiving never takes a
+message out of Drafts, so an archived draft would stay there.`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return mailApply(cmd, app, args, func(IDGroup) (sync.Op, error) {
-				return sync.Op{Kind: sync.OpArchive}, nil
+			groups, err := app.GroupMessageIDs(args)
+			if err != nil {
+				return err
+			}
+			st, err := app.Store()
+			if err != nil {
+				return err
+			}
+			return mailApplyGroups(cmd, app, groups, func(g IDGroup) ([]sync.Op, error) {
+				archive, trash := mailSplitLiveDrafts(cmd.Context(), st, g)
+				return []sync.Op{
+					{Kind: sync.OpTrash, IDs: trash},
+					{Kind: sync.OpArchive, IDs: archive},
+				}, nil
 			})
 		},
 	}
+}
+
+// mailSplitLiveDrafts separates the live drafts in g from the rest. A
+// message the index does not know is left with the rest.
+func mailSplitLiveDrafts(ctx context.Context, st *store.Store, g IDGroup) (rest, drafts []string) {
+	var draftsRemote, trashRemote string
+	if mb, err := st.FindMailbox(ctx, g.Account, string(model.RoleDrafts)); err == nil {
+		draftsRemote = mb.RemoteID
+	}
+	if mb, err := st.FindMailbox(ctx, g.Account, string(model.RoleTrash)); err == nil {
+		trashRemote = mb.RemoteID
+	}
+	for _, r := range g.Remotes {
+		m, err := st.GetMessage(ctx, g.Account, r)
+		if err == nil && model.LiveDraft(m.Flags, m.MailboxRemotes, draftsRemote, trashRemote) {
+			drafts = append(drafts, r)
+		} else {
+			rest = append(rest, r)
+		}
+	}
+	return rest, drafts
 }
 
 func mailTrashCmd(app *App) *cobra.Command {

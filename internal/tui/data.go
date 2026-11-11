@@ -608,13 +608,7 @@ func newestDraft(ctx context.Context, d Deps, accountID, threadID string) (*mode
 // check against, and then nothing counts: opening a fresh reply is the safe
 // end of that, since the words in a real draft are still on the server.
 func liveDraft(m *model.Message, draftsRemote, trashRemote string) bool {
-	if !m.Flags.Draft || draftsRemote == "" {
-		return false
-	}
-	if trashRemote != "" && slices.Contains(m.MailboxRemotes, trashRemote) {
-		return false
-	}
-	return slices.Contains(m.MailboxRemotes, draftsRemote)
+	return model.LiveDraft(m.Flags, m.MailboxRemotes, draftsRemote, trashRemote)
 }
 
 // sendFrom is the address a reply from this account goes out as. There is no

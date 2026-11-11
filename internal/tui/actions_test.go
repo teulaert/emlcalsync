@@ -56,6 +56,53 @@ func TestArchiveUndoPutsItBackInTheInbox(t *testing.T) {
 	}
 }
 
+// Archiving never takes a message out of Drafts, so an archived draft stayed
+// there and was back on the next reload. A live draft is discarded instead,
+// and undo puts it back exactly where it was; the rest is archived as usual.
+func TestArchiveDiscardsALiveDraft(t *testing.T) {
+	d := newTestDeps(t, "work")
+	ctx := context.Background()
+
+	ts := []target{
+		{account: "work", remote: "d1", mailboxes: []string{"drafts", "archive"}, flags: model.Flags{Draft: true}},
+		{account: "work", remote: "w1", mailboxes: []string{"inbox"}},
+		// Flagged draft but already in the trash: a spent draft, archived as any message.
+		{account: "work", remote: "d2", mailboxes: []string{"drafts", "trash"}, flags: model.Flags{Draft: true}},
+	}
+	fwd, undo := archiveOps(ctx, d.Store, ts)
+
+	var trashed, archived []string
+	for _, f := range fwd {
+		switch f.op.Kind {
+		case sync.OpTrash:
+			trashed = append(trashed, f.op.IDs...)
+		case sync.OpArchive:
+			archived = append(archived, f.op.IDs...)
+		default:
+			t.Errorf("unexpected forward op %v", f.op.Kind)
+		}
+	}
+	if strings.Join(trashed, ",") != "d1" {
+		t.Errorf("trashed %v, want [d1]", trashed)
+	}
+	if strings.Join(archived, ",") != "w1,d2" {
+		t.Errorf("archived %v, want [w1 d2]", archived)
+	}
+
+	var back *sync.Op
+	for i := range undo.ops {
+		if op := undo.ops[i].op; len(op.IDs) == 1 && op.IDs[0] == "d1" {
+			back = &undo.ops[i].op
+		}
+	}
+	if back == nil {
+		t.Fatal("no undo for the discarded draft")
+	}
+	if strings.Join(back.AddMailboxes, ",") != "drafts,archive" || strings.Join(back.RemoveMailboxes, ",") != "trash" {
+		t.Errorf("draft undo adds %v removes %v, want [drafts archive] / [trash]", back.AddMailboxes, back.RemoveMailboxes)
+	}
+}
+
 // Trash sets clearOthers, so the engine drops every other membership. The undo
 // is only exact if the set was captured beforehand — this is the test that
 // says so.
