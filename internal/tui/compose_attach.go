@@ -110,11 +110,7 @@ func (c *composeView) detach() {
 		c.err = errNothingAttached
 		return
 	}
-	last := c.files[len(c.files)-1]
-	c.files = c.files[:len(c.files)-1]
-	c.filesEdited = true
-	c.info = "took " + last.Filename + " off"
-	c.relayout()
+	c.takeOff(len(c.files) - 1)
 }
 
 // relayout has the fields laid out again: the Files row coming or going moves

@@ -179,6 +179,7 @@ func (k keymap) helpLines() [][2]string {
 		{"  ctrl+g", "draft it with the AI model: asks for instructions, enter alone just answers"},
 		{"  tab / shift+tab", "next / previous field (shift+tab from To reaches From)"},
 		{"  ← / → , space", "on the From row: the account it goes out from (a new message or a forward)"},
+		{"  ← / →, enter, w, del", "on the Files row: pick a file, open it, save it, take it off"},
 		{"  ctrl+n / ctrl+p, enter", "in To, Cc, Bcc: pick / take an address the archive knows, as it is typed"},
 		{"  esc", "cancel (twice, once something is written)"},
 		{"", ""},

@@ -12,7 +12,6 @@ import (
 	"github.com/teulaert/emlcalsync/internal/compose"
 	"github.com/teulaert/emlcalsync/internal/mime"
 	"github.com/teulaert/emlcalsync/internal/model"
-	"github.com/teulaert/emlcalsync/internal/output"
 	"github.com/teulaert/emlcalsync/internal/sync"
 )
 
@@ -92,6 +91,9 @@ type composeView struct {
 	// filesEdited is set once ctrl+o or ctrl+r has changed the row, so esc
 	// counts a file put on the message as work, the way it counts a word.
 	filesEdited bool
+	// fileAt is the file the cursor is on while the Files row has focus. See
+	// compose_files.go.
+	fileAt int
 
 	// attaching is the path prompt ctrl+o opens on the status line; path is
 	// what has been typed into it. See compose_attach.go.
@@ -143,6 +145,10 @@ const (
 	// ones -- so it sits past the body rather than at 0, and the order the
 	// cursor moves in is focusRing rather than counting.
 	fromFocus = 5
+	// filesFocus is the Files row: a list of what is going out, which the
+	// cursor walks with the arrows and enter opens. It is in the ring only
+	// while there is a file on the message.
+	filesFocus = 6
 	// labelW is the width of the "To" / "Subject" gutter.
 	labelW = 9
 )
@@ -453,6 +459,8 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 	case c.focus == fromFocus && key.Matches(press, k.PrevAccount):
 		c.cycleAccount(-1)
 		return c, nil
+	case c.focus == filesFocus:
+		return c, c.filesKey(press)
 	// The address book's keys count only while it is offering something:
 	// otherwise enter in a header field is nothing, and in the body a line.
 	case len(c.hints) > 0 && key.Matches(press, k.TakeHint):
@@ -480,9 +488,9 @@ func (c *composeView) Update(msg tea.Msg, k keymap, w, h int) (screen, tea.Cmd) 
 // gets it: a blurred input ignores key presses anyway.
 func (c *composeView) toFocused(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
-	if c.focus == fromFocus {
-		// The From row is a choice, not a buffer. There is no field at this
-		// index, so nothing may be handed one.
+	if c.focus == fromFocus || c.focus == filesFocus {
+		// The From and Files rows are choices, not buffers. There is no
+		// field at these indexes, so nothing may be handed one.
 		return nil
 	}
 	if c.focus == bodyFocus {
@@ -513,6 +521,9 @@ func (c *composeView) focusRing() []int {
 	}
 	for i := range bodyFocus {
 		ring = append(ring, i)
+	}
+	if len(c.files) > 0 {
+		ring = append(ring, filesFocus)
 	}
 	return append(ring, bodyFocus)
 }
@@ -736,25 +747,6 @@ func (c *composeView) fromRow(w int) string {
 	return label + line
 }
 
-// filesView is the attachments row: what is going out with the message, and
-// what could not be got.
-func (c *composeView) filesView(w int) string {
-	names := make([]string, 0, len(c.files)+1)
-	for _, f := range c.files {
-		names = append(names, f.Filename+" "+output.HumanSize(int64(len(f.Data))))
-	}
-	line := strings.Join(names, ", ")
-	if c.filesNote == "" {
-		return padCells(line, max(w-labelW, 0))
-	}
-	if line != "" {
-		line += " · "
-	}
-	// The whole row is marked once something is missing from it: the point is
-	// that the eye stops here before ctrl+d, not that each name is graded.
-	return styleErr.Render(padCells(line+c.filesNote, max(w-labelW, 0)))
-}
-
 // ensure lays the fields out for the window the root is handing down.
 func (c *composeView) ensure(w, h int) {
 	if c.sized == [2]int{w, h} || w <= 0 || h <= 0 {
@@ -782,7 +774,11 @@ func (c *composeView) View(w, h int) string {
 		out = append(out, label+f.View())
 	}
 	if c.headerRows() > len(c.fields)+1 {
-		out = append(out, styleFaint.Render(padCells(" Files", labelW))+c.filesView(w))
+		label := padCells(" Files", labelW)
+		if c.focus != filesFocus {
+			label = styleFaint.Render(label)
+		}
+		out = append(out, label+c.filesView(w))
 	}
 	out = append(out, styleFaint.Render(strings.Repeat("─", max(w, 0))))
 	for _, l := range strings.Split(c.body.View(), "\n") {
@@ -820,6 +816,8 @@ func (c *composeView) footer(w int) string {
 		return c.info
 	case c.focus == fromFocus:
 		return "← / → or space: the account this goes out from · tab: on to To"
+	case c.focus == filesFocus:
+		return c.filesFooter()
 	}
 	// The hints are what this composer can actually do: there is nothing to
 	// delete without a stored draft, and nothing for the model to read without

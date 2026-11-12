@@ -320,7 +320,9 @@ rather than quietly left off — and `c` writes a new one from the account the
 list is filtered to; both open with the cursor in To. In any composer
 `ctrl+o` attaches a file from the disk — type a path, paste one, or drop the
 file on the terminal; `tab` completes it — and `ctrl+r` takes the last file
-off again. `v` lists the files a
+off again. Once there is a file on the message, `tab` stops on the Files row
+too: `←`/`→` pick a file, `enter` opens it on the desktop, `w` saves it and
+`del` takes that one off. `v` lists the files a
 message carries, where `enter` opens one on the desktop and `w` saves it. `emlcal mail forward <id>
 --to ..` is the same thing from the shell, files and all. The keys are Gmail's
 over vim's (`e` archive, `s` star, `d` trash, `i` back to the inbox,

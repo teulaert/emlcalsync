@@ -892,6 +892,43 @@ func (d Deps) openFile(m model.Message, a model.Attachment, save bool) tea.Cmd {
 	}
 }
 
+// openDraftFile is openFile for a file on the message being written: the
+// bytes are in the composer already -- read off the disk by ctrl+o, or
+// fetched when the draft or forward was opened -- so there is nothing to
+// fetch, only to write out and hand on. Opened ones go under the view
+// directory like any other, in a directory of their own, and are swept with
+// the rest.
+func (d Deps) openDraftFile(a mime.DraftAttachment, save bool) tea.Cmd {
+	return func() tea.Msg {
+		name := browser.FileName(a.Filename, "attachment")
+		out := fileOpened{id: "compose", name: name, saved: save}
+		if save {
+			out.path, out.err = saveFile(d.downloadDir(), name, a.Data)
+			return out
+		}
+		path, err := browser.WriteFile(d.viewDir(), "compose", name, a.Data, d.now())
+		if err != nil {
+			out.err = err
+			return out
+		}
+		url, err := browser.FileURL(path)
+		if err != nil {
+			out.err = err
+			return out
+		}
+		open := d.Browser
+		if open == nil {
+			open = browser.Open
+		}
+		if err := open(url); err != nil {
+			out.err = err
+			return out
+		}
+		out.path = path
+		return out
+	}
+}
+
 // saveFile writes data under name in dir, picking the next free name when
 // that one is taken, and returns the absolute path it went to.
 func saveFile(dir, name string, data []byte) (string, error) {
