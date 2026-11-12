@@ -894,6 +894,10 @@ func (e *Engine) executeMail(ctx context.Context, acct config.Account, mp provid
 		}
 		return "", nil, mp.Restore(ctx, op.IDs)
 	case OpDraft:
+		if td, ok := mp.(provider.ThreadedDrafter); ok && op.ThreadID != "" {
+			remote, err := td.CreateDraftInThread(ctx, op.Raw, op.ThreadID)
+			return remote, nil, err
+		}
 		remote, err := mp.CreateDraft(ctx, op.Raw)
 		return remote, nil, err
 	case OpSend:

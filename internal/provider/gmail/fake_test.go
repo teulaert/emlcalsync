@@ -54,6 +54,7 @@ type fakeGmail struct {
 	sentRaw     []string
 	sentThread  string
 	draftedRaw  string
+	draftThread string
 	attachments map[string]string // "<msg>/<att>" -> base64url data
 }
 
@@ -357,6 +358,7 @@ func (f *fakeGmail) handleDraftCreate(w http.ResponseWriter, r *http.Request) {
 	f.draftCalls++
 	if d.Message != nil {
 		f.draftedRaw = d.Message.Raw
+		f.draftThread = d.Message.ThreadId
 	}
 	status := f.failDraftOnce
 	f.failDraftOnce = 0

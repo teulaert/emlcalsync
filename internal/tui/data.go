@@ -130,7 +130,10 @@ type composeLoaded struct {
 	// forward that must not be found out afterwards.
 	files     []mime.DraftAttachment
 	filesNote string
-	err       error
+	// thread is the conversation a reopened draft goes out in: the one the
+	// message it answers is in. See store.AnswerThread.
+	thread string
+	err    error
 }
 
 // submitted reports the outcome of a send or a draft save.
@@ -419,6 +422,11 @@ func (d Deps) loadCompose(seq int, req composeRequest) tea.Cmd {
 			out.files, out.filesNote = d.carriedFiles(ctx, m, "forward")
 		case resolved.draft:
 			out.files, out.filesNote = d.carriedFiles(ctx, m, "draft")
+			// The draft may sit in a thread of its own -- Gmail files one
+			// created without a thread id that way -- and it is sent into
+			// whatever thread the composer holds. The message it answers
+			// knows the conversation it belongs in.
+			out.thread = d.Store.AnswerThread(ctx, m)
 		}
 		return out
 	}

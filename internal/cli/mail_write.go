@@ -594,8 +594,10 @@ func mailSubmit(cmd *cobra.Command, app *App, c *mailComposed, kind sync.OpKind)
 		return err
 	}
 	op := sync.Op{Kind: kind, Raw: c.raw}
+	// A draft goes in the thread too: on Gmail one created without it is a
+	// conversation of its own, and so is the reply it is sent as.
+	op.ThreadID = c.threadID
 	if kind == sync.OpSend {
-		op.ThreadID = c.threadID
 		op.From = c.from
 		op.Recipients = c.recipients
 	}
@@ -727,7 +729,7 @@ already have the message, so check your sent mail before sending again.`,
 
 // mailSendDraft submits the raw bytes of a stored draft.
 func mailSendDraft(cmd *cobra.Command, app *App, f *mailComposeFlags) error {
-	_, msg, _, err := mailLoadMessage(cmd.Context(), app, f.draft)
+	_, msg, st, err := mailLoadMessage(cmd.Context(), app, f.draft)
 	if err != nil {
 		return err
 	}
@@ -745,11 +747,14 @@ func mailSendDraft(cmd *cobra.Command, app *App, f *mailComposeFlags) error {
 		}
 	}
 	c := &mailComposed{
-		account:  acct,
-		raw:      raw,
-		to:       msg.To,
-		subject:  msg.Subject,
-		threadID: msg.ThreadID,
+		account: acct,
+		raw:     raw,
+		to:      msg.To,
+		subject: msg.Subject,
+		// The thread of the message it answers, not the draft's own: Gmail
+		// files a draft created without a thread id in a conversation of
+		// its own, and the reply would go out into that one.
+		threadID: st.AnswerThread(cmd.Context(), msg),
 	}
 	// The draft is only ours to clean up when it lives in the account we are
 	// sending from; --account elsewhere leaves it alone.

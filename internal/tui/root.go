@@ -834,7 +834,11 @@ func (r *root) onComposeLoaded(msg composeLoaded) tea.Cmd {
 	r.note("")
 	switch {
 	case msg.req.draft:
-		return r.push(newDraftCompose(r.d, msg.msg, msg.files, msg.filesNote))
+		c := newDraftCompose(r.d, msg.msg, msg.files, msg.filesNote)
+		if msg.thread != "" {
+			c.threadID = msg.thread
+		}
+		return r.push(c)
 	case msg.req.forward:
 		return r.push(newForwardCompose(r.d, msg.msg, msg.files, msg.filesNote))
 	}

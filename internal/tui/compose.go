@@ -699,8 +699,10 @@ func (c *composeView) build(kind sync.OpKind) (sync.Op, error) {
 		return sync.Op{}, err
 	}
 	op := sync.Op{Kind: kind, Raw: raw}
+	// A draft goes in the thread too: on Gmail one created without it is a
+	// conversation of its own, and so is the reply it is sent as.
+	op.ThreadID = c.threadID
 	if kind == sync.OpSend {
-		op.ThreadID = c.threadID
 		op.From = draft.From.Email
 		op.Recipients = compose.Envelope(draft)
 	}

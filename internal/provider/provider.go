@@ -121,6 +121,14 @@ type MailProvider interface {
 	FetchAttachment(ctx context.Context, messageID, ref string) ([]byte, error)
 }
 
+// ThreadedDrafter is a MailProvider whose drafts belong to a thread by id
+// rather than by their headers. Gmail is one: a draft created without a
+// thread id starts a conversation of its own, whatever its In-Reply-To says,
+// and so does the reply it is later sent as. threadID may be "".
+type ThreadedDrafter interface {
+	CreateDraftInThread(ctx context.Context, raw []byte, threadID string) (remoteID string, err error)
+}
+
 // EventChanges is the result of a calendar delta.
 type EventChanges struct {
 	// Upserted events (masters and exception instances). CalendarRemote and

@@ -278,3 +278,31 @@ func TestRenameRemoteIDIgnoresUnknownIDs(t *testing.T) {
 		t.Error("reported a move for an id that was never indexed")
 	}
 }
+
+func TestAnswerThreadIsTheThreadOfTheMessageAnswered(t *testing.T) {
+	s := newTestStore(t)
+	seedAccount(t, s, "a")
+	ctx := context.Background()
+	orig := threadFixture("a", "o1")
+	orig.ThreadID, orig.MessageIDHeader = "t-orig", "orig@example.com"
+	draft := threadFixture("a", "d1")
+	draft.ThreadID, draft.MessageIDHeader, draft.InReplyTo = "t-draft", "draft@example.com", "<orig@example.com>"
+	lone := threadFixture("a", "d2")
+	lone.ThreadID, lone.InReplyTo = "t-lone", "elsewhere@example.com"
+	for _, m := range []*model.Message{orig, draft, lone} {
+		if _, err := s.UpsertMessage(ctx, m, nil); err != nil {
+			t.Fatalf("UpsertMessage %s: %v", m.RemoteID, err)
+		}
+	}
+	if got := s.AnswerThread(ctx, draft); got != "t-orig" {
+		t.Errorf("AnswerThread(draft) = %q, want t-orig", got)
+	}
+	// The message it answers is not in the archive: its own thread stands.
+	if got := s.AnswerThread(ctx, lone); got != "t-lone" {
+		t.Errorf("AnswerThread(lone) = %q, want t-lone", got)
+	}
+	// Answering nothing: its own thread.
+	if got := s.AnswerThread(ctx, orig); got != "t-orig" {
+		t.Errorf("AnswerThread(orig) = %q, want t-orig", got)
+	}
+}

@@ -307,8 +307,13 @@ func TestComposerDraftCarriesNoEnvelope(t *testing.T) {
 		t.Errorf("kind = %v", op.Kind)
 	}
 	// A draft is stored, not submitted: there is no RCPT TO to fill in.
-	if op.ThreadID != "" || op.From != "" || len(op.Recipients) != 0 {
+	if op.From != "" || len(op.Recipients) != 0 {
 		t.Errorf("draft carries a submission envelope: %+v", op)
+	}
+	// It does carry its thread: Gmail files a draft created without one in
+	// a conversation of its own, and the reply it is sent as with it.
+	if op.ThreadID != "t1" {
+		t.Errorf("draft thread = %q, want t1", op.ThreadID)
 	}
 }
 
@@ -1696,5 +1701,39 @@ func TestStoredDraftKeepsItsAccount(t *testing.T) {
 	}
 	if got := r.render(); !strings.Contains(got, "stored in work") {
 		t.Errorf("nothing explained why the account is fixed:\n%s", got)
+	}
+}
+
+// Gmail files a draft created without a thread id in a conversation of its
+// own. Reopened and sent, it must go out in the thread of the message it
+// answers -- not the draft's -- or the reply never joins the conversation.
+func TestAReopenedDraftGoesOutInTheThreadItAnswers(t *testing.T) {
+	d, mail := newTriageDeps(t)
+	addAnswerable(t, d, mail, "m1", "offerte Q4")
+	addStoredDraft(t, d, mail, "m2")
+	ctx := context.Background()
+	m, err := d.Store.GetMessage(ctx, "work", "m2")
+	if err != nil {
+		t.Fatalf("GetMessage: %v", err)
+	}
+	m.ThreadID = "t-m2" // a thread of its own, the shape Gmail left it in
+	if _, err := d.Store.UpsertMessage(ctx, m, nil); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	r := newTestRoot(t, d)
+	toDrafts(t, r)
+	send(t, r, "enter")
+
+	c := composerOn(t, r)
+	if c.draftRemote != "m2" {
+		t.Fatalf("editing %q, want the draft m2", c.draftRemote)
+	}
+	op, err := c.build(sync.OpSend)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if op.ThreadID != "t-m1" {
+		t.Errorf("send thread = %q, want t-m1, the thread of the message it answers", op.ThreadID)
 	}
 }

@@ -140,10 +140,17 @@ func (m *Mail) Restore(ctx context.Context, ids []string) error {
 // every other remote id emlcal stores; the draft id itself is only needed to
 // update or send the draft through the drafts API.
 func (m *Mail) CreateDraft(ctx context.Context, raw []byte) (string, error) {
+	return m.CreateDraftInThread(ctx, raw, "")
+}
+
+// CreateDraftInThread implements provider.ThreadedDrafter: the draft is filed
+// in threadID, so it -- and the reply it is sent as -- sits in the
+// conversation it answers instead of opening one of its own.
+func (m *Mail) CreateDraftInThread(ctx context.Context, raw []byte, threadID string) (string, error) {
 	if len(raw) == 0 {
 		return "", errors.New("gmail: refusing to create an empty draft")
 	}
-	draft := &gmailapi.Draft{Message: &gmailapi.Message{Raw: encodeRaw(raw)}}
+	draft := &gmailapi.Draft{Message: &gmailapi.Message{Raw: encodeRaw(raw), ThreadId: threadID}}
 	var created *gmailapi.Draft
 	err := m.do(ctx, "drafts.create", unitsDraftsCreate, func() error {
 		var err error

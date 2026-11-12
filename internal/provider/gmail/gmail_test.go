@@ -567,6 +567,23 @@ func TestWrites(t *testing.T) {
 	if string(gotRaw) != "Subject: hi\r\n\r\nbody" {
 		t.Errorf("draft raw = %q", gotRaw)
 	}
+	f.mu.Lock()
+	if f.draftThread != "" {
+		t.Errorf("a draft answering nothing was filed in thread %q", f.draftThread)
+	}
+	f.mu.Unlock()
+
+	// A reply's draft goes in the conversation it answers. Without the
+	// thread id Gmail opens a new one for it, and the reply it is sent as
+	// stays there.
+	if _, err := m.CreateDraftInThread(ctx, []byte("Subject: Re: hi\r\n\r\nbody"), "t1"); err != nil {
+		t.Fatalf("CreateDraftInThread: %v", err)
+	}
+	f.mu.Lock()
+	if f.draftThread != "t1" {
+		t.Errorf("draft threadId = %q, want t1", f.draftThread)
+	}
+	f.mu.Unlock()
 
 	sentID, err := m.Send(ctx, []byte("Subject: re\r\n\r\nbody"), "t1")
 	if err != nil {

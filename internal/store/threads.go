@@ -429,3 +429,32 @@ func (tx *Tx) GetThread(ctx context.Context, accountID, threadID string, include
 	}
 	return &t, msgs, nil
 }
+
+// AnswerThread is the conversation a draft belongs to: the thread of the
+// message it answers, found by its In-Reply-To, or its own thread when that
+// message is not in the archive (or it answers nothing).
+//
+// A draft's own thread id is not always the right one. Gmail files a draft
+// created without a thread id in a thread of its own, and sending it into
+// that thread leaves the reply outside the conversation it answers, for good:
+// the other side's next reply then threads under it, away from everything
+// before. The message it answers knows where it lives.
+func (s *Store) AnswerThread(ctx context.Context, m *model.Message) string {
+	if m == nil {
+		return ""
+	}
+	parent := strings.TrimSpace(strings.Trim(strings.TrimSpace(m.InReplyTo), "<>"))
+	if parent == "" {
+		return m.ThreadID
+	}
+	var thread string
+	err := s.tx().q.QueryRowContext(ctx, `
+		SELECT thread_id FROM messages
+		 WHERE account_id = ? AND message_id_hdr = ? AND remote_id <> ? AND thread_id <> ''
+		 ORDER BY date_utc LIMIT 1`,
+		m.AccountID, parent, m.RemoteID).Scan(&thread)
+	if err != nil || thread == "" {
+		return m.ThreadID
+	}
+	return thread
+}
