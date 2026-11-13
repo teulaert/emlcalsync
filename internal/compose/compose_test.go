@@ -236,3 +236,38 @@ func TestJoinAddressesRoundTrips(t *testing.T) {
 		t.Errorf("round trip gave %+v from %q", back, JoinAddresses(in))
 	}
 }
+
+// Answering a message you sent yourself goes on to the people it went to, not
+// back to you: a copy to yourself is what put the conversation back in the
+// Gmail inbox.
+func TestReplyToYourOwnMessageGoesToItsRecipients(t *testing.T) {
+	orig := &model.Message{
+		From:            model.Address{Name: "Me", Email: "Me@example.com"},
+		To:              []model.Address{{Email: "gert@example.com"}, {Email: "me@example.com"}},
+		Cc:              []model.Address{{Email: "carol@example.com"}},
+		Subject:         "koppeling",
+		MessageIDHeader: "mine@example.com",
+	}
+	self := []string{"me@example.com"}
+
+	d := &mime.Draft{}
+	Reply(d, orig, false, self)
+	if len(d.To) != 1 || d.To[0].Email != "gert@example.com" || len(d.Cc) != 0 {
+		t.Errorf("reply: to=%v cc=%v, want to gert only", d.To, d.Cc)
+	}
+
+	d = &mime.Draft{}
+	Reply(d, orig, true, self)
+	if len(d.To) != 1 || d.To[0].Email != "gert@example.com" ||
+		len(d.Cc) != 1 || d.Cc[0].Email != "carol@example.com" {
+		t.Errorf("reply-all: to=%v cc=%v, want to gert, cc carol", d.To, d.Cc)
+	}
+
+	// A note to yourself has nobody else: it stays yours.
+	note := &model.Message{From: orig.From, To: []model.Address{{Email: "me@example.com"}}}
+	d = &mime.Draft{}
+	Reply(d, note, true, self)
+	if len(d.To) != 1 || !strings.EqualFold(d.To[0].Email, "me@example.com") {
+		t.Errorf("note to self: to=%v, want me", d.To)
+	}
+}

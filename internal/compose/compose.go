@@ -42,24 +42,45 @@ func Reply(draft *mime.Draft, orig *model.Message, all bool, self []string) {
 		draft.Subject = ReplySubject(orig.Subject)
 	}
 
-	// Reply-To when the sender asked for it, else the sender.
-	if len(draft.To) == 0 {
-		switch {
-		case len(orig.ReplyTo) > 0:
-			draft.To = append(draft.To, orig.ReplyTo...)
-		case orig.From.Email != "":
-			draft.To = append(draft.To, orig.From)
+	mine := map[string]bool{}
+	for _, e := range self {
+		if e = strings.TrimSpace(e); e != "" {
+			mine[strings.ToLower(e)] = true
 		}
 	}
-	if all {
-		mine := map[string]bool{}
-		for _, e := range self {
-			if e = strings.TrimSpace(e); e != "" {
-				mine[strings.ToLower(e)] = true
+
+	// Answering your own message carries on with the people it went to, the
+	// way every mail client does it: the sender is you, and a reply to the
+	// sender is a copy to yourself -- which Gmail files in the inbox, taking
+	// the whole conversation back there with it.
+	if mine[strings.ToLower(strings.TrimSpace(orig.From.Email))] {
+		if len(draft.To) == 0 {
+			draft.To = MergeAddresses(nil, orig.To, mine)
+			if all {
+				draft.Cc = MergeAddresses(draft.Cc, orig.Cc, mine)
+			}
+			if len(draft.To) == 0 && len(draft.Cc) == 0 {
+				// A note to self has nobody else to go to.
+				draft.To = append(draft.To, orig.From)
+			}
+		} else if all {
+			draft.To = MergeAddresses(draft.To, orig.To, mine)
+			draft.Cc = MergeAddresses(draft.Cc, orig.Cc, mine)
+		}
+	} else {
+		// Reply-To when the sender asked for it, else the sender.
+		if len(draft.To) == 0 {
+			switch {
+			case len(orig.ReplyTo) > 0:
+				draft.To = append(draft.To, orig.ReplyTo...)
+			case orig.From.Email != "":
+				draft.To = append(draft.To, orig.From)
 			}
 		}
-		draft.To = MergeAddresses(draft.To, orig.To, mine)
-		draft.Cc = MergeAddresses(draft.Cc, orig.Cc, mine)
+		if all {
+			draft.To = MergeAddresses(draft.To, orig.To, mine)
+			draft.Cc = MergeAddresses(draft.Cc, orig.Cc, mine)
+		}
 	}
 
 	draft.InReplyTo = orig.MessageIDHeader
