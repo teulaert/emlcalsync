@@ -85,6 +85,11 @@ type fakeMail struct {
 	// failWith is returned by the next call instead of a transport error, for
 	// the paths that have to tell a rejection from an outage.
 	failWith error
+	// cutFetchAfter, when > 0, makes the next FetchRaw deliver that many
+	// messages and then fail as offline: a server that goes away mid-download.
+	cutFetchAfter int
+	// rawFetches counts how often each message's raw bytes were downloaded.
+	rawFetches map[string]int
 
 	// recorded writes
 	sentRaw   [][]byte
@@ -370,12 +375,23 @@ func (f *fakeMail) FetchRaw(ctx context.Context, ids []string, fn func(provider.
 			Raw:      append([]byte(nil), m.raw...),
 		})
 	}
+	cut := f.cutFetchAfter
+	f.cutFetchAfter = 0
 	f.mu.Unlock()
 
-	for _, rm := range out {
+	for i, rm := range out {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if cut > 0 && i == cut {
+			return errOffline("mail download")
+		}
+		f.mu.Lock()
+		if f.rawFetches == nil {
+			f.rawFetches = map[string]int{}
+		}
+		f.rawFetches[rm.RemoteID]++
+		f.mu.Unlock()
 		if err := fn(rm); err != nil {
 			return err
 		}

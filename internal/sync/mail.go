@@ -727,11 +727,28 @@ func (r *mailRun) delta(ctx context.Context, since string) (*ResourceReport, err
 		op := ops[id]
 		switch op.kind {
 		case opAdded:
-			if r.rawMax > 0 {
-				st, err := r.e.st.MessageIndexState(ctx, r.account(), id)
-				if err != nil {
-					return rep, err
+			st, err := r.e.st.MessageIndexState(ctx, r.account(), id)
+			if err != nil {
+				return rep, err
+			}
+			// Already archived in full by an earlier pass that failed before
+			// it could advance the state: the replay must not download it
+			// again. A large change set (an import) otherwise restarts from
+			// its first message every time the server goes away mid-pass,
+			// and never finishes if that happens more often than a pass
+			// takes. Only its flags and mailboxes can be stale, and those
+			// are refreshed cheaply. A locally deleted row is still fetched,
+			// which is what resurrects it.
+			if st.Exists && st.RawComplete && !st.Deleted {
+				switch {
+				case canRefresh:
+					refresh = append(refresh, id)
+				case len(op.env.Mailboxes) > 0:
+					updated = append(updated, op.env)
 				}
+				continue
+			}
+			if r.rawMax > 0 {
 				// An existing envelope-only row is an earlier pass's decision
 				// that this message is over raw_max_size — the size the change
 				// list carries is only a hint, and Gmail's "added" records
