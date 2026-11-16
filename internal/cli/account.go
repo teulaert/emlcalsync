@@ -225,8 +225,10 @@ type coreAddOptions struct {
 	Username         string
 	ClientID         string
 	ClientSecret     string
-	// SessionURL makes this a generic JMAP account (Vendor is then empty).
-	SessionURL string
+	// GenericJMAP makes this an account on any JMAP server, at SessionURL
+	// (Vendor is then empty). The URL is validated whatever it holds.
+	GenericJMAP bool
+	SessionURL  string
 }
 
 // coreAddAccount writes the account to config.toml, stores its secret and
@@ -254,7 +256,7 @@ func coreAddAccount(app *App, opts coreAddOptions) error {
 	}
 
 	acct := config.NewAccount(name, email, prov)
-	if opts.SessionURL != "" {
+	if opts.GenericJMAP {
 		if err := config.ValidateSessionURL(opts.SessionURL); err != nil {
 			return output.Errorf(output.ExitUsage, "--session-url: %v", err)
 		}

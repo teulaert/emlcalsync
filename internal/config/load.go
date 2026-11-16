@@ -655,6 +655,9 @@ func validateBackends(a *Account, label string, add func(string, ...any)) {
 // host. Plain http is accepted because a local or test server may speak it;
 // the token then travels unencrypted, which is the caller's choice to make.
 func ValidateSessionURL(s string) error {
+	if strings.TrimSpace(s) == "" {
+		return errors.New("is empty")
+	}
 	u, err := url.Parse(strings.TrimSpace(s))
 	if err != nil {
 		return fmt.Errorf("%q is not a URL: %v", s, err)

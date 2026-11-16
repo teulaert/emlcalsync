@@ -148,7 +148,7 @@ func TestGenericJMAPAccount(t *testing.T) {
 // The session URL is checked before anything is written.
 func TestGenericJMAPAccountRejectsBadSessionURL(t *testing.T) {
 	e := newEnv(t)
-	for _, bad := range []string{"agmail.example.com/.well-known/jmap", "ftp://x.example/jmap", "https:///jmap"} {
+	for _, bad := range []string{"", "   ", "agmail.example.com/.well-known/jmap", "ftp://x.example/jmap", "https:///jmap"} {
 		_, stderr, code := e.runInput(jmapfake.DefaultToken+"\n",
 			"account", "add", "jmap", "--name", "work", "--email", "me@example.com",
 			"--session-url", bad, "--token-stdin")

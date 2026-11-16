@@ -9,7 +9,7 @@ import (
 // token. Fastmail has its own preset (`account add fastmail`); this is for
 // every other server.
 func coreAccountAddJMAPCmd(app *App) *cobra.Command {
-	var opts coreAddOptions
+	opts := coreAddOptions{GenericJMAP: true}
 	cmd := &cobra.Command{
 		Use:   "jmap",
 		Short: "Add an account on any JMAP server",
