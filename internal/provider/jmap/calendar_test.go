@@ -1499,3 +1499,40 @@ func TestUpdateEventClearsRecurrence(t *testing.T) {
 		}
 	}
 }
+
+// agmail sends participants as a JSON array rather than RFC 8984's
+// Id[Participant] map. The event must still decode, with its attendees and the
+// account's own response intact; the map form must keep working too.
+func TestParticipantsAcceptAnArray(t *testing.T) {
+	for _, tc := range []struct{ name, participants string }{
+		{"array", `[
+			{"@type":"Participant","name":"Alice","email":"alice@example.com","participationStatus":"accepted"},
+			{"@type":"Participant","name":"Me","email":"me@example.com","participationStatus":"tentative"}
+		]`},
+		{"map", `{
+			"a":{"@type":"Participant","name":"Alice","email":"alice@example.com","participationStatus":"accepted"},
+			"b":{"@type":"Participant","name":"Me","email":"me@example.com","participationStatus":"tentative"}
+		}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := json.RawMessage(`{"id":"e1","uid":"u1","@type":"Event","title":"Sync",` +
+				`"start":"2026-11-20T10:00:00","duration":"PT1H","timeZone":"UTC",` +
+				`"participants":` + tc.participants + `}`)
+			var js jsEvent
+			if err := json.Unmarshal(raw, &js); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			ev := toModelEvent(&js, raw, "cal1", "me@example.com", nil)
+			if len(ev.Attendees) != 2 {
+				t.Fatalf("attendees = %+v, want 2", ev.Attendees)
+			}
+			if ev.MyResponse != model.PartTentative {
+				t.Errorf("my response = %q, want tentative", ev.MyResponse)
+			}
+		})
+	}
+	var js jsEvent
+	if err := json.Unmarshal([]byte(`{"participants":"nonsense"}`), &js); err == nil {
+		t.Errorf("a participants string decoded without error")
+	}
+}

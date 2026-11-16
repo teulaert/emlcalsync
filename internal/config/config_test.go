@@ -1228,3 +1228,114 @@ func TestSenderPutsTheDisplayNameOnTheAddress(t *testing.T) {
 		t.Errorf("named account: Sender() = %q", got)
 	}
 }
+
+// A jmap block with its own session_url is a generic JMAP server: it keeps no
+// vendor, and its jmap calendars inherit that (no vendor either), so nothing
+// about it reads as Fastmail.
+func TestLoadGenericJMAPAccount(t *testing.T) {
+	c, err := Load(writeTemp(t, "config.toml", `
+[[accounts]]
+name  = "agm"
+email = "me@example.com"
+
+  [accounts.mail]
+  backend     = "jmap"
+  session_url = "https://mail.example.com/.well-known/jmap"
+
+  [accounts.calendar]
+  backend = "jmap"
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	a, _ := c.Account("agm")
+	if a.Mail.SessionURL != "https://mail.example.com/.well-known/jmap" || a.JMAPSessionURL() != a.Mail.SessionURL {
+		t.Errorf("session_url = %q / %q", a.Mail.SessionURL, a.JMAPSessionURL())
+	}
+	if a.Mail.Vendor != "" || a.Calendar.Vendor != "" || a.Vendor() != "" {
+		t.Errorf("vendors = mail %q calendar %q account %q, want none", a.Mail.Vendor, a.Calendar.Vendor, a.Vendor())
+	}
+	if !a.Push || a.Poll.Duration() != DefaultPollJMAP {
+		t.Errorf("JMAP defaults not applied: push %v poll %v", a.Push, a.Poll)
+	}
+}
+
+// The Fastmail preset is unchanged: a jmap block without session_url is still
+// Fastmail, for mail and for jmap calendars riding the same session.
+func TestJMAPWithoutSessionURLIsStillFastmail(t *testing.T) {
+	c, err := Load(writeTemp(t, "config.toml",
+		"[[accounts]]\nname=\"fm\"\nemail=\"a@x.com\"\n[accounts.mail]\nbackend=\"jmap\"\n[accounts.calendar]\nbackend=\"jmap\"\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	a, _ := c.Account("fm")
+	if a.Mail.Vendor != model.VendorFastmail || a.Calendar.Vendor != model.VendorFastmail {
+		t.Errorf("vendors = %q / %q, want fastmail", a.Mail.Vendor, a.Calendar.Vendor)
+	}
+	if a.JMAPSessionURL() != "" {
+		t.Errorf("JMAPSessionURL = %q, want the preset (empty)", a.JMAPSessionURL())
+	}
+}
+
+func TestValidateJMAPSessionURL(t *testing.T) {
+	for _, tc := range []struct {
+		name, toml, want string
+	}{
+		{
+			name: "session_url is jmap-only",
+			toml: "[[accounts]]\nname=\"a\"\nemail=\"a@x.com\"\n[accounts.mail]\nbackend=\"imap\"\nhost=\"x\"\nsession_url=\"https://x/jmap\"\n",
+			want: "session_url only applies to a jmap",
+		},
+		{
+			name: "no scheme",
+			toml: "[[accounts]]\nname=\"a\"\nemail=\"a@x.com\"\n[accounts.mail]\nbackend=\"jmap\"\nsession_url=\"mail.example.com/.well-known/jmap\"\n",
+			want: "https:// URL",
+		},
+		{
+			name: "no host",
+			toml: "[[accounts]]\nname=\"a\"\nemail=\"a@x.com\"\n[accounts.mail]\nbackend=\"jmap\"\nsession_url=\"https:///jmap\"\n",
+			want: "no host",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(writeTemp(t, "config.toml", tc.toml))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			err = c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Validate = %v, want an error mentioning %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGenericJMAPSurvivesASaveLoadRoundTrip(t *testing.T) {
+	in := NewJMAPAccount("agm", "me@example.com", "https://mail.example.com/.well-known/jmap")
+	cfg := &Config{General: General{DefaultFormat: DefaultFormat, SecretBackend: BackendFile},
+		Accounts: []Account{in}}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := back.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	got, ok := back.Account("agm")
+	if !ok {
+		t.Fatal("account lost")
+	}
+	if !sameMail(in.Mail, got.Mail) || !sameCalendar(in.Calendar, got.Calendar) {
+		t.Errorf("blocks changed:\n in: %+v %+v\nout: %+v %+v", in.Mail, in.Calendar, got.Mail, got.Calendar)
+	}
+	if got.Push != in.Push || got.Poll != in.Poll {
+		t.Errorf("push/poll changed: %v %v -> %v %v", in.Push, in.Poll, got.Push, got.Poll)
+	}
+}

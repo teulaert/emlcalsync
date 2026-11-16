@@ -69,6 +69,8 @@ type fileMailBackend struct {
 	Backend *string `toml:"backend"`
 	Vendor  *string `toml:"vendor"`
 
+	SessionURL *string `toml:"session_url"`
+
 	Host     *string `toml:"host"`
 	Port     *int    `toml:"port"`
 	Security *string `toml:"security"`
@@ -224,6 +226,7 @@ func materialize(fa fileAccount) (Account, error) {
 		mb := MailBackend{}
 		setBackend(&mb.Backend, fa.Mail.Backend)
 		setVendor(&mb.Vendor, fa.Mail.Vendor)
+		setString(&mb.SessionURL, fa.Mail.SessionURL)
 		setString(&mb.Host, fa.Mail.Host)
 		setString(&mb.Security, fa.Mail.Security)
 		setString(&mb.Username, fa.Mail.Username)
@@ -246,8 +249,10 @@ func materialize(fa fileAccount) (Account, error) {
 		mb.Folders = fa.Mail.Folders
 		mb.ExcludeFolders = fa.Mail.ExcludeFolders
 		// IMAP is the one mail backend several vendors share, so an absent
-		// vendor is not an error — Validate asks for a host instead.
-		if mb.Vendor == "" && mb.Host == "" {
+		// vendor is not an error — Validate asks for a host instead. The same
+		// goes for a JMAP block with its own session_url: that is a generic
+		// JMAP server, not Fastmail.
+		if mb.Vendor == "" && mb.Host == "" && strings.TrimSpace(mb.SessionURL) == "" {
 			mb.Vendor = defaultVendorFor(mb.Backend)
 		}
 		a.Mail = &mb
@@ -258,7 +263,14 @@ func materialize(fa fileAccount) (Account, error) {
 		setVendor(&cb.Vendor, fa.Calendar.Vendor)
 		setString(&cb.BaseURL, fa.Calendar.BaseURL)
 		setString(&cb.Username, fa.Calendar.Username)
-		if cb.Vendor == "" && cb.BaseURL == "" {
+		switch {
+		case cb.Vendor != "" || cb.BaseURL != "":
+		case cb.Backend == model.BackendJMAP && a.Mail != nil && a.Mail.Backend == model.BackendJMAP:
+			// JMAP calendars ride the mail block's session, so they are
+			// whoever serves that session: Fastmail by default, nobody in
+			// particular on a generic JMAP account.
+			cb.Vendor = a.Mail.Vendor
+		default:
 			cb.Vendor = defaultVendorFor(cb.Backend)
 		}
 		a.Calendar = &cb
@@ -588,6 +600,13 @@ func validateBackends(a *Account, label string, add func(string, ...any)) {
 		if m.Backend != model.BackendIMAP && strings.TrimSpace(m.Host) != "" {
 			add("%s: host only applies to an imap mail backend", label)
 		}
+		if u := strings.TrimSpace(m.SessionURL); u != "" {
+			if m.Backend != model.BackendJMAP {
+				add("%s: session_url only applies to a jmap mail backend", label)
+			} else if err := ValidateSessionURL(u); err != nil {
+				add("%s: session_url: %v", label, err)
+			}
+		}
 		for _, sec := range []struct{ key, val string }{
 			{"security", m.Security}, {"smtp_security", m.SMTPSecurity},
 		} {
@@ -630,4 +649,21 @@ func validateBackends(a *Account, label string, add func(string, ...any)) {
 		(a.Mail.Backend != model.BackendJMAP && a.Mail.Backend != model.BackendIMAP)) {
 		add("%s: push requires a jmap or imap mail backend", label)
 	}
+}
+
+// ValidateSessionURL checks a JMAP session URL: an absolute http(s) URL with a
+// host. Plain http is accepted because a local or test server may speak it;
+// the token then travels unencrypted, which is the caller's choice to make.
+func ValidateSessionURL(s string) error {
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil {
+		return fmt.Errorf("%q is not a URL: %v", s, err)
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return fmt.Errorf("%q must be an https:// URL", s)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%q has no host", s)
+	}
+	return nil
 }

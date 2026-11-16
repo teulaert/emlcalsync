@@ -1,6 +1,7 @@
 package jmap
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -40,6 +41,38 @@ type jsParticipant struct {
 	ParticipationStatus string            `json:"participationStatus,omitempty"`
 	ExpectReply         bool              `json:"expectReply,omitempty"`
 	ScheduleAgent       string            `json:"scheduleAgent,omitempty"`
+}
+
+// jsParticipants is an event's participants: an Id[Participant] map (RFC 8984
+// §4.4.6).
+//
+// Decoding also accepts a plain JSON array of Participant objects, keyed here
+// by position ("1", "2", ...). That is not the spec's shape, but at least one
+// server (agmail) sends it, and refusing it would fail every calendar sync on
+// that account over a field that is only ever matched by address. Encoding
+// always writes the map.
+type jsParticipants map[string]jsParticipant
+
+func (ps *jsParticipants) UnmarshalJSON(b []byte) error {
+	t := bytes.TrimSpace(b)
+	if len(t) > 0 && t[0] == '[' {
+		var list []jsParticipant
+		if err := json.Unmarshal(t, &list); err != nil {
+			return err
+		}
+		m := make(jsParticipants, len(list))
+		for i, p := range list {
+			m[strconv.Itoa(i+1)] = p
+		}
+		*ps = m
+		return nil
+	}
+	var m map[string]jsParticipant
+	if err := json.Unmarshal(t, &m); err != nil {
+		return err
+	}
+	*ps = m
+	return nil
 }
 
 // address returns the participant's mail address, preferring the explicit
@@ -107,7 +140,7 @@ type jsEvent struct {
 	RecurrenceOverrides  map[string]json.RawMessage `json:"recurrenceOverrides,omitempty"`
 	RecurrenceID         string                     `json:"recurrenceId,omitempty"`
 	RecurrenceIDTimeZone *string                    `json:"recurrenceIdTimeZone,omitempty"`
-	Participants         map[string]jsParticipant   `json:"participants,omitempty"`
+	Participants         jsParticipants             `json:"participants,omitempty"`
 	ReplyTo              map[string]string          `json:"replyTo,omitempty"`
 	FreeBusyStatus       string                     `json:"freeBusyStatus,omitempty"`
 	Privacy              string                     `json:"privacy,omitempty"`

@@ -132,7 +132,7 @@ func coreCheckMailSecret(app *App, cfg *config.Config, sec config.Secrets, a con
 		b, err := sec.Get(JMAPTokenKey(a))
 		switch {
 		case err != nil:
-			return coreFail(name, fmt.Sprintf("no API token: run `emlcal account add fastmail --name %s`", a.Name))
+			return coreFail(name, "no API token: run "+jmapAddHint(a))
 		case len(b) == 0:
 			return coreFail(name, "stored API token is empty")
 		}

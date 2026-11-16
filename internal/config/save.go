@@ -116,6 +116,10 @@ func render(c *Config) []byte {
 			if m.Vendor != "" && (m.Backend == model.BackendIMAP || m.Vendor != defaultVendorFor(m.Backend)) {
 				fmt.Fprintf(&b, "  vendor  = %s\n", quote(string(m.Vendor)))
 			}
+			if m.SessionURL != "" {
+				b.WriteString("  # JMAP session resource of this server (RFC 8620 §2).\n")
+				fmt.Fprintf(&b, "  session_url = %s\n", quote(m.SessionURL))
+			}
 			writeMailStrings(&b, [][2]string{
 				{"host", m.Host},
 				{"security", m.Security},

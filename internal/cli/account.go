@@ -97,6 +97,7 @@ func coreAccountCmd(app *App) *cobra.Command {
 	add.AddCommand(coreAccountAddCmd(app, model.VendorFastmail))
 	add.AddCommand(coreAccountAddCmd(app, model.VendorICloud))
 	add.AddCommand(coreAccountAddIMAPCmd(app))
+	add.AddCommand(coreAccountAddJMAPCmd(app))
 	cmd.AddCommand(add)
 	cmd.AddCommand(coreAccountListCmd(app))
 	cmd.AddCommand(coreAccountRemoveCmd(app))
@@ -224,6 +225,8 @@ type coreAddOptions struct {
 	Username         string
 	ClientID         string
 	ClientSecret     string
+	// SessionURL makes this a generic JMAP account (Vendor is then empty).
+	SessionURL string
 }
 
 // coreAddAccount writes the account to config.toml, stores its secret and
@@ -251,6 +254,12 @@ func coreAddAccount(app *App, opts coreAddOptions) error {
 	}
 
 	acct := config.NewAccount(name, email, prov)
+	if opts.SessionURL != "" {
+		if err := config.ValidateSessionURL(opts.SessionURL); err != nil {
+			return output.Errorf(output.ExitUsage, "--session-url: %v", err)
+		}
+		acct = config.NewJMAPAccount(name, email, strings.TrimSpace(opts.SessionURL))
+	}
 	acct.DisplayName = strings.TrimSpace(opts.DisplayName)
 	if opts.Username != "" {
 		// The Apple ID authenticates both halves.
@@ -267,11 +276,11 @@ func coreAddAccount(app *App, opts coreAddOptions) error {
 	var token, appPassword string
 	stdin := coreStdinReader(app)
 	if acct.Mail != nil && acct.Mail.Backend == model.BackendJMAP {
-		if token, err = coreReadToken(app, stdin, opts.TokenStdin); err != nil {
+		if token, err = coreReadToken(app, stdin, opts.TokenStdin, coreTokenLabel(acct)); err != nil {
 			return err
 		}
 		if token == "" {
-			return output.Errorf(output.ExitUsage, "no Fastmail API token given")
+			return output.Errorf(output.ExitUsage, "no %s given", coreTokenLabel(acct))
 		}
 	}
 	if coreWantsAppPassword(acct) {
@@ -363,7 +372,16 @@ func coreReadLine(r *bufio.Reader) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
-func coreReadToken(app *App, r *bufio.Reader, tokenStdin bool) (string, error) {
+// coreTokenLabel names the API token an account's JMAP half wants, for the
+// prompt and its errors.
+func coreTokenLabel(a config.Account) string {
+	if a.JMAPSessionURL() != "" {
+		return "JMAP API token"
+	}
+	return "Fastmail API token"
+}
+
+func coreReadToken(app *App, r *bufio.Reader, tokenStdin bool, label string) (string, error) {
 	if tokenStdin {
 		tok, err := coreReadLine(r)
 		if err != nil {
@@ -371,10 +389,10 @@ func coreReadToken(app *App, r *bufio.Reader, tokenStdin bool) (string, error) {
 		}
 		return tok, nil
 	}
-	fmt.Fprint(app.Stdout, "Fastmail API token: ")
+	fmt.Fprintf(app.Stdout, "%s: ", label)
 	line, err := coreReadLine(r)
 	if err != nil {
-		return "", output.Errorf(output.ExitUsage, "no Fastmail API token on stdin (use --token-stdin when scripting)")
+		return "", output.Errorf(output.ExitUsage, "no %s on stdin (use --token-stdin when scripting)", label)
 	}
 	fmt.Fprintln(app.Stdout)
 	return line, nil
@@ -472,10 +490,20 @@ func coreVerifyAccount(ctx context.Context, app *App, acct config.Account) error
 		}
 	}
 
-	if row.CalendarAPI == string(model.BackendCalDAV) {
+	switch row.CalendarAPI {
+	case string(model.BackendCalDAV):
 		cals, err := coreListCalendars(ctx, app, acct)
 		if err != nil {
 			return coreVerifyFailed(app, acct, "app password", err)
+		}
+		row.Calendars = len(cals)
+	case string(model.BackendJMAP):
+		// A session without a calendars capability is not a failure: the
+		// account then syncs mail only, which coreListCalendars reports as
+		// zero calendars.
+		cals, err := coreListCalendars(ctx, app, acct)
+		if err != nil {
+			return coreVerifyFailed(app, acct, "", err)
 		}
 		row.Calendars = len(cals)
 	}
@@ -484,12 +512,16 @@ func coreVerifyAccount(ctx context.Context, app *App, acct config.Account) error
 	if acct.SyncsMail() {
 		fmt.Fprintf(app.Stderr, ": %d mailboxes", row.Mailboxes)
 	}
-	if row.CalendarAPI == string(model.BackendCalDAV) {
+	if row.CalendarAPI == string(model.BackendCalDAV) || row.CalendarAPI == string(model.BackendJMAP) {
 		sep := ", "
 		if !acct.SyncsMail() {
 			sep = ": "
 		}
-		fmt.Fprintf(app.Stderr, "%s%d calendars over CalDAV", sep, row.Calendars)
+		over := "CalDAV"
+		if row.CalendarAPI == string(model.BackendJMAP) {
+			over = "JMAP"
+		}
+		fmt.Fprintf(app.Stderr, "%s%d calendars over %s", sep, row.Calendars, over)
 	}
 	fmt.Fprint(app.Stderr, "; run `emlcal sync` to start the backfill\n")
 	return app.Printer().Print(row)
