@@ -121,6 +121,29 @@ explicitly:
   sent_folder    = "Verzonden items"
 ```
 
+### Any other JMAP server
+
+A JMAP server (RFC 8620) other than Fastmail is configured by its session URL.
+Mail, sending, calendars and push all come from that one session, with one API
+token sent as a Bearer token. Calendars are synced when the session offers
+`urn:ietf:params:jmap:calendars`; without it the account syncs mail only.
+
+```bash
+emlcal account add jmap --name work --email you@example.com \
+  --session-url https://mail.example.com/.well-known/jmap     # prompts for the API token
+```
+
+which writes:
+
+```toml
+  [accounts.mail]
+  backend     = "jmap"
+  session_url = "https://mail.example.com/.well-known/jmap"
+
+  [accounts.calendar]
+  backend = "jmap"
+```
+
 ### Gmail / Google Calendar
 
 Google needs an OAuth client of your own, once, shared by all your Google

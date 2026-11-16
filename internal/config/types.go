@@ -243,6 +243,15 @@ type MailBackend struct {
 	// IMAP it selects the preset, and may be empty alongside an explicit Host.
 	Vendor model.Vendor `toml:"vendor"`
 
+	// --- jmap -----------------------------------------------------------
+
+	// SessionURL is the JMAP session resource (RFC 8620 §2) of any server:
+	// "https://mail.example.com/.well-known/jmap". Empty means the vendor
+	// preset, which for JMAP is Fastmail's. A jmap block with a session_url
+	// and no vendor is a generic JMAP account; its calendars, when the jmap
+	// calendar backend is configured, come from the same session.
+	SessionURL string `toml:"session_url"`
+
 	// --- imap -----------------------------------------------------------
 
 	// Host overrides the vendor preset's IMAP host: self-hosted servers, and
@@ -410,6 +419,32 @@ func NewAccount(name, email string, v model.Vendor) Account {
 		a.Push = true
 	}
 	return a
+}
+
+// NewJMAPAccount returns the account `emlcal account add jmap` writes: mail,
+// sending, calendars and push over one JMAP session on any RFC 8620 server.
+// It names no vendor; the session URL is what selects the server.
+func NewJMAPAccount(name, email, sessionURL string) Account {
+	return Account{
+		Name:             name,
+		Email:            email,
+		IncludeSpamTrash: true,
+		Calendars:        []string{"*"},
+		Concurrency:      DefaultConcurrency,
+		Mail:             &MailBackend{Backend: model.BackendJMAP, SessionURL: sessionURL},
+		Calendar:         &CalendarBackend{Backend: model.BackendJMAP},
+		Poll:             Duration(DefaultPollJMAP),
+		Push:             true,
+	}
+}
+
+// JMAPSessionURL is the session URL the account's JMAP client should use: the
+// mail block's session_url, or "" for the vendor preset (Fastmail).
+func (a *Account) JMAPSessionURL() string {
+	if a.Mail != nil && a.Mail.Backend == model.BackendJMAP {
+		return strings.TrimSpace(a.Mail.SessionURL)
+	}
+	return ""
 }
 
 // EffectiveRawMaxSize resolves the per-account override against the global

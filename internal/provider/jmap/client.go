@@ -1,4 +1,5 @@
-// Package jmap implements a hand-rolled JMAP client for Fastmail: mail
+// Package jmap implements a hand-rolled JMAP client for any RFC 8620 server
+// (Fastmail is the preset; Options.SessionURL points it elsewhere): mail
 // (RFC 8621), calendars (draft-ietf-jmap-calendars / JSCalendar RFC 8984) and
 // push (RFC 8620 EventSource).
 //
@@ -79,15 +80,16 @@ const (
 
 // Options configures a Client.
 type Options struct {
-	// Token is the Fastmail API token (Settings → Privacy & Security → API
-	// tokens) with at least the Mail and Calendars scopes. Required.
+	// Token is the server's API token, sent as a Bearer token: on Fastmail
+	// one made under Settings → Privacy & Security → API tokens. Required.
 	Token string
 	// Email is the account's own address. Used to pick the sending Identity
 	// and to recognise "me" among calendar participants. Optional but
 	// strongly recommended; when empty the client falls back to the session's
 	// username.
 	Email string
-	// SessionURL defaults to DefaultSessionURL.
+	// SessionURL is the server's JMAP session resource; it defaults to
+	// DefaultSessionURL (Fastmail).
 	SessionURL string
 	// HTTPClient defaults to a client tuned for concurrent blob downloads and
 	// long-lived EventSource streams (no overall timeout).
@@ -324,7 +326,7 @@ func (c *Client) CalendarCapability(ctx context.Context) (urn, accountID string,
 			}
 		}
 	}
-	return "", "", fmt.Errorf("%w: jmap: no primary account for %s (API token has no calendars scope; Fastmail tokens currently offer Mail, Submission, Contacts and Masked Email only)", provider.ErrNotSupported, CapCalendars)
+	return "", "", fmt.Errorf("%w: jmap: no primary account for %s (the server offers no JMAP calendars, or the API token has no calendars scope; Fastmail tokens currently offer Mail, Submission, Contacts and Masked Email only)", provider.ErrNotSupported, CapCalendars)
 }
 
 // isCalendarURN reports whether a capability URN is a calendars capability,

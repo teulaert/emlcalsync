@@ -50,7 +50,8 @@ const (
 
 	EnvGoogleClientID     = "EMLCAL_GOOGLE_CLIENT_ID"
 	EnvGoogleClientSecret = "EMLCAL_GOOGLE_CLIENT_SECRET"
-	// EnvJMAPSessionURL overrides the Fastmail session URL (tests, self-hosted JMAP).
+	// EnvJMAPSessionURL overrides the Fastmail preset's session URL (tests). An
+	// account with its own session_url is not affected: that one is explicit.
 	EnvJMAPSessionURL = "EMLCAL_JMAP_SESSION_URL"
 	// EnvCalDAVBaseURL overrides the CalDAV root (tests, self-hosted CalDAV).
 	EnvCalDAVBaseURL = "EMLCAL_CALDAV_BASE_URL"
@@ -214,19 +215,38 @@ func (f *Factory) jmapClient(acct config.Account) (*jmap.Client, error) {
 	tok, err := sec.Get(JMAPTokenKey(acct))
 	if err != nil {
 		return nil, output.Errorf(output.ExitUsage,
-			"no JMAP token for account %q: run `emlcal account add fastmail --name %s`", acct.Name, acct.Name)
+			"no JMAP token for account %q: run %s", acct.Name, jmapAddHint(acct))
 	}
 	c, err := jmap.New(jmap.Options{
 		Token:      strings.TrimSpace(string(tok)),
 		Email:      acct.Email,
 		Logger:     f.app.Logger(),
-		SessionURL: os.Getenv(EnvJMAPSessionURL),
+		SessionURL: jmapSessionURL(acct),
 	})
 	if err != nil {
 		return nil, err
 	}
 	f.jmap[acct.Name] = c
 	return c, nil
+}
+
+// jmapSessionURL picks the session resource for an account's JMAP client: its
+// own session_url, else the test override, else "" for the Fastmail preset.
+func jmapSessionURL(acct config.Account) string {
+	if u := acct.JMAPSessionURL(); u != "" {
+		return u
+	}
+	return os.Getenv(EnvJMAPSessionURL)
+}
+
+// jmapAddHint is the command that (re)creates a JMAP account's token, spelled
+// for the kind of account it is.
+func jmapAddHint(acct config.Account) string {
+	if u := acct.JMAPSessionURL(); u != "" {
+		return fmt.Sprintf("`emlcal account remove %s --yes` and `emlcal account add jmap --name %s --email %s --session-url %s`",
+			acct.Name, acct.Name, acct.Email, u)
+	}
+	return fmt.Sprintf("`emlcal account add fastmail --name %s`", acct.Name)
 }
 
 func (f *Factory) googleClients(ctx context.Context, acct config.Account) (*gmail.Mail, *gcal.Calendar, error) {

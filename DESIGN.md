@@ -425,6 +425,7 @@ type Pusher interface {                      // optional
   a dependency with a small bus factor. Decide during phase 1.
 - Auth: API token from Fastmail settings (scopes: Mail, Calendars),
   `Authorization: Bearer`. Session at `https://api.fastmail.com/jmap/session`
+  (any other server: `[accounts.mail] session_url`, `account add jmap`)
   → `apiUrl`, `downloadUrl`, `eventSourceUrl`, account ids, limits
   (`maxObjectsInGet`, `maxCallsInRequest`, `maxConcurrentRequests`).
 - Mailboxes: `Mailbox/get` (roles are native).
@@ -1373,7 +1374,8 @@ first full build and the two adversarial reviews (`docs/reviews/`).
   token in `secrets/<name>.gmail.json`; the Google OAuth client in
   `secrets/google-client.json` (`emlcal account google-client`) or env
   `EMLCAL_GOOGLE_CLIENT_ID`/`_SECRET`. `EMLCAL_JMAP_SESSION_URL` overrides the
-  Fastmail session URL (tests, self-hosted JMAP).
+  Fastmail preset's session URL (tests); an account with its own
+  `[accounts.mail] session_url` (any other JMAP server) always uses that.
 - **Flags**: `mail attachment get … -O path` (`-o` is the global format flag).
 - **Testing**: `internal/provider/fake` (in-memory providers) backs the sync
   and CLI unit tests; `internal/testutil/jmapfake` + `e2e/` drive the real
