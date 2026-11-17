@@ -8,6 +8,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/teulaert/emlcalsync/internal/model"
 	"github.com/teulaert/emlcalsync/internal/output"
@@ -18,6 +19,9 @@ import (
 // 40k-thread archive a page costs well under a frame, so the list simply grows
 // by pages as the cursor nears the end rather than trying to hold everything.
 const pageSize = 100
+
+// draftMark is the word a thread row leads with while it holds an unsent draft.
+const draftMark = "Draft"
 
 // mailbox filters the list offers, in the order M cycles them.
 var mailboxCycle = []struct {
@@ -593,18 +597,37 @@ func (m *mailList) rows(w, rows, acctW, subjW, partW, cntW, timeW int) string {
 			cnt = fmt.Sprintf("%d", t.MessageCount)
 		}
 
-		line := padCells(t.AccountID, acctW) + " " + mark + att + " " + padCells(subject, subjW)
+		// A thread with an unsent draft says so before its subject, the way
+		// Gmail marks it: under Sent, a conversation whose newest message is
+		// a reply still being written must not read as answered. The drafts
+		// view lists nothing else, so there the word would only be noise.
+		draft := t.Drafts > 0 && !m.showingDrafts()
+		if draft {
+			subject = draftMark + " " + subject
+		}
+
+		pre := padCells(t.AccountID, acctW) + " " + mark + att + " "
+		line := pre + padCells(subject, subjW)
 		if partW > 0 {
 			line += " " + padCells(strings.Join(parts, ", "), partW)
 		}
 		line += " " + padCells(cnt, cntW) + " " + padCells(output.RelTime(t.Last, now), timeW)
 		line = padCells(line, w)
 
+		base := lipgloss.NewStyle()
 		switch {
 		case i == m.cursor:
-			line = styleSelected.Render(line)
+			base = styleSelected
 		case t.UnreadCount > 0:
-			line = styleUnread.Render(line)
+			base = styleUnread
+		}
+		if draft {
+			// Styled in three parts so the marker can carry its own colour
+			// without its reset cutting the row's reverse or bold short.
+			rest := line[len(pre)+len(draftMark):]
+			line = base.Render(pre) + base.Inherit(styleDraft).Render(draftMark) + base.Render(rest)
+		} else {
+			line = base.Render(line)
 		}
 		out = append(out, line)
 	}

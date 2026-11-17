@@ -17,6 +17,11 @@ var (
 	styleFaint    = lipgloss.NewStyle().Faint(true)
 	styleHeader   = lipgloss.NewStyle().Bold(true)
 	styleErr      = lipgloss.NewStyle().Bold(true)
+	// styleDraft marks an unsent draft in a thread row: red, as Gmail does,
+	// and bold so it still stands out where the terminal shows no colour.
+	// The one colour here, and the terminal's own red (ANSI 1), not a fixed
+	// value, so the light/dark theme still decides how it looks.
+	styleDraft = lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Bold(true)
 )
 
 // truncCells shortens s to at most n terminal cells, ending with "…" when it

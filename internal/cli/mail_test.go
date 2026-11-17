@@ -1427,3 +1427,41 @@ func TestMailSendCarriesTheAccountsDisplayName(t *testing.T) {
 		t.Errorf("--from was overridden:\n%s", raw)
 	}
 }
+
+// Lennert's case through the JSON agents read: under Sent, a conversation
+// whose newest message is an unsent reply draft is dated by the reply that
+// went out and says it holds a draft.
+func TestMailListThreadsUnderSentWithADraft(t *testing.T) {
+	env := newTestEnv(t)
+	env.Mail["work"].AddMailbox(model.Mailbox{RemoteID: "SENT", Name: "Sent", Role: model.RoleSent})
+	env.Mail["work"].AddMailbox(model.Mailbox{RemoteID: "DRAFTS", Name: "Drafts", Role: model.RoleDrafts})
+	sentAt := env.Now.Add(-24 * time.Hour)
+	draftAt := env.Now.Add(-time.Hour)
+	env.Seed("work",
+		fake.NewMsg("m-in", RawMail(t, "anna@example.com", "me@example.com", "Toegang", "mag ik?", env.Now.Add(-48*time.Hour))).
+			WithReceived(env.Now.Add(-48*time.Hour)).WithThread("t-a"),
+		fake.NewMsg("m-reply", RawMail(t, "me@example.com", "anna@example.com", "Re: Toegang", "ja", sentAt)).
+			WithReceived(sentAt).WithThread("t-a").WithMailboxes("SENT"),
+		fake.NewMsg("m-draft", RawMail(t, "me@example.com", "anna@example.com", "Re: Toegang", "nog niet af", draftAt)).
+			WithReceived(draftAt).WithThread("t-a").WithMailboxes("DRAFTS").WithFlags(model.Flags{Draft: true}),
+	)
+
+	out := env.MustRun("mail", "list", "--thread", "--account", "work", "--mailbox", "sent")
+	var rows []struct {
+		ID      string `json:"id"`
+		LastUTC int64  `json:"last_utc"`
+		Drafts  int    `json:"drafts"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("decode: %v\n%s", err, out)
+	}
+	if len(rows) != 1 || rows[0].ID != "work:t:t-a" {
+		t.Fatalf("sent threads = %+v\n%s", rows, out)
+	}
+	if rows[0].LastUTC != sentAt.Unix() {
+		t.Errorf("last_utc = %d, want the sent reply %d (the draft is %d)", rows[0].LastUTC, sentAt.Unix(), draftAt.Unix())
+	}
+	if rows[0].Drafts != 1 {
+		t.Errorf("drafts = %d, want 1", rows[0].Drafts)
+	}
+}

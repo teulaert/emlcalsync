@@ -168,3 +168,44 @@ func TestAttachmentDescs(t *testing.T) {
 		})
 	}
 }
+
+// A thread holding an unsent draft leads with "Draft", so a conversation
+// listed under Sent cannot read as answered while the reply is still being
+// written. The drafts view lists nothing else and leaves the word out.
+func TestMailListMarksThreadsHoldingADraft(t *testing.T) {
+	d, _ := newTriageDeps(t)
+	r := newTestRoot(t, d)
+	list, ok := r.top().(*mailList)
+	if !ok {
+		t.Fatalf("top screen is %T, want the mail list", r.top())
+	}
+	list.threads = []model.Thread{
+		{AccountID: "work", ThreadID: "t1", Subject: "Re: toegang", Last: testNow, Drafts: 1, MessageCount: 3},
+		{AccountID: "work", ThreadID: "t2", Subject: "Lunch", Last: testNow},
+	}
+	for _, cursor := range []int{0, 1} { // marked whether or not it is selected
+		list.cursor = cursor
+		view := list.View(r.w, r.bodyHeight())
+		rows := strings.Split(stripANSI(view), "\n")
+		if !strings.Contains(rows[0], "Draft Re: toegang") {
+			t.Errorf("cursor %d: draft thread row has no mark:\n%q", cursor, rows[0])
+		}
+		if strings.Contains(rows[1], "Draft") {
+			t.Errorf("cursor %d: a thread without drafts is marked:\n%q", cursor, rows[1])
+		}
+		// Red (ANSI 31) on the word itself, as Gmail shows it.
+		raw := strings.Split(view, "\n")[0]
+		if i := strings.Index(raw, "Draft"); i < 0 || !strings.Contains(raw[:i], "31") {
+			t.Errorf("cursor %d: the mark is not red:\n%q", cursor, raw)
+		}
+	}
+	for i, mb := range mailboxCycle {
+		if mb.label == "drafts" {
+			list.mailbox = i
+		}
+	}
+	rows := strings.Split(stripANSI(list.View(r.w, r.bodyHeight())), "\n")
+	if strings.Contains(rows[0], "Draft") {
+		t.Errorf("drafts view repeats the mark:\n%q", rows[0])
+	}
+}

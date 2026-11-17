@@ -126,6 +126,12 @@ type mailThreadRow struct {
 	Participants []model.Address `json:"participants"`
 	PartShort    string          `json:"-"        table:"PARTICIPANTS,max=30"`
 
+	// Drafts counts unsent drafts in the thread (not sent, not discarded). A
+	// thread listed under Sent can hold a reply that was never sent; this is
+	// what says so.
+	Drafts   int    `json:"drafts"`
+	DraftStr string `json:"-"                table:"DRAFT"`
+
 	Account string `json:"account"          table:"ACCOUNT"`
 }
 

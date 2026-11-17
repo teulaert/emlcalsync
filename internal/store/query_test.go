@@ -258,8 +258,14 @@ func TestThreads(t *testing.T) {
 	for _, x := range work {
 		ids = append(ids, x.ThreadID)
 	}
-	if !equalStrings(ids, []string{"th-invoice", "th-news"}) {
+	// A mailbox view is ordered by each thread's newest message in that
+	// mailbox: th-invoice's inbox message (w1) is older than th-news's, and
+	// its later message (w3) was archived, so it sorts second here.
+	if !equalStrings(ids, []string{"th-news", "th-invoice"}) {
 		t.Fatalf("filtered ListThreads = %v", ids)
+	}
+	if !work[1].Last.Equal(base) {
+		t.Errorf("inbox view dates th-invoice %v, want its inbox message's %v", work[1].Last, base)
 	}
 
 	// A thread whose only matching message is filtered out disappears.

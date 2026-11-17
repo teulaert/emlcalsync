@@ -348,11 +348,12 @@ func (s *Store) RebuildThreads(ctx context.Context, accountID string) error {
 func scanThread(sc scanner) (model.Thread, error) {
 	var t model.Thread
 	var subject, participants sql.NullString
-	var first, last, count, unread, attach sql.NullInt64
+	var first, last, count, unread, attach, drafts sql.NullInt64
 	if err := sc.Scan(&t.AccountID, &t.ThreadID, &subject, &first, &last,
-		&count, &unread, &attach, &participants); err != nil {
+		&count, &unread, &attach, &participants, &drafts); err != nil {
 		return t, err
 	}
+	t.Drafts = int(drafts.Int64)
 	t.Subject = subject.String
 	t.First = nullTime(first)
 	t.Last = nullTime(last)
@@ -364,7 +365,20 @@ func scanThread(sc scanner) (model.Thread, error) {
 }
 
 const threadCols = `t.account_id, t.thread_id, t.subject, t.first_utc, t.last_utc,
-	t.message_count, t.unread_count, t.has_attachments, t.participants_json`
+	t.message_count, t.unread_count, t.has_attachments, t.participants_json, ` + threadDraftsSQL
+
+// threadDraftsSQL counts the drafts in thread t that are still being written:
+// live, and not in the trash. Gmail keeps the DRAFT label on a draft that was
+// sent or discarded and adds TRASH, the same rule the drafts view applies
+// (see MessageFilter.MailboxRole). It is computed when read rather than kept
+// in the summary row: it only runs for the rows a page returns, and a stored
+// count would need a migration and a rebuild of every thread.
+const threadDraftsSQL = `(SELECT count(*) FROM messages d ` + byThread + `
+	  WHERE d.account_id = t.account_id AND d.thread_id = t.thread_id
+	    AND d.is_draft = 1 AND d.deleted_at IS NULL
+	    AND NOT EXISTS (SELECT 1 FROM message_mailboxes dm
+	                      JOIN mailboxes db ON db.id = dm.mailbox_id
+	                     WHERE dm.message_id = d.id AND lower(db.role) = 'trash'))`
 
 // ListThreads returns thread summaries whose messages match f, newest activity
 // first. Filter fields that are per-message (From, mailbox, unread, …) select
@@ -375,6 +389,9 @@ func (s *Store) ListThreads(ctx context.Context, f MessageFilter) ([]model.Threa
 }
 
 func (tx *Tx) ListThreads(ctx context.Context, f MessageFilter) ([]model.Thread, error) {
+	if f.MailboxRole != "" || f.MailboxName != "" {
+		return tx.listThreadsInMailbox(ctx, f)
+	}
 	where, args := f.where()
 	// Keyset pagination: rows that leave or join the query ahead of the page
 	// shift an offset, but not a key. It is on t, so it belongs in the outer
@@ -407,6 +424,68 @@ func (tx *Tx) ListThreads(ctx context.Context, f MessageFilter) ([]model.Thread,
 	}
 	return out, rows.Err()
 }
+
+// listThreadsInMailbox lists the threads of one mailbox view, each dated and
+// ordered by its newest message *in that view*.
+//
+// A thread is in a mailbox when any of its messages is, but its summary is
+// dated by its newest message anywhere. In Sent that put a conversation whose
+// newest message is today's unsent reply draft at the top, dated today, so it
+// read as sent today. A mailbox view shows when something last happened in
+// that mailbox: Sent by the last message sent, Inbox by the last one received.
+// Thread.Last carries that date here, and the page key is on it.
+//
+// Grouping the view's messages costs more than walking threads by last_utc,
+// so views that do not name a mailbox keep the cheaper query.
+func (tx *Tx) listThreadsInMailbox(ctx context.Context, f MessageFilter) ([]model.Thread, error) {
+	where, args := f.where()
+	paged := ""
+	if f.AfterThread != "" {
+		paged = ` WHERE (v.shown < ? OR (v.shown = ? AND
+			(v.thread_id < ? OR (v.thread_id = ? AND v.account_id < ?))))`
+		args = append(args, f.AfterLast.Unix(), f.AfterLast.Unix(), f.AfterThread, f.AfterThread, f.AfterAccount)
+	}
+	limit, limitArgs := f.limitClause()
+	// The page is cut before the summaries are joined, so the per-row draft
+	// count runs for the rows returned and not for the whole mailbox.
+	rows, err := tx.q.QueryContext(ctx, `
+		WITH v AS (
+		  SELECT m.account_id, m.thread_id, max(m.received_utc) AS shown
+		    FROM messages m WHERE `+where+`
+		   GROUP BY m.account_id, m.thread_id),
+		page AS (
+		  SELECT v.account_id, v.thread_id, v.shown FROM v`+paged+`
+		   ORDER BY v.shown DESC, v.thread_id DESC, v.account_id DESC`+limit+`)
+		SELECT `+threadCols+`, page.shown
+		  FROM page JOIN threads t ON t.account_id = page.account_id AND t.thread_id = page.thread_id
+		 ORDER BY page.shown DESC, t.thread_id DESC, t.account_id DESC`,
+		append(args, limitArgs...)...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list threads: %w", err)
+	}
+	defer rows.Close()
+	var out []model.Thread
+	for rows.Next() {
+		var shown sql.NullInt64
+		t, err := scanThread(scanWith{rows, &shown})
+		if err != nil {
+			return nil, err
+		}
+		if shown.Valid {
+			t.Last = nullTime(shown)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// scanWith scans a row that carries extra columns after a known prefix.
+type scanWith struct {
+	sc    scanner
+	extra *sql.NullInt64
+}
+
+func (s scanWith) Scan(dest ...any) error { return s.sc.Scan(append(dest, s.extra)...) }
 
 // GetThread returns a thread summary and its messages, oldest first, with
 // bodies loaded. Deleted messages are included only when includeDeleted is set.

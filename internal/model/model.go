@@ -242,6 +242,9 @@ type Thread struct {
 	// file, so a list can say so without opening the conversation.
 	HasAttachments bool
 	Participants   []Address
+	// Drafts counts the drafts in the thread that are still being written
+	// (not sent, not discarded), so a row can say a reply is unsent.
+	Drafts int
 }
 
 func (t *Thread) PublicID() string { return ThreadPublicID(t.AccountID, t.ThreadID) }
