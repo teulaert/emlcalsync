@@ -1042,6 +1042,13 @@ func (m *Mail) Trash(ctx context.Context, ids []string) error {
 // emails that carry $draft and leaves any other id alone. Moving a spent draft
 // to the trash (Trash) keeps $draft on it, so every sent reply would leave a
 // draft behind in the trash.
+//
+// The check and the destroy are one decision, so they are tied to one state:
+// the destroy carries ifInState, the Email state the check read. If anything
+// changed in between -- another client sent the draft, which takes $draft
+// off it -- the server refuses with stateMismatch and the check runs again
+// against what is there now, instead of destroying a message that is no
+// longer a draft.
 func (m *Mail) DiscardDrafts(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -1054,30 +1061,53 @@ func (m *Mail) DiscardDrafts(ctx context.Context, ids []string) error {
 	if err != nil {
 		return err
 	}
-	var drafts []string
-	for chunk := range slices.Chunk(ids, max(1, s.Core.MaxObjectsInGet)) {
+	size := max(1, min(s.Core.MaxObjectsInGet, s.Core.MaxObjectsInSet))
+	for chunk := range slices.Chunk(ids, size) {
+		if err := m.discardDraftChunk(ctx, acct, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// discardAttempts bounds how often a busy account may move under the check
+// before the discard gives up; the draft then simply stays where it is.
+const discardAttempts = 5
+
+func (m *Mail) discardDraftChunk(ctx context.Context, acct string, ids []string) error {
+	for range discardAttempts {
 		var got struct {
-			List []struct {
+			State string `json:"state"`
+			List  []struct {
 				ID       string          `json:"id"`
 				Keywords map[string]bool `json:"keywords"`
 			} `json:"list"`
 		}
 		if err := m.c.call(ctx, m.using(), "Email/get", map[string]any{
-			"accountId": acct, "ids": chunk, "properties": []string{"id", "keywords"},
+			"accountId": acct, "ids": ids, "properties": []string{"id", "keywords"},
 		}, &got); err != nil {
 			return err
 		}
+		var drafts []string
 		for _, e := range got.List {
 			if e.Keywords[kwDraft] {
 				drafts = append(drafts, e.ID)
 			}
 		}
-	}
-	for chunk := range slices.Chunk(drafts, max(1, s.Core.MaxObjectsInSet)) {
+		if len(drafts) == 0 {
+			return nil
+		}
+		if got.State == "" {
+			return errors.New("jmap: Email/get returned no state; refusing an unconditional destroy")
+		}
 		var sr setResponse
-		if err := m.c.call(ctx, m.using(), "Email/set", map[string]any{
-			"accountId": acct, "destroy": chunk,
-		}, &sr); err != nil {
+		err := m.c.call(ctx, m.using(), "Email/set", map[string]any{
+			"accountId": acct, "ifInState": got.State, "destroy": drafts,
+		}, &sr)
+		if IsMethodError(err, "stateMismatch") {
+			continue // something changed since the check: check again
+		}
+		if err != nil {
 			return err
 		}
 		for id, se := range sr.NotDestroyed {
@@ -1085,11 +1115,9 @@ func (m *Mail) DiscardDrafts(ctx context.Context, ids []string) error {
 				delete(sr.NotDestroyed, id)
 			}
 		}
-		if err := sr.firstError("discard drafts"); err != nil {
-			return err
-		}
+		return sr.firstError("discard drafts")
 	}
-	return nil
+	return fmt.Errorf("jmap: discard drafts: the account kept changing under %d attempts; left as is", discardAttempts)
 }
 
 // Restore adds messages back to the inbox and drops any archive or trash

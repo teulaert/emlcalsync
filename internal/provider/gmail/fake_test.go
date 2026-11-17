@@ -43,6 +43,9 @@ type fakeGmail struct {
 	failDraftOnce int               // status returned by the first drafts.create
 	drafts        map[string]string // draft id -> message id, for drafts.list/delete
 	deletedDrafts []string          // draft ids drafts.delete removed
+	// beforeDraftGet runs once, under the lock, at the next drafts.get: another
+	// client acting between the listing and the delete.
+	beforeDraftGet func(f *fakeGmail)
 
 	// observations
 	gets        int
@@ -88,6 +91,7 @@ func newFakeGmail(t *testing.T) *fakeGmail {
 	mux.HandleFunc("POST /gmail/v1/users/{user}/drafts", f.handleDraftCreate)
 	mux.HandleFunc("GET /gmail/v1/users/{user}/drafts", f.handleDraftsList)
 	mux.HandleFunc("DELETE /gmail/v1/users/{user}/drafts/{id}", f.handleDraftDelete)
+	mux.HandleFunc("GET /gmail/v1/users/{user}/drafts/{id}", f.handleDraftGet)
 	mux.HandleFunc("POST /batch/gmail/v1", f.handleBatch)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		f.t.Errorf("fake gmail: unexpected request %s %s", r.Method, r.URL.Path)
@@ -398,6 +402,22 @@ func (f *fakeGmail) handleDraftsList(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Unlock()
 	f.writeJSON(w, resp)
+}
+
+func (f *fakeGmail) handleDraftGet(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	f.mu.Lock()
+	if hook := f.beforeDraftGet; hook != nil {
+		f.beforeDraftGet = nil
+		hook(f)
+	}
+	msg, ok := f.drafts[id]
+	f.mu.Unlock()
+	if !ok {
+		apiError(w, http.StatusNotFound, "notFound", "draft not found")
+		return
+	}
+	f.writeJSON(w, &gmailapi.Draft{Id: id, Message: &gmailapi.Message{Id: msg}})
 }
 
 func (f *fakeGmail) handleDraftDelete(w http.ResponseWriter, r *http.Request) {

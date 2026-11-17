@@ -181,7 +181,8 @@ func (m *Mail) DiscardDrafts(ctx context.Context, ids []string) error {
 	for _, id := range ids {
 		want[id] = true
 	}
-	var draftIDs []string
+	type listed struct{ draftID, messageID string }
+	var found []listed
 	page := ""
 	for {
 		var resp *gmailapi.ListDraftsResponse
@@ -199,7 +200,7 @@ func (m *Mail) DiscardDrafts(ctx context.Context, ids []string) error {
 		}
 		for _, d := range resp.Drafts {
 			if d.Message != nil && want[d.Message.Id] {
-				draftIDs = append(draftIDs, d.Id)
+				found = append(found, listed{d.Id, d.Message.Id})
 				delete(want, d.Message.Id)
 			}
 		}
@@ -211,9 +212,31 @@ func (m *Mail) DiscardDrafts(ctx context.Context, ids []string) error {
 	if len(want) > 0 {
 		m.log.Debug("not drafts on the server, left alone", "ids", len(want))
 	}
-	for _, id := range draftIDs {
-		err := m.do(ctx, "drafts.delete", unitsDraftsDelete, func() error {
-			return m.svc.Users.Drafts.Delete(me, id).Context(ctx).Do()
+	for _, d := range found {
+		// A draft id outlives edits: another client updating the draft gives
+		// it a new message under the same id, and deleting by id would then
+		// throw away the newer words. Read it again right before the delete
+		// and only delete the message that was asked for. Gmail has no
+		// conditional delete, so an edit landing between this read and the
+		// delete is the remaining (sub-second) window.
+		var cur *gmailapi.Draft
+		err := m.do(ctx, "drafts.get", unitsDraftsGet, func() error {
+			var err error
+			cur, err = m.svc.Users.Drafts.Get(me, d.draftID).Format("minimal").Context(ctx).Do()
+			return err
+		})
+		if isNotFound(err) {
+			continue // sent or deleted meanwhile: nothing left to remove
+		}
+		if err != nil {
+			return err
+		}
+		if cur.Message == nil || cur.Message.Id != d.messageID {
+			m.log.Debug("draft changed since it was listed, left alone", "draft", d.draftID)
+			continue
+		}
+		err = m.do(ctx, "drafts.delete", unitsDraftsDelete, func() error {
+			return m.svc.Users.Drafts.Delete(me, d.draftID).Context(ctx).Do()
 		})
 		if err != nil && !isNotFound(err) {
 			return err

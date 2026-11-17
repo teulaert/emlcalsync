@@ -78,8 +78,10 @@ type fakeServer struct {
 	blobs     map[string][]byte
 	mailboxes []map[string]any
 
-	emailState   string
-	mailboxState string
+	emailState string
+	// beforeEmailSet, when set, runs once at the next Email/set (see emailSet).
+	beforeEmailSet func(f *fakeServer)
+	mailboxState   string
 
 	emailChanges   map[string]changeScript
 	mailboxChanges map[string]changeScript
@@ -904,6 +906,15 @@ func (f *fakeServer) applyEmailPatch(e *fakeEmail, patch map[string]any) {
 }
 
 func (f *fakeServer) emailSet(name string, args map[string]any) (string, map[string]any) {
+	// beforeEmailSet runs once, under the lock, to stand for another client
+	// changing the account between a caller's Email/get and this Email/set.
+	if hook := f.beforeEmailSet; hook != nil {
+		f.beforeEmailSet = nil
+		hook(f)
+	}
+	if want, ok := args["ifInState"].(string); ok && want != f.emailState {
+		return "error", methodErrorArgs("stateMismatch", "state is "+f.emailState)
+	}
 	update, _ := args["update"].(map[string]any)
 	updated := map[string]any{}
 	notUpdated := map[string]any{}

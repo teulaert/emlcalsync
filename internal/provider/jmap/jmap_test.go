@@ -1685,3 +1685,31 @@ func TestDiscardDraftsDestroysOnlyDrafts(t *testing.T) {
 		t.Error("a message that is not a draft was destroyed")
 	}
 }
+
+// Another client sends the draft between DiscardDrafts' check and its destroy:
+// $draft comes off and the account state moves. The destroy is conditional on
+// the state the check read, so the server refuses it, the check runs again,
+// and the message -- a sent message now -- is left alone.
+func TestDiscardDraftsDoesNotDestroyADraftSentMeanwhile(t *testing.T) {
+	f := newFakeServer(t)
+	f.addEmail(&fakeEmail{ID: "d1", ThreadID: "t1", MailboxIDs: map[string]bool{"mb-drafts": true},
+		Keywords: map[string]bool{"$draft": true, "$seen": true}}, []byte("Subject: d\r\n\r\nx\r\n"))
+	f.mu.Lock()
+	f.beforeEmailSet = func(f *fakeServer) {
+		e := f.emails["d1"]
+		delete(e.Keywords, "$draft")
+		e.MailboxIDs = map[string]bool{"mb-sent": true}
+		f.emailState += "+sent-elsewhere"
+	}
+	f.mu.Unlock()
+	m := f.client(t).Mail()
+
+	if err := m.DiscardDrafts(testCtx(t), []string{"d1"}); err != nil {
+		t.Fatalf("DiscardDrafts: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.emails["d1"]; !ok {
+		t.Fatal("the message, sent by another client meanwhile, was destroyed")
+	}
+}

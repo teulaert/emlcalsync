@@ -885,3 +885,29 @@ func TestDiscardDraftsDeletesThroughTheDraftsAPI(t *testing.T) {
 		t.Error("a draft that was not asked for was deleted")
 	}
 }
+
+// A draft id survives edits. If another client edits the draft after it was
+// listed, it holds a new message under the same draft id: deleting it would
+// throw away the newer words, so it is left alone. A draft sent meanwhile is
+// gone already, which is fine.
+func TestDiscardDraftsLeavesADraftEditedOrSentMeanwhile(t *testing.T) {
+	f := newFakeGmail(t)
+	f.drafts = map[string]string{"r-1": "msg-a", "r-2": "msg-b"}
+	f.beforeDraftGet = func(f *fakeGmail) {
+		f.drafts["r-1"] = "msg-a-edited" // edited elsewhere
+		delete(f.drafts, "r-2")          // sent elsewhere
+	}
+	m := newMail(t, f, nil)
+
+	if err := m.DiscardDrafts(context.Background(), []string{"msg-a", "msg-b"}); err != nil {
+		t.Fatalf("DiscardDrafts: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.deletedDrafts) != 0 {
+		t.Errorf("deleted %v, want nothing: one draft was edited, the other sent", f.deletedDrafts)
+	}
+	if f.drafts["r-1"] != "msg-a-edited" {
+		t.Error("the edited draft is gone")
+	}
+}
