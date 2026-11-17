@@ -350,6 +350,15 @@ func (cal *Calendar) EventChanges(ctx context.Context, calendarRemote, since str
 			return nil, err
 		}
 		for i, js := range evs {
+			// The query filter is the server's word that the event is in this
+			// calendar, but a server that ignores a filter condition it does
+			// not know lists the whole account for every calendar (agmail did
+			// for {"inCalendar": id}), and each event then lands in all of them.
+			// The event's own calendarIds settles it; only a server that sends
+			// none is taken at its filter's word.
+			if len(js.CalendarIDs) > 0 && !js.CalendarIDs[calendarRemote] {
+				continue
+			}
 			out.Upserted = append(out.Upserted,
 				toModelEvents(js, raws[i], calendarRemote, self, cal.c.log)...)
 		}
