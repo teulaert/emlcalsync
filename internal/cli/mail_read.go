@@ -138,7 +138,13 @@ func mailThreadRows(threads []model.Thread, app *App) []mailThreadRow {
 		if t.HasAttachments {
 			att = "A" // the letter MailFlags uses, so both rows read alike
 		}
+		draft := ""
+		if t.Drafts > 0 {
+			draft = "Draft"
+		}
 		rows = append(rows, mailThreadRow{
+			Drafts:         t.Drafts,
+			DraftStr:       draft,
 			ID:             t.PublicID(),
 			Last:           output.T(t.Last),
 			LastUTC:        t.Last.Unix(),
