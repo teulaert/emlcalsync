@@ -1357,10 +1357,13 @@ first full build and the two adversarial reviews (`docs/reviews/`).
   per process) and sent it 213 ms after the sender did.
 - **`send --draft`** (and finishing a draft in the TUI) sends the draft's raw
   bytes and then discards the draft (providers return the draft's *message* id
-  from `CreateDraft`). Discarding deletes it where the provider can
-  (`provider.DraftDiscarder`: Gmail `drafts.delete`, JMAP `Email/set` destroy,
-  only for ids that are still drafts) and trashes it elsewhere: a trashed Gmail
-  draft keeps DRAFT beside TRASH, and a trashed JMAP draft keeps `$draft`.
+  from `CreateDraft`). Discarding deletes it where the provider can do so
+  safely (`provider.DraftDiscarder`: JMAP `Email/set` destroy with `ifInState`
+  set to the state in which the ids were checked to still be drafts, rechecked
+  on `stateMismatch`) and trashes it elsewhere. Gmail trashes on purpose: it has
+  no conditional delete and a draft id survives edits, so a delete could hit a
+  version edited elsewhere. The trashed draft keeps DRAFT beside TRASH, emlcal
+  ignores it, and Google purges it after 30 days (decision 2026-11-17).
   Superseded earlier versions of a reply hold unsent words and are trashed, not
   deleted.
 - **JMAP enumeration** uses `anchor`/`anchorOffset` paging (cursor is a JSON

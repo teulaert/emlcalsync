@@ -148,9 +148,6 @@ const (
 	unitsMessagesTrash  = 20
 	unitsMessagesSend   = 100
 	unitsDraftsCreate   = 10
-	unitsDraftsList     = 5
-	unitsDraftsDelete   = 10
-	unitsDraftsGet      = 5
 	unitsAttachmentGet  = 20
 )
 

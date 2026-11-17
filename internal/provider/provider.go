@@ -124,10 +124,15 @@ type MailProvider interface {
 // DraftDiscarder is a MailProvider that can remove a draft outright once it
 // has been sent or thrown away, rather than move it to the trash.
 //
-// Trash is the wrong place for a spent draft. Gmail keeps the DRAFT label on a
-// trashed draft and adds TRASH, and a JMAP draft moved to the trash still
-// carries $draft; either way a copy of every sent reply piles up in the trash
-// as a draft. Gmail itself deletes the draft when it sends one.
+// Trash is a poor place for a spent draft: a JMAP draft moved to the trash
+// still carries $draft, so a copy of every sent reply piles up there as a
+// draft.
+//
+// Only implement it where the delete can be made conditional on the version
+// that was checked (JMAP: ifInState). Deleting a draft that another client
+// sent or edited meanwhile loses mail. Gmail cannot do that -- no conditional
+// delete, and a draft id outlives edits -- so it does not implement this and
+// a sent Gmail draft is trashed (Lennert's decision, 2026-11-17).
 //
 // ids that are not drafts on the server are left alone, so a stale index can
 // never get a real message deleted through this.

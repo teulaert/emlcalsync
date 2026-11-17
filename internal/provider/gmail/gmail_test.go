@@ -864,50 +864,14 @@ func TestVisibleRecipientsStopsAtTheHeaderBlock(t *testing.T) {
 	}
 }
 
-// A sent draft is removed through drafts.delete, found by its message id
-// across pages of drafts.list. A message id Gmail does not list as a draft is
-// never deleted.
-func TestDiscardDraftsDeletesThroughTheDraftsAPI(t *testing.T) {
-	f := newFakeGmail(t)
-	f.drafts = map[string]string{"r-1": "msg-a", "r-2": "msg-b", "r-3": "msg-c"}
-	m := newMail(t, f, nil)
-
-	if err := m.DiscardDrafts(context.Background(), []string{"msg-c", "msg-a", "not-a-draft"}); err != nil {
-		t.Fatalf("DiscardDrafts: %v", err)
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	sort.Strings(f.deletedDrafts)
-	if strings.Join(f.deletedDrafts, ",") != "r-1,r-3" {
-		t.Errorf("deleted drafts = %v, want [r-1 r-3]", f.deletedDrafts)
-	}
-	if _, ok := f.drafts["r-2"]; !ok {
-		t.Error("a draft that was not asked for was deleted")
-	}
-}
-
-// A draft id survives edits. If another client edits the draft after it was
-// listed, it holds a new message under the same draft id: deleting it would
-// throw away the newer words, so it is left alone. A draft sent meanwhile is
-// gone already, which is fine.
-func TestDiscardDraftsLeavesADraftEditedOrSentMeanwhile(t *testing.T) {
-	f := newFakeGmail(t)
-	f.drafts = map[string]string{"r-1": "msg-a", "r-2": "msg-b"}
-	f.beforeDraftGet = func(f *fakeGmail) {
-		f.drafts["r-1"] = "msg-a-edited" // edited elsewhere
-		delete(f.drafts, "r-2")          // sent elsewhere
-	}
-	m := newMail(t, f, nil)
-
-	if err := m.DiscardDrafts(context.Background(), []string{"msg-a", "msg-b"}); err != nil {
-		t.Fatalf("DiscardDrafts: %v", err)
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.deletedDrafts) != 0 {
-		t.Errorf("deleted %v, want nothing: one draft was edited, the other sent", f.deletedDrafts)
-	}
-	if f.drafts["r-1"] != "msg-a-edited" {
-		t.Error("the edited draft is gone")
+// Gmail has no conditional delete and a draft id outlives edits, so deleting a
+// sent draft by draft id could throw away a newer version edited elsewhere.
+// Lennert's decision: on Gmail a sent draft goes to the trash (where emlcal
+// ignores it and Google purges it after 30 days). The provider must therefore
+// not offer DraftDiscarder, so the engine falls back to Trash.
+func TestGmailDoesNotDiscardDraftsByDeleting(t *testing.T) {
+	m := newMail(t, newFakeGmail(t), nil)
+	if _, ok := any(m).(provider.DraftDiscarder); ok {
+		t.Fatal("the Gmail provider implements DraftDiscarder; sent drafts must be trashed, not deleted")
 	}
 }

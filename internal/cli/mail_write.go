@@ -632,9 +632,9 @@ func mailSubmit(cmd *cobra.Command, app *App, c *mailComposed, kind sync.OpKind)
 	}
 	// The draft the send was built from is usually a separate message on the
 	// server: submitting its raw bytes leaves it behind, so discard it once the
-	// send actually went through -- deleted where the provider can (Gmail
-	// drafts.delete, JMAP destroy), since a trashed draft stays a draft in the
-	// trash; trashed where it cannot. Best effort — a failure here must not fail
+	// send actually went through -- deleted where the provider can do so
+	// safely (JMAP: a destroy conditional on the checked state), trashed
+	// elsewhere (Gmail, IMAP). Best effort — a failure here must not fail
 	// the send, it only leaves a stale draft the user can delete.
 	//
 	// Unless the send *was* the draft. A provider that recognises the bytes it
