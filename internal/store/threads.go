@@ -152,18 +152,42 @@ func (tx *Tx) mergeThreads(ctx context.Context, accountID, winner string, losers
 	return nil
 }
 
+// byThread pins a thread's messages to the (account_id, thread_id) index.
+//
+// Both thread reads also order by received_utc, and without ANALYZE statistics
+// SQLite prefers messages_account (account_id, received_utc) for that: it
+// skips the sort but walks every message of the account to find a handful.
+// On a 70k-message account that is about a gigabyte read per call, and
+// refreshThread runs once per updated message inside a write transaction, so
+// a large envelope refresh held the write lock for hours. A thread is small;
+// sorting it is free.
+const byThread = `INDEXED BY messages_thread`
+
+// threadSummarySQL reads what refreshThread folds into a thread's summary.
+const threadSummarySQL = `
+		SELECT subject, from_addr, from_name, to_json, cc_json, received_utc, is_unread,
+		       has_attachments
+		  FROM messages ` + byThread + `
+		 WHERE account_id = ? AND thread_id = ? AND deleted_at IS NULL
+		 ORDER BY received_utc, id`
+
+// threadMessagesSQL lists a thread's messages, oldest first.
+func threadMessagesSQL(includeDeleted bool) string {
+	q := `SELECT ` + messageColsBody + ` FROM messages m ` + byThread + `
+	       WHERE m.account_id = ? AND m.thread_id = ?`
+	if !includeDeleted {
+		q += ` AND m.deleted_at IS NULL`
+	}
+	return q + ` ORDER BY m.received_utc, m.id`
+}
+
 // refreshThread recomputes the threads summary row for one (account, thread)
 // from its non-deleted messages, deleting the row when nothing is left.
 func (tx *Tx) refreshThread(ctx context.Context, accountID, threadID string) error {
 	if threadID == "" {
 		return nil
 	}
-	rows, err := tx.q.QueryContext(ctx, `
-		SELECT subject, from_addr, from_name, to_json, cc_json, received_utc, is_unread,
-		       has_attachments
-		  FROM messages
-		 WHERE account_id = ? AND thread_id = ? AND deleted_at IS NULL
-		 ORDER BY received_utc, id`, accountID, threadID)
+	rows, err := tx.q.QueryContext(ctx, threadSummarySQL, accountID, threadID)
 	if err != nil {
 		return fmt.Errorf("store: refresh thread %s/%s: %w", accountID, threadID, err)
 	}
@@ -402,13 +426,7 @@ func (tx *Tx) GetThread(ctx context.Context, accountID, threadID string, include
 		return nil, nil, fmt.Errorf("store: get thread %s:%s: %w", accountID, threadID, err)
 	}
 
-	q := `SELECT ` + messageColsBody + ` FROM messages m
-	       WHERE m.account_id = ? AND m.thread_id = ?`
-	if !includeDeleted {
-		q += ` AND m.deleted_at IS NULL`
-	}
-	q += ` ORDER BY m.received_utc, m.id`
-	rows, err := tx.q.QueryContext(ctx, q, accountID, threadID)
+	rows, err := tx.q.QueryContext(ctx, threadMessagesSQL(includeDeleted), accountID, threadID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("store: get thread messages: %w", err)
 	}
