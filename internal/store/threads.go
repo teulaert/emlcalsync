@@ -394,13 +394,15 @@ func (tx *Tx) ListThreads(ctx context.Context, f MessageFilter) ([]model.Thread,
 	}
 	where, args := f.where()
 	// Keyset pagination: rows that leave or join the query ahead of the page
-	// shift an offset, but not a key. It is on t, so it belongs in the outer
+	// shift an offset, but not a key. The key goes through unixOf: a row with
+	// no date stores 0 and reads back as Go's zero time, whose Unix() is far
+	// below 0, so binding that would skip every other undated row. It is on t, so it belongs in the outer
 	// WHERE, evaluated once per thread rather than once per message.
 	paged := ""
 	if f.AfterThread != "" {
 		paged = ` AND (t.last_utc < ? OR (t.last_utc = ? AND
 			(t.thread_id < ? OR (t.thread_id = ? AND t.account_id < ?))))`
-		args = append(args, f.AfterLast.Unix(), f.AfterLast.Unix(), f.AfterThread, f.AfterThread, f.AfterAccount)
+		args = append(args, unixOf(f.AfterLast), unixOf(f.AfterLast), f.AfterThread, f.AfterThread, f.AfterAccount)
 	}
 	limit, limitArgs := f.limitClause()
 	rows, err := tx.q.QueryContext(ctx,
@@ -443,14 +445,14 @@ func (tx *Tx) listThreadsInMailbox(ctx context.Context, f MessageFilter) ([]mode
 	if f.AfterThread != "" {
 		paged = ` WHERE (v.shown < ? OR (v.shown = ? AND
 			(v.thread_id < ? OR (v.thread_id = ? AND v.account_id < ?))))`
-		args = append(args, f.AfterLast.Unix(), f.AfterLast.Unix(), f.AfterThread, f.AfterThread, f.AfterAccount)
+		args = append(args, unixOf(f.AfterLast), unixOf(f.AfterLast), f.AfterThread, f.AfterThread, f.AfterAccount)
 	}
 	limit, limitArgs := f.limitClause()
 	// The page is cut before the summaries are joined, so the per-row draft
 	// count runs for the rows returned and not for the whole mailbox.
 	rows, err := tx.q.QueryContext(ctx, `
 		WITH v AS (
-		  SELECT m.account_id, m.thread_id, max(m.received_utc) AS shown
+		  SELECT m.account_id, m.thread_id, coalesce(max(m.received_utc), 0) AS shown
 		    FROM messages m WHERE `+where+`
 		   GROUP BY m.account_id, m.thread_id),
 		page AS (

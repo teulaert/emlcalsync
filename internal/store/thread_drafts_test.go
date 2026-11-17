@@ -139,3 +139,35 @@ func threadIDs(th []model.Thread) []string {
 	}
 	return out
 }
+
+// Undated messages store received_utc 0, which reads back as Go's zero time.
+// Paging past one must still reach the next undated thread, in a mailbox view
+// and in the plain view alike.
+func TestThreadPagingPastUndatedThreads(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "a")
+	for _, id := range []string{"u1", "u2", "u3"} {
+		putMessage(t, s, &model.Message{
+			AccountID: "a", RemoteID: id, ThreadID: "th-" + id, MailboxRemotes: []string{"mb-inbox"},
+		}, &mime.Parsed{Subject: id, From: addr("X", "x@example.com")})
+	}
+	for _, f := range []MessageFilter{{MailboxRole: "inbox"}, {}} {
+		var got []string
+		f.Limit = 1
+		for i := 0; i < 5; i++ {
+			page, err := s.ListThreads(ctx, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page) == 0 {
+				break
+			}
+			got = append(got, page[0].ThreadID)
+			f.AfterLast, f.AfterThread, f.AfterAccount = page[0].Last, page[0].ThreadID, page[0].AccountID
+		}
+		if len(got) != 3 {
+			t.Errorf("mailbox %q: paged through %v, want all 3 undated threads", f.MailboxRole, got)
+		}
+	}
+}
