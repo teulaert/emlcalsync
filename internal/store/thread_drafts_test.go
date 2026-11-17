@@ -234,3 +234,47 @@ func TestMigrationRedatesThreadsDatedByADraft(t *testing.T) {
 		t.Errorf("after migration the thread is dated %v, want its real message %v", th.Last, real)
 	}
 }
+
+// The CLI passes a localized mailbox name as MailboxName. Named or by role,
+// Sent is dated by the last message sent and Drafts by the draft; any other
+// named mailbox follows thread activity.
+func TestLocalizedSentAndDraftsNamesAreDatedLikeTheirRoles(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "a")
+	if err := s.ReplaceMailboxes(ctx, "a", []model.Mailbox{
+		{RemoteID: "mb-inbox", Name: "Postvak IN", Role: model.RoleInbox, SortOrder: 1},
+		{RemoteID: "mb-sent", Name: "Verzonden", Role: model.RoleSent, SortOrder: 2},
+		{RemoteID: "mb-drafts", Name: "Concepten", Role: model.RoleDrafts, SortOrder: 3},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sent, reply, draft := base, base.Add(2*time.Hour), base.Add(3*time.Hour)
+	put := func(remote string, at time.Time, isDraft bool, box string) {
+		putMessage(t, s, &model.Message{AccountID: "a", RemoteID: remote, ThreadID: "th", Received: at,
+			Flags: model.Flags{Draft: isDraft}, MailboxRemotes: []string{box}},
+			&mime.Parsed{Subject: "x", From: addr("A", "a@example.com"), Date: at})
+	}
+	put("s", sent, false, "mb-sent")
+	put("r", reply, false, "mb-inbox")
+	put("d", draft, true, "mb-drafts")
+
+	for _, c := range []struct {
+		f    MessageFilter
+		want time.Time
+	}{
+		{MessageFilter{MailboxName: "Verzonden"}, sent},
+		{MessageFilter{MailboxName: "verzonden", Accounts: []string{"a"}}, sent},
+		{MessageFilter{MailboxRole: "sent"}, sent},
+		{MessageFilter{MailboxName: "Concepten"}, draft},
+		{MessageFilter{MailboxName: "Postvak IN"}, reply},
+	} {
+		th, err := s.ListThreads(ctx, c.f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(th) != 1 || !th[0].Last.Equal(c.want) {
+			t.Errorf("%+v: threads %+v, want th dated %v", c.f, th, c.want)
+		}
+	}
+}

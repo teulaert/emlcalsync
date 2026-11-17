@@ -399,7 +399,11 @@ func (s *Store) ListThreads(ctx context.Context, f MessageFilter) ([]model.Threa
 }
 
 func (tx *Tx) ListThreads(ctx context.Context, f MessageFilter) ([]model.Thread, error) {
-	if datedByMailbox(f) {
+	byMailbox, err := tx.datedByMailbox(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	if byMailbox {
 		return tx.listThreadsInMailbox(ctx, f)
 	}
 	where, args := f.where()
@@ -446,12 +450,40 @@ func (tx *Tx) ListThreads(ctx context.Context, f MessageFilter) ([]model.Thread,
 // exception: it answers "what did I send, and when", so it shows the last
 // message actually sent. Drafts likewise shows the draft, which is the item
 // there.
-func datedByMailbox(f MessageFilter) bool {
-	switch strings.ToLower(f.MailboxRole) {
-	case string(model.RoleSent), string(model.RoleDrafts):
-		return true
+//
+// It is the mailbox's role that decides, however the view names it: the CLI
+// passes a localized name ("Verzonden") as MailboxName, and that view is Sent
+// all the same. A name is Sent or Drafts when a mailbox of that name in the
+// selected accounts carries the role; the filter itself still matches by name.
+func (tx *Tx) datedByMailbox(ctx context.Context, f MessageFilter) (bool, error) {
+	dated := func(role string) bool {
+		switch strings.ToLower(role) {
+		case string(model.RoleSent), string(model.RoleDrafts):
+			return true
+		}
+		return false
 	}
-	return false
+	if f.MailboxRole != "" {
+		return dated(f.MailboxRole), nil
+	}
+	if f.MailboxName == "" {
+		return false, nil
+	}
+	q := `SELECT 1 FROM mailboxes WHERE lower(name) = ? AND lower(role) IN (?, ?)`
+	args := []any{strings.ToLower(f.MailboxName), string(model.RoleSent), string(model.RoleDrafts)}
+	if len(f.Accounts) > 0 {
+		q += ` AND account_id IN (` + placeholders(len(f.Accounts)) + `)`
+		args = append(args, anySlice(f.Accounts)...)
+	}
+	var one int
+	err := tx.q.QueryRowContext(ctx, q+` LIMIT 1`, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store: mailbox role of %q: %w", f.MailboxName, err)
+	}
+	return true, nil
 }
 
 // listThreadsInMailbox lists the threads of one mailbox view, each dated and
