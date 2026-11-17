@@ -1536,3 +1536,37 @@ func TestParticipantsAcceptAnArray(t *testing.T) {
 		t.Errorf("a participants string decoded without error")
 	}
 }
+
+// A server that ignores the inCalendar filter (agmail did, in November 2026)
+// answers every calendar's query with the whole account. The full listing must
+// still put each event only in the calendar its calendarIds name; otherwise
+// every event shows up in every calendar.
+func TestFullListingHonoursCalendarIdsWhenTheFilterIsIgnored(t *testing.T) {
+	f := newFakeServer(t)
+	seedCalendars(f)
+	seedEvents(f, standupEvent(), holidayEvent()) // both in cal-1, none in cal-2
+	f.mu.Lock()
+	f.calendarFilterIgnored = true
+	f.mu.Unlock()
+	cal := f.client(t).Calendar()
+
+	empty, err := cal.EventChanges(testCtx(t), "cal-2", "")
+	if err != nil {
+		t.Fatalf("EventChanges cal-2: %v", err)
+	}
+	if len(empty.Upserted) != 0 {
+		t.Errorf("cal-2 holds no events but the listing gave %d", len(empty.Upserted))
+	}
+	full, err := cal.EventChanges(testCtx(t), "cal-1", "")
+	if err != nil {
+		t.Fatalf("EventChanges cal-1: %v", err)
+	}
+	if len(full.Upserted) != 2 {
+		t.Errorf("cal-1 listing gave %d events, want its 2", len(full.Upserted))
+	}
+	for _, e := range full.Upserted {
+		if e.CalendarRemote != "cal-1" {
+			t.Errorf("%s filed under %q", e.RemoteID, e.CalendarRemote)
+		}
+	}
+}

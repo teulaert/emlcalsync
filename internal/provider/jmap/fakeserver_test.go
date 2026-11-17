@@ -91,6 +91,9 @@ type fakeServer struct {
 	// calendarFilterPlural makes CalendarEvent/query reject {"inCalendar": id}
 	// so the client's fallback to {"inCalendars": [id]} is exercised.
 	calendarFilterPlural bool
+	// calendarFilterIgnored makes CalendarEvent/query silently ignore
+	// {"inCalendar": id} and list every event, as agmail did in November 2026.
+	calendarFilterIgnored bool
 	// rejectScheduling makes CalendarEvent/set reject sendSchedulingMessages.
 	rejectScheduling bool
 
@@ -787,7 +790,9 @@ func (f *fakeServer) dispatch(name string, args map[string]any, using []string) 
 			if f.calendarFilterPlural {
 				return "error", methodErrorArgs("unsupportedFilter", "use inCalendars")
 			}
-			want = v
+			if !f.calendarFilterIgnored {
+				want = v
+			}
 		} else if vs, ok := filter["inCalendars"].([]any); ok && len(vs) > 0 {
 			want, _ = vs[0].(string)
 		}
