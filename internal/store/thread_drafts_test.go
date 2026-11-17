@@ -278,3 +278,51 @@ func TestLocalizedSentAndDraftsNamesAreDatedLikeTheirRoles(t *testing.T) {
 		}
 	}
 }
+
+// One account's mailbox role must not decide another account's dating: a
+// name that is Sent in account a and an inbox in account b dates a's thread
+// by its last sent message and b's by activity.
+func TestNamedMailboxRoleIsDecidedPerAccount(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, c := range []struct {
+		acct string
+		role model.MailboxRole
+	}{{"a", model.RoleSent}, {"b", model.RoleInbox}} {
+		seedAccount(t, s, c.acct)
+		if err := s.ReplaceMailboxes(ctx, c.acct, []model.Mailbox{
+			{RemoteID: "mb-shared", Name: "Shared", Role: c.role, SortOrder: 1},
+			{RemoteID: "mb-other", Name: "Other", SortOrder: 2},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inShared, later := base, base.Add(2*time.Hour)
+	for _, acct := range []string{"a", "b"} {
+		for _, m := range []struct {
+			remote string
+			at     time.Time
+			box    string
+		}{{"x", inShared, "mb-shared"}, {"y", later, "mb-other"}} {
+			putMessage(t, s, &model.Message{AccountID: acct, RemoteID: m.remote, ThreadID: "th", Received: m.at,
+				MailboxRemotes: []string{m.box}}, &mime.Parsed{Subject: "s", From: addr("A", "a@example.com"), Date: m.at})
+		}
+	}
+	th, err := s.ListThreads(ctx, MessageFilter{MailboxName: "Shared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]time.Time{}
+	for _, x := range th {
+		got[x.AccountID] = x.Last
+	}
+	if !got["a"].Equal(inShared) {
+		t.Errorf("a (Shared is Sent) dated %v, want the sent message %v", got["a"], inShared)
+	}
+	if !got["b"].Equal(later) {
+		t.Errorf("b (Shared is an inbox) dated %v, want thread activity %v", got["b"], later)
+	}
+	if len(th) != 2 || th[0].AccountID != "b" {
+		t.Errorf("order = %+v, want b (later activity) first", th)
+	}
+}
