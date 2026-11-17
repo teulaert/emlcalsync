@@ -166,7 +166,7 @@ const byThread = `INDEXED BY messages_thread`
 // threadSummarySQL reads what refreshThread folds into a thread's summary.
 const threadSummarySQL = `
 		SELECT subject, from_addr, from_name, to_json, cc_json, received_utc, is_unread,
-		       has_attachments
+		       has_attachments, is_draft
 		  FROM messages ` + byThread + `
 		 WHERE account_id = ? AND thread_id = ? AND deleted_at IS NULL
 		 ORDER BY received_utc, id`
@@ -193,18 +193,19 @@ func (tx *Tx) refreshThread(ctx context.Context, accountID, threadID string) err
 	}
 
 	var (
-		count, unread int
-		first, last   int64
-		subject       string
-		hasAttach     bool
-		seen          = map[string]bool{}
-		participants  []model.Address
+		count, unread        int
+		first, last, lastAny int64
+		hasReal              bool
+		subject              string
+		hasAttach            bool
+		seen                 = map[string]bool{}
+		participants         []model.Address
 	)
 	for rows.Next() {
 		var subj, fromAddr, fromName, toJSON, ccJSON sql.NullString
-		var received, isUnread, attach int64
+		var received, isUnread, attach, isDraft int64
 		if err := rows.Scan(&subj, &fromAddr, &fromName, &toJSON, &ccJSON, &received, &isUnread,
-			&attach); err != nil {
+			&attach, &isDraft); err != nil {
 			rows.Close()
 			return err
 		}
@@ -212,7 +213,13 @@ func (tx *Tx) refreshThread(ctx context.Context, accountID, threadID string) err
 			subject = subj.String
 			first = received
 		}
-		last = received
+		// A draft is not activity: a conversation whose newest message is a
+		// reply still being written has not moved since the last real one.
+		// A thread made of drafts alone is dated by its newest draft.
+		lastAny = received
+		if isDraft == 0 {
+			last, hasReal = received, true
+		}
 		count++
 		if isUnread != 0 {
 			unread++
@@ -245,6 +252,9 @@ func (tx *Tx) refreshThread(ctx context.Context, accountID, threadID string) err
 			return fmt.Errorf("store: drop empty thread: %w", err)
 		}
 		return nil
+	}
+	if !hasReal {
+		last = lastAny // drafts only
 	}
 
 	var participantsJSON any
@@ -389,8 +399,12 @@ func (s *Store) ListThreads(ctx context.Context, f MessageFilter) ([]model.Threa
 }
 
 func (tx *Tx) ListThreads(ctx context.Context, f MessageFilter) ([]model.Thread, error) {
-	if f.MailboxRole != "" || f.MailboxName != "" {
-		return tx.listThreadsInMailbox(ctx, f)
+	all, accounts, err := tx.datedByMailbox(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	if all || len(accounts) > 0 {
+		return tx.listThreadsInMailbox(ctx, f, all, accounts)
 	}
 	where, args := f.where()
 	// Keyset pagination: rows that leave or join the query ahead of the page
@@ -427,20 +441,71 @@ func (tx *Tx) ListThreads(ctx context.Context, f MessageFilter) ([]model.Thread,
 	return out, rows.Err()
 }
 
+// datedByMailbox reports whether a view dates its conversations by their
+// newest message in the view's own mailbox rather than by thread activity.
+//
+// Gmail's rule, and Lennert's: a conversation moves when something happens in
+// it -- a reply received, a reply sent -- so Inbox and every other view order
+// by thread activity (threads.last_utc, which skips drafts). Sent is the
+// exception: it answers "what did I send, and when", so it shows the last
+// message actually sent. Drafts likewise shows the draft, which is the item
+// there.
+//
+// It is the mailbox's role that decides, however the view names it: the CLI
+// passes a localized name ("Verzonden") as MailboxName, and that view is Sent
+// all the same. A role is the same in every account, so a role filter dates
+// every thread by mailbox (all). A name is decided per account: the accounts
+// where a mailbox of that name carries the sent or drafts role are returned,
+// and a thread in any other account -- where the same name is, say, an inbox
+// -- keeps its activity date. The filter itself still matches by name.
+func (tx *Tx) datedByMailbox(ctx context.Context, f MessageFilter) (all bool, accounts []string, err error) {
+	switch {
+	case f.MailboxRole != "":
+		switch strings.ToLower(f.MailboxRole) {
+		case string(model.RoleSent), string(model.RoleDrafts):
+			return true, nil, nil
+		}
+		return false, nil, nil
+	case f.MailboxName == "":
+		return false, nil, nil
+	}
+	q := `SELECT DISTINCT account_id FROM mailboxes WHERE lower(name) = ? AND lower(role) IN (?, ?)`
+	args := []any{strings.ToLower(f.MailboxName), string(model.RoleSent), string(model.RoleDrafts)}
+	if len(f.Accounts) > 0 {
+		q += ` AND account_id IN (` + placeholders(len(f.Accounts)) + `)`
+		args = append(args, anySlice(f.Accounts)...)
+	}
+	rows, err := tx.q.QueryContext(ctx, q, args...)
+	if err != nil {
+		return false, nil, fmt.Errorf("store: mailbox role of %q: %w", f.MailboxName, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return false, nil, err
+		}
+		accounts = append(accounts, a)
+	}
+	return false, accounts, rows.Err()
+}
+
 // listThreadsInMailbox lists the threads of one mailbox view, each dated and
-// ordered by its newest message *in that view*.
+// ordered by its newest message *in that view* (see datedByMailbox).
 //
 // A thread is in a mailbox when any of its messages is, but its summary is
-// dated by its newest message anywhere. In Sent that put a conversation whose
-// newest message is today's unsent reply draft at the top, dated today, so it
-// read as sent today. A mailbox view shows when something last happened in
-// that mailbox: Sent by the last message sent, Inbox by the last one received.
-// Thread.Last carries that date here, and the page key is on it.
-//
-// Grouping the view's messages costs more than walking threads by last_utc,
-// so views that do not name a mailbox keep the cheaper query.
-func (tx *Tx) listThreadsInMailbox(ctx context.Context, f MessageFilter) ([]model.Thread, error) {
+// dated by its activity anywhere. In Sent that put a conversation with a
+// received reply, or once an unsent reply draft, above what was sent since.
+// Thread.Last carries the view's date here, and the page key is on it.
+func (tx *Tx) listThreadsInMailbox(ctx context.Context, f MessageFilter, all bool, accounts []string) ([]model.Thread, error) {
 	where, args := f.where()
+	// Which threads take the mailbox's date (see datedByMailbox); the rest keep
+	// their activity date, threads.last_utc.
+	dated := "1"
+	if !all {
+		dated = `hit.account_id IN (` + placeholders(len(accounts)) + `)`
+		args = append(args, anySlice(accounts)...)
+	}
 	paged := ""
 	if f.AfterThread != "" {
 		paged = ` WHERE (v.shown < ? OR (v.shown = ? AND
@@ -451,10 +516,14 @@ func (tx *Tx) listThreadsInMailbox(ctx context.Context, f MessageFilter) ([]mode
 	// The page is cut before the summaries are joined, so the per-row draft
 	// count runs for the rows returned and not for the whole mailbox.
 	rows, err := tx.q.QueryContext(ctx, `
-		WITH v AS (
+		WITH hit AS (
 		  SELECT m.account_id, m.thread_id, coalesce(max(m.received_utc), 0) AS shown
 		    FROM messages m WHERE `+where+`
 		   GROUP BY m.account_id, m.thread_id),
+		v AS (
+		  SELECT hit.account_id, hit.thread_id,
+		         CASE WHEN `+dated+` THEN hit.shown ELSE coalesce(t.last_utc, 0) END AS shown
+		    FROM hit JOIN threads t ON t.account_id = hit.account_id AND t.thread_id = hit.thread_id),
 		page AS (
 		  SELECT v.account_id, v.thread_id, v.shown FROM v`+paged+`
 		   ORDER BY v.shown DESC, v.thread_id DESC, v.account_id DESC`+limit+`)

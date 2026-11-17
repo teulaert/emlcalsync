@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -64,6 +66,7 @@ func TestThreadWithADraftUnderSent(t *testing.T) {
 		t.Run(shape.name, func(t *testing.T) {
 			ctx := context.Background()
 			s, received, sent, draft := draftThreadFixture(t, shape.gmail)
+			_ = received
 			byID := func(f MessageFilter) map[string]model.Thread {
 				th, err := s.ListThreads(ctx, f)
 				if err != nil {
@@ -111,17 +114,19 @@ func TestThreadWithADraftUnderSent(t *testing.T) {
 				t.Errorf("sent pages = %v, want [th-b th-a]", got)
 			}
 
-			// Inbox: dated by what arrived there.
-			if got := byID(MessageFilter{MailboxRole: "inbox"})["th-a"]; !got.Last.Equal(received) {
-				t.Errorf("inbox view dates th-a %v, want %v", got.Last, received)
+			// Inbox: dated by conversation activity, Gmail style -- the reply
+			// sent counts, the unsent draft does not.
+			if got := byID(MessageFilter{MailboxRole: "inbox"})["th-a"]; !got.Last.Equal(sent) {
+				t.Errorf("inbox view dates th-a %v, want the sent reply %v (not %v received, not the draft)", got.Last, sent, received)
 			}
 			// Drafts: dated by the draft.
 			if got := byID(MessageFilter{MailboxRole: "drafts"})["th-a"]; !got.Last.Equal(draft) || got.Drafts != 1 {
 				t.Errorf("drafts view: last %v drafts %d, want %v and 1", got.Last, got.Drafts, draft)
 			}
-			// No mailbox: the thread's newest message, still marked.
-			if got := byID(MessageFilter{})["th-a"]; !got.Last.Equal(draft) || got.Drafts != 1 {
-				t.Errorf("all-mail view: last %v drafts %d, want %v and 1", got.Last, got.Drafts, draft)
+			// No mailbox: activity too, so the draft does not date it; it is
+			// still marked as holding one.
+			if got := byID(MessageFilter{})["th-a"]; !got.Last.Equal(sent) || got.Drafts != 1 {
+				t.Errorf("all-mail view: last %v drafts %d, want %v and 1", got.Last, got.Drafts, sent)
 			}
 			// Opening the thread reports the draft too.
 			tt, _, err := s.GetThread(ctx, "a", "th-a", false)
@@ -169,5 +174,155 @@ func TestThreadPagingPastUndatedThreads(t *testing.T) {
 		if len(got) != 3 {
 			t.Errorf("mailbox %q: paged through %v, want all 3 undated threads", f.MailboxRole, got)
 		}
+	}
+}
+
+// A conversation made of nothing but a draft still has a date: its draft's.
+func TestDraftOnlyThreadIsDatedByItsDraft(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "a")
+	at := base.Add(5 * time.Hour)
+	putMessage(t, s, &model.Message{
+		AccountID: "a", RemoteID: "d", ThreadID: "th-d", Received: at, Flags: model.Flags{Draft: true},
+	}, &mime.Parsed{Subject: "new", From: addr("Me", "a@example.com"), Date: at})
+	th, err := s.ListThreads(ctx, MessageFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(th) != 1 || !th[0].Last.Equal(at) {
+		t.Fatalf("threads = %+v, want th-d dated %v", th, at)
+	}
+}
+
+// Summaries written before drafts stopped counting as activity are re-dated
+// by migration 0012 when an archive is opened with this version.
+func TestMigrationRedatesThreadsDatedByADraft(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "index.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAccount(t, s, "a")
+	real, draft := base, base.Add(time.Hour)
+	putMessage(t, s, &model.Message{AccountID: "a", RemoteID: "r", ThreadID: "th", Received: real},
+		&mime.Parsed{Subject: "x", From: addr("A", "a@example.com"), Date: real})
+	putMessage(t, s, &model.Message{AccountID: "a", RemoteID: "d", ThreadID: "th", Received: draft,
+		Flags: model.Flags{Draft: true}}, &mime.Parsed{Subject: "Re: x", From: addr("Me", "me@example.com"), Date: draft})
+	// What the previous version stored: dated by the draft, migration not run.
+	for _, q := range []string{
+		`UPDATE threads SET last_utc = ` + strconv.FormatInt(draft.Unix(), 10),
+		`DELETE FROM schema_migrations WHERE version = 12`,
+	} {
+		if _, err := s.db.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	th, _, err := s.GetThread(ctx, "a", "th", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !th.Last.Equal(real) {
+		t.Errorf("after migration the thread is dated %v, want its real message %v", th.Last, real)
+	}
+}
+
+// The CLI passes a localized mailbox name as MailboxName. Named or by role,
+// Sent is dated by the last message sent and Drafts by the draft; any other
+// named mailbox follows thread activity.
+func TestLocalizedSentAndDraftsNamesAreDatedLikeTheirRoles(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedAccount(t, s, "a")
+	if err := s.ReplaceMailboxes(ctx, "a", []model.Mailbox{
+		{RemoteID: "mb-inbox", Name: "Postvak IN", Role: model.RoleInbox, SortOrder: 1},
+		{RemoteID: "mb-sent", Name: "Verzonden", Role: model.RoleSent, SortOrder: 2},
+		{RemoteID: "mb-drafts", Name: "Concepten", Role: model.RoleDrafts, SortOrder: 3},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sent, reply, draft := base, base.Add(2*time.Hour), base.Add(3*time.Hour)
+	put := func(remote string, at time.Time, isDraft bool, box string) {
+		putMessage(t, s, &model.Message{AccountID: "a", RemoteID: remote, ThreadID: "th", Received: at,
+			Flags: model.Flags{Draft: isDraft}, MailboxRemotes: []string{box}},
+			&mime.Parsed{Subject: "x", From: addr("A", "a@example.com"), Date: at})
+	}
+	put("s", sent, false, "mb-sent")
+	put("r", reply, false, "mb-inbox")
+	put("d", draft, true, "mb-drafts")
+
+	for _, c := range []struct {
+		f    MessageFilter
+		want time.Time
+	}{
+		{MessageFilter{MailboxName: "Verzonden"}, sent},
+		{MessageFilter{MailboxName: "verzonden", Accounts: []string{"a"}}, sent},
+		{MessageFilter{MailboxRole: "sent"}, sent},
+		{MessageFilter{MailboxName: "Concepten"}, draft},
+		{MessageFilter{MailboxName: "Postvak IN"}, reply},
+	} {
+		th, err := s.ListThreads(ctx, c.f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(th) != 1 || !th[0].Last.Equal(c.want) {
+			t.Errorf("%+v: threads %+v, want th dated %v", c.f, th, c.want)
+		}
+	}
+}
+
+// One account's mailbox role must not decide another account's dating: a
+// name that is Sent in account a and an inbox in account b dates a's thread
+// by its last sent message and b's by activity.
+func TestNamedMailboxRoleIsDecidedPerAccount(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	for _, c := range []struct {
+		acct string
+		role model.MailboxRole
+	}{{"a", model.RoleSent}, {"b", model.RoleInbox}} {
+		seedAccount(t, s, c.acct)
+		if err := s.ReplaceMailboxes(ctx, c.acct, []model.Mailbox{
+			{RemoteID: "mb-shared", Name: "Shared", Role: c.role, SortOrder: 1},
+			{RemoteID: "mb-other", Name: "Other", SortOrder: 2},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inShared, later := base, base.Add(2*time.Hour)
+	for _, acct := range []string{"a", "b"} {
+		for _, m := range []struct {
+			remote string
+			at     time.Time
+			box    string
+		}{{"x", inShared, "mb-shared"}, {"y", later, "mb-other"}} {
+			putMessage(t, s, &model.Message{AccountID: acct, RemoteID: m.remote, ThreadID: "th", Received: m.at,
+				MailboxRemotes: []string{m.box}}, &mime.Parsed{Subject: "s", From: addr("A", "a@example.com"), Date: m.at})
+		}
+	}
+	th, err := s.ListThreads(ctx, MessageFilter{MailboxName: "Shared"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]time.Time{}
+	for _, x := range th {
+		got[x.AccountID] = x.Last
+	}
+	if !got["a"].Equal(inShared) {
+		t.Errorf("a (Shared is Sent) dated %v, want the sent message %v", got["a"], inShared)
+	}
+	if !got["b"].Equal(later) {
+		t.Errorf("b (Shared is an inbox) dated %v, want thread activity %v", got["b"], later)
+	}
+	if len(th) != 2 || th[0].AccountID != "b" {
+		t.Errorf("order = %+v, want b (later activity) first", th)
 	}
 }
