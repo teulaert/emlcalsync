@@ -78,8 +78,10 @@ type fakeServer struct {
 	blobs     map[string][]byte
 	mailboxes []map[string]any
 
-	emailState   string
-	mailboxState string
+	emailState string
+	// beforeEmailSet, when set, runs once at the next Email/set (see emailSet).
+	beforeEmailSet func(f *fakeServer)
+	mailboxState   string
 
 	emailChanges   map[string]changeScript
 	mailboxChanges map[string]changeScript
@@ -904,6 +906,15 @@ func (f *fakeServer) applyEmailPatch(e *fakeEmail, patch map[string]any) {
 }
 
 func (f *fakeServer) emailSet(name string, args map[string]any) (string, map[string]any) {
+	// beforeEmailSet runs once, under the lock, to stand for another client
+	// changing the account between a caller's Email/get and this Email/set.
+	if hook := f.beforeEmailSet; hook != nil {
+		f.beforeEmailSet = nil
+		hook(f)
+	}
+	if want, ok := args["ifInState"].(string); ok && want != f.emailState {
+		return "error", methodErrorArgs("stateMismatch", "state is "+f.emailState)
+	}
 	update, _ := args["update"].(map[string]any)
 	updated := map[string]any{}
 	notUpdated := map[string]any{}
@@ -917,10 +928,30 @@ func (f *fakeServer) emailSet(name string, args map[string]any) (string, map[str
 		f.applyEmailPatch(e, patch)
 		updated[id] = nil
 	}
+	var destroyed []string
+	notDestroyed := map[string]any{}
+	if raw, ok := args["destroy"].([]any); ok {
+		for _, v := range raw {
+			id, _ := v.(string)
+			if _, ok := f.emails[id]; !ok {
+				notDestroyed[id] = map[string]any{"type": "notFound"}
+				continue
+			}
+			delete(f.emails, id)
+			for i, x := range f.order {
+				if x == id {
+					f.order = append(f.order[:i:i], f.order[i+1:]...)
+					break
+				}
+			}
+			destroyed = append(destroyed, id)
+		}
+	}
 	f.emailState = f.emailState + "+set"
 	return name, map[string]any{
 		"accountId": testAccount, "oldState": nil, "newState": f.emailState,
 		"updated": updated, "notUpdated": notUpdated,
+		"destroyed": orEmpty(destroyed), "notDestroyed": notDestroyed,
 	}
 }
 

@@ -863,3 +863,15 @@ func TestVisibleRecipientsStopsAtTheHeaderBlock(t *testing.T) {
 		t.Error("missed the real To: header")
 	}
 }
+
+// Gmail has no conditional delete and a draft id outlives edits, so deleting a
+// sent draft by draft id could throw away a newer version edited elsewhere.
+// Lennert's decision: on Gmail a sent draft goes to the trash (where emlcal
+// ignores it and Google purges it after 30 days). The provider must therefore
+// not offer DraftDiscarder, so the engine falls back to Trash.
+func TestGmailDoesNotDiscardDraftsByDeleting(t *testing.T) {
+	m := newMail(t, newFakeGmail(t), nil)
+	if _, ok := any(m).(provider.DraftDiscarder); ok {
+		t.Fatal("the Gmail provider implements DraftDiscarder; sent drafts must be trashed, not deleted")
+	}
+}

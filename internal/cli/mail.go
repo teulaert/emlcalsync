@@ -166,7 +166,9 @@ type mailSendRow struct {
 	ToStr   string   `json:"-"               table:"TO,max=40"`
 	Subject string   `json:"subject"         table:"SUBJECT,max=50"`
 	// DraftTrashed is set only by `send --draft`: the stored draft is removed
-	// once its copy is on its way. nil elsewhere, so it stays out of the JSON.
+	// once its copy is on its way (deleted where the provider can, else
+	// trashed; the name predates that). nil elsewhere, so it stays out of the
+	// JSON.
 	DraftTrashed *bool `json:"draft_trashed,omitempty" table:"DRAFT-TRASHED"`
 }
 
