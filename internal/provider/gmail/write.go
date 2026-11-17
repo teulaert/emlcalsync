@@ -166,6 +166,62 @@ func (m *Mail) CreateDraftInThread(ctx context.Context, raw []byte, threadID str
 	return created.Id, nil
 }
 
+// DiscardDrafts implements provider.DraftDiscarder through drafts.delete,
+// which removes the draft for good -- what Gmail does itself when it sends
+// one. messages.trash would leave it labelled DRAFT and TRASH.
+//
+// emlcal knows a draft by its message id and drafts.delete wants the draft id,
+// so the account's drafts are listed to map one to the other. That listing is
+// also the guard: an id Gmail does not list as a draft is not deleted.
+func (m *Mail) DiscardDrafts(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	var draftIDs []string
+	page := ""
+	for {
+		var resp *gmailapi.ListDraftsResponse
+		err := m.do(ctx, "drafts.list", unitsDraftsList, func() error {
+			call := m.svc.Users.Drafts.List(me).MaxResults(500).Context(ctx)
+			if page != "" {
+				call = call.PageToken(page)
+			}
+			var err error
+			resp, err = call.Do()
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		for _, d := range resp.Drafts {
+			if d.Message != nil && want[d.Message.Id] {
+				draftIDs = append(draftIDs, d.Id)
+				delete(want, d.Message.Id)
+			}
+		}
+		if resp.NextPageToken == "" || len(want) == 0 {
+			break
+		}
+		page = resp.NextPageToken
+	}
+	if len(want) > 0 {
+		m.log.Debug("not drafts on the server, left alone", "ids", len(want))
+	}
+	for _, id := range draftIDs {
+		err := m.do(ctx, "drafts.delete", unitsDraftsDelete, func() error {
+			return m.svc.Users.Drafts.Delete(me, id).Context(ctx).Do()
+		})
+		if err != nil && !isNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // Submit implements provider.Submitter.
 //
 // The Gmail API takes only the message, deriving the recipients from its

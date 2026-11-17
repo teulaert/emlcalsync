@@ -87,6 +87,7 @@ type Mail struct {
 	// recorded writes
 	sentRaw   [][]byte
 	draftRaw  [][]byte
+	discarded []string
 	flagCalls int
 	nextID    int
 
@@ -479,6 +480,36 @@ func (f *Mail) SetMailboxes(ctx context.Context, ids []string, add, remove []str
 
 func (f *Mail) Trash(ctx context.Context, ids []string) error {
 	return f.SetMailboxes(ctx, ids, []string{"TRASH"}, []string{"INBOX", "ARCHIVE", "WORK"})
+}
+
+// DiscardDrafts implements provider.DraftDiscarder: drafts among ids are
+// deleted (and reported removed by the next delta); anything else is left
+// alone, as the real providers do.
+func (f *Mail) DiscardDrafts(ctx context.Context, ids []string) error {
+	f.mu.Lock()
+	if err := f.fail(); err != nil {
+		f.mu.Unlock()
+		return err
+	}
+	var drafts []string
+	for _, id := range ids {
+		if m, ok := f.msgs[id]; ok && m.flags.Draft {
+			drafts = append(drafts, id)
+		}
+	}
+	f.discarded = append(f.discarded, drafts...)
+	f.mu.Unlock()
+	for _, id := range drafts {
+		f.Remove(id)
+	}
+	return nil
+}
+
+// Discarded lists the ids DiscardDrafts deleted, for assertions.
+func (f *Mail) Discarded() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.discarded...)
 }
 
 func (f *Mail) Restore(ctx context.Context, ids []string) error {

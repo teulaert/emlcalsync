@@ -121,6 +121,20 @@ type MailProvider interface {
 	FetchAttachment(ctx context.Context, messageID, ref string) ([]byte, error)
 }
 
+// DraftDiscarder is a MailProvider that can remove a draft outright once it
+// has been sent or thrown away, rather than move it to the trash.
+//
+// Trash is the wrong place for a spent draft. Gmail keeps the DRAFT label on a
+// trashed draft and adds TRASH, and a JMAP draft moved to the trash still
+// carries $draft; either way a copy of every sent reply piles up in the trash
+// as a draft. Gmail itself deletes the draft when it sends one.
+//
+// ids that are not drafts on the server are left alone, so a stale index can
+// never get a real message deleted through this.
+type DraftDiscarder interface {
+	DiscardDrafts(ctx context.Context, ids []string) error
+}
+
 // ThreadedDrafter is a MailProvider whose drafts belong to a thread by id
 // rather than by their headers. Gmail is one: a draft created without a
 // thread id starts a conversation of its own, whatever its In-Reply-To says,

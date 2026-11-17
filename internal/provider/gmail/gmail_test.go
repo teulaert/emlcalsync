@@ -863,3 +863,25 @@ func TestVisibleRecipientsStopsAtTheHeaderBlock(t *testing.T) {
 		t.Error("missed the real To: header")
 	}
 }
+
+// A sent draft is removed through drafts.delete, found by its message id
+// across pages of drafts.list. A message id Gmail does not list as a draft is
+// never deleted.
+func TestDiscardDraftsDeletesThroughTheDraftsAPI(t *testing.T) {
+	f := newFakeGmail(t)
+	f.drafts = map[string]string{"r-1": "msg-a", "r-2": "msg-b", "r-3": "msg-c"}
+	m := newMail(t, f, nil)
+
+	if err := m.DiscardDrafts(context.Background(), []string{"msg-c", "msg-a", "not-a-draft"}); err != nil {
+		t.Fatalf("DiscardDrafts: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sort.Strings(f.deletedDrafts)
+	if strings.Join(f.deletedDrafts, ",") != "r-1,r-3" {
+		t.Errorf("deleted drafts = %v, want [r-1 r-3]", f.deletedDrafts)
+	}
+	if _, ok := f.drafts["r-2"]; !ok {
+		t.Error("a draft that was not asked for was deleted")
+	}
+}

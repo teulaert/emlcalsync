@@ -1662,3 +1662,26 @@ func TestKeywordsToFlags(t *testing.T) {
 		t.Errorf("flags = %+v, want %+v", got, want)
 	}
 }
+
+// DiscardDrafts destroys the emails that carry $draft and leaves any other id
+// alone, so a stale index cannot get a real message deleted.
+func TestDiscardDraftsDestroysOnlyDrafts(t *testing.T) {
+	f := newFakeServer(t)
+	f.addEmail(&fakeEmail{ID: "d1", ThreadID: "t1", MailboxIDs: map[string]bool{"mb-drafts": true},
+		Keywords: map[string]bool{"$draft": true, "$seen": true}}, []byte("Subject: d\r\n\r\nx\r\n"))
+	f.addEmail(&fakeEmail{ID: "m1", ThreadID: "t1", MailboxIDs: map[string]bool{"mb-inbox": true},
+		Keywords: map[string]bool{"$seen": true}}, []byte("Subject: m\r\n\r\nx\r\n"))
+	m := f.client(t).Mail()
+
+	if err := m.DiscardDrafts(testCtx(t), []string{"d1", "m1", "gone"}); err != nil {
+		t.Fatalf("DiscardDrafts: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.emails["d1"]; ok {
+		t.Error("the draft is still there")
+	}
+	if _, ok := f.emails["m1"]; !ok {
+		t.Error("a message that is not a draft was destroyed")
+	}
+}

@@ -873,13 +873,10 @@ func TestSendingAnEditedDraftGoesOutAndClearsTheOldOne(t *testing.T) {
 	}
 
 	// A provider cannot update a draft in place, so the old one has to go or
-	// it sits in the drafts mailbox for ever.
-	_, boxes, ok := mail.Lookup("m2")
-	if !ok {
-		t.Fatal("the draft vanished from the provider")
-	}
-	if !contains(boxes, "TRASH") {
-		t.Errorf("the draft that was sent is still filed in %v", boxes)
+	// it sits in the drafts mailbox for ever. It is deleted, not trashed: a
+	// trashed draft is still a draft (Gmail keeps DRAFT beside TRASH).
+	if _, boxes, ok := mail.Lookup("m2"); ok {
+		t.Errorf("the draft that was sent is still on the provider, in %v", boxes)
 	}
 	if r.status != "sent" {
 		t.Errorf("status = %q, want %q", r.status, "sent")
@@ -903,9 +900,10 @@ func TestSavingAnEditedDraftReplacesIt(t *testing.T) {
 	if len(mail.Sent()) != 0 {
 		t.Error("saving a draft sent something")
 	}
-	_, boxes, _ := mail.Lookup("m2")
-	if !contains(boxes, "TRASH") {
-		t.Errorf("the superseded draft is still filed in %v", boxes)
+	// The new version holds everything kept from the old one, which is
+	// deleted rather than left behind as a draft in the trash.
+	if _, boxes, ok := mail.Lookup("m2"); ok {
+		t.Errorf("the superseded draft is still on the provider, in %v", boxes)
 	}
 	if r.status != "draft saved" {
 		t.Errorf("status = %q, want %q", r.status, "draft saved")

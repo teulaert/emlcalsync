@@ -1355,8 +1355,14 @@ first full build and the two adversarial reviews (`docs/reviews/`).
   pushing at that moment. Without it, one message went out twice on
   2026-10-02: the daemon's pass found the row pending (its backoff timers are
   per process) and sent it 213 ms after the sender did.
-- **`send --draft`** sends the draft's raw bytes and then trashes the draft
-  (providers return the draft's *message* id from `CreateDraft`).
+- **`send --draft`** (and finishing a draft in the TUI) sends the draft's raw
+  bytes and then discards the draft (providers return the draft's *message* id
+  from `CreateDraft`). Discarding deletes it where the provider can
+  (`provider.DraftDiscarder`: Gmail `drafts.delete`, JMAP `Email/set` destroy,
+  only for ids that are still drafts) and trashes it elsewhere: a trashed Gmail
+  draft keeps DRAFT beside TRASH, and a trashed JMAP draft keeps `$draft`.
+  Superseded earlier versions of a reply hold unsent words and are trashed, not
+  deleted.
 - **JMAP enumeration** uses `anchor`/`anchorOffset` paging (cursor is a JSON
   `{"anchor","n"}`) so deletions during a backfill cannot skip messages;
   `recurrenceOverrides` on JMAP events become exception rows; participant ids

@@ -817,6 +817,8 @@ func TestMailReadHTML(t *testing.T) {
 
 func TestMailSendExistingDraft(t *testing.T) {
 	env := mailSeed(t)
+	env.Mail["work"].Update("m-old", model.Flags{Draft: true}, nil)
+	env.Sync("work")
 	out := env.MustRun("mail", "send", "--draft", "work:m-old")
 
 	sent := env.Mail["work"].Sent()
@@ -828,7 +830,8 @@ func TestMailSendExistingDraft(t *testing.T) {
 	}
 
 	// The draft itself is a separate message on the server: sending its bytes
-	// leaves it behind, so it goes to the trash.
+	// leaves it behind, so it is discarded -- deleted, not trashed, where the
+	// provider can, or it would stay a draft in the trash.
 	var row struct {
 		Account      string `json:"account"`
 		DraftTrashed *bool  `json:"draft_trashed"`
@@ -839,8 +842,11 @@ func TestMailSendExistingDraft(t *testing.T) {
 	if row.DraftTrashed == nil || !*row.DraftTrashed {
 		t.Errorf("draft_trashed = %v, want true (%s)", row.DraftTrashed, out)
 	}
-	if _, boxes, ok := env.Mail["work"].Lookup("m-old"); !ok || !mailContains(boxes, "TRASH") {
-		t.Errorf("draft mailboxes = %v, want TRASH", boxes)
+	if _, boxes, ok := env.Mail["work"].Lookup("m-old"); ok {
+		t.Errorf("the sent draft is still on the server, in %v", boxes)
+	}
+	if got := env.Mail["work"].Discarded(); len(got) != 1 || got[0] != "m-old" {
+		t.Errorf("discarded = %v, want [m-old]", got)
 	}
 	rows := mailList(t, env, "list", "--account", "work")
 	for _, r := range rows {

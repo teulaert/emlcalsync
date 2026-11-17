@@ -447,8 +447,8 @@ func (d Deps) submit(what, account string, op sync.Op, orig *model.Message, repl
 		}
 		if !res.Queued && replaces != "" && replaces != res.RemoteID {
 			if _, err := d.Engine.Apply(ctx, account,
-				sync.Op{Kind: sync.OpTrash, IDs: []string{replaces}}); err != nil {
-				d.log().Warn("trash the draft it replaces",
+				sync.Op{Kind: sync.OpDiscardDrafts, IDs: []string{replaces}}); err != nil {
+				d.log().Warn("discard the draft it replaces",
 					"id", model.MessagePublicID(account, replaces), "err", err)
 			}
 		}

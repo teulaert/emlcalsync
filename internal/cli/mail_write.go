@@ -631,19 +631,21 @@ func mailSubmit(cmd *cobra.Command, app *App, c *mailComposed, kind sync.OpKind)
 		Subject: c.subject,
 	}
 	// The draft the send was built from is usually a separate message on the
-	// server: submitting its raw bytes leaves it behind, so trash it once the
-	// send actually went through. Best effort — a failure here must not fail
+	// server: submitting its raw bytes leaves it behind, so discard it once the
+	// send actually went through -- deleted where the provider can (Gmail
+	// drafts.delete, JMAP destroy), since a trashed draft stays a draft in the
+	// trash; trashed where it cannot. Best effort — a failure here must not fail
 	// the send, it only leaves a stale draft the user can delete.
 	//
 	// Unless the send *was* the draft. A provider that recognises the bytes it
 	// already holds (JMAP: Email/import answers "alreadyExists" with the id)
-	// submits that message in place, and it is the sent mail now — trashing it
-	// would throw away what was just sent.
+	// submits that message in place, and it is the sent mail now — discarding
+	// it would throw away what was just sent.
 	if !res.Queued && c.draftRemote != "" && c.draftRemote != res.RemoteID && kind == sync.OpSend {
 		trashed := true
 		if _, err := eng.Apply(cmd.Context(), c.account.Name,
-			sync.Op{Kind: sync.OpTrash, IDs: []string{c.draftRemote}}); err != nil {
-			app.Logger().Warn("trash sent draft", "id",
+			sync.Op{Kind: sync.OpDiscardDrafts, IDs: []string{c.draftRemote}}); err != nil {
+			app.Logger().Warn("discard sent draft", "id",
 				PublicMessageID(c.account.Name, c.draftRemote), "err", err)
 			trashed = false
 		}

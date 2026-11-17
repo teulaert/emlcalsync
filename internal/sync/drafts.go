@@ -10,8 +10,9 @@ import (
 
 // trashSupersededDrafts clears away the drafts a sent reply made obsolete.
 //
-// The composer trashes the one draft it was finishing, but that is not the
-// only one there can be. A reply drafted twice -- `mail draft` run again with
+// The composer discards the one draft it was finishing (OpDiscardDrafts: the
+// words in it are the ones that went out), but that is not the only one there
+// can be. A reply drafted twice -- `mail draft` run again with
 // a better text, which stores a second message beside the first because no
 // provider updates a draft in place -- leaves the earlier version in Drafts,
 // and once the later one is sent nothing points at it any more. It is still
@@ -19,7 +20,8 @@ import (
 // reopens it.
 //
 // Every draft in the account that answers the message this send answers is
-// one of those: the message has been answered now. Trash keeps them
+// one of those: the message has been answered now. They hold words that were
+// never sent, so they are trashed, not discarded: Trash keeps them
 // recoverable. The send has already gone out, so nothing here may fail it.
 func (e *Engine) trashSupersededDrafts(ctx context.Context, acct config.Account, op Op, sent string) {
 	p, err := mime.Parse(op.Raw)

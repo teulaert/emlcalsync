@@ -1038,6 +1038,60 @@ func (m *Mail) Trash(ctx context.Context, ids []string) error {
 	return m.setEmails(ctx, ids, patch, "Trash")
 }
 
+// DiscardDrafts implements provider.DraftDiscarder: it destroys the given
+// emails that carry $draft and leaves any other id alone. Moving a spent draft
+// to the trash (Trash) keeps $draft on it, so every sent reply would leave a
+// draft behind in the trash.
+func (m *Mail) DiscardDrafts(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	acct, err := m.AccountID(ctx)
+	if err != nil {
+		return err
+	}
+	s, err := m.c.Session(ctx)
+	if err != nil {
+		return err
+	}
+	var drafts []string
+	for chunk := range slices.Chunk(ids, max(1, s.Core.MaxObjectsInGet)) {
+		var got struct {
+			List []struct {
+				ID       string          `json:"id"`
+				Keywords map[string]bool `json:"keywords"`
+			} `json:"list"`
+		}
+		if err := m.c.call(ctx, m.using(), "Email/get", map[string]any{
+			"accountId": acct, "ids": chunk, "properties": []string{"id", "keywords"},
+		}, &got); err != nil {
+			return err
+		}
+		for _, e := range got.List {
+			if e.Keywords[kwDraft] {
+				drafts = append(drafts, e.ID)
+			}
+		}
+	}
+	for chunk := range slices.Chunk(drafts, max(1, s.Core.MaxObjectsInSet)) {
+		var sr setResponse
+		if err := m.c.call(ctx, m.using(), "Email/set", map[string]any{
+			"accountId": acct, "destroy": chunk,
+		}, &sr); err != nil {
+			return err
+		}
+		for id, se := range sr.NotDestroyed {
+			if se.Type == "notFound" { // gone already: the outcome wanted
+				delete(sr.NotDestroyed, id)
+			}
+		}
+		if err := sr.firstError("discard drafts"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Restore adds messages back to the inbox and drops any archive or trash
 // membership, leaving every other mailbox (a label the message also carries)
 // alone — unlike Trash, which replaces the set outright, this is the ordinary
