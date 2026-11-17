@@ -199,6 +199,22 @@ func TestMailListMarksThreadsHoldingADraft(t *testing.T) {
 			t.Errorf("cursor %d: the mark is not red:\n%q", cursor, raw)
 		}
 	}
+	// A terminal too narrow for the mark cuts the row before it is styled;
+	// that must render, not panic, down to a single cell.
+	for w := 40; w >= 1; w-- {
+		for _, cursor := range []int{0, 1} {
+			list.cursor = cursor
+			func() {
+				defer func() {
+					if p := recover(); p != nil {
+						t.Fatalf("width %d cursor %d: render panicked: %v", w, cursor, p)
+					}
+				}()
+				list.View(w, r.bodyHeight())
+			}()
+		}
+	}
+
 	for i, mb := range mailboxCycle {
 		if mb.label == "drafts" {
 			list.mailbox = i

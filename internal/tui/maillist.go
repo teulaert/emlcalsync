@@ -621,11 +621,12 @@ func (m *mailList) rows(w, rows, acctW, subjW, partW, cntW, timeW int) string {
 		case t.UnreadCount > 0:
 			base = styleUnread
 		}
-		if draft {
+		if lead := pre + draftMark; draft && strings.HasPrefix(line, lead) {
 			// Styled in three parts so the marker can carry its own colour
-			// without its reset cutting the row's reverse or bold short.
-			rest := line[len(pre)+len(draftMark):]
-			line = base.Render(pre) + base.Inherit(styleDraft).Render(draftMark) + base.Render(rest)
+			// without its reset cutting the row's reverse or bold short. Only
+			// when the fitted line still holds the whole mark: a terminal too
+			// narrow for it cuts the line first, and then it is plain text.
+			line = base.Render(pre) + base.Inherit(styleDraft).Render(draftMark) + base.Render(line[len(lead):])
 		} else {
 			line = base.Render(line)
 		}
