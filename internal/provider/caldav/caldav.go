@@ -85,11 +85,13 @@ type Calendar struct {
 	// home is the discovered calendar-home-set path, cached after the first
 	// successful discovery. Discovery may also move dav.host.
 	home string
-	// done guards discovery so the concurrent callers the sync engine and the
-	// outbox produce run it once.
-	once sync.Once
-	// discErr is the outcome of that single run.
-	discErr error
+	// discMu serialises discovery between the concurrent callers the sync
+	// engine and the outbox produce; discovered records that it succeeded.
+	// Only success is remembered. A failure — typically the network not being
+	// up yet when the daemon starts at boot — is retried by the next caller,
+	// or one bad moment would disable the account until a restart.
+	discMu     sync.Mutex
+	discovered bool
 }
 
 var _ provider.CalendarProvider = (*Calendar)(nil)
@@ -184,7 +186,8 @@ func (c *Calendar) fallbackHome() string {
 	return c.preset.HomeFallback(c.dav.base, c.opts.User())
 }
 
-// discover resolves the calendar home, and the host serving it, exactly once.
+// discover resolves the calendar home, and the host serving it, once it
+// succeeds; until then every call tries again.
 //
 // It runs its own PROPFINDs rather than using go-webdav, whose
 // FindCurrentUserPrincipal and FindCalendarHomeSet both return only the path
@@ -197,8 +200,16 @@ func (c *Calendar) fallbackHome() string {
 // the outbox reaches CreateEvent and friends on a client that never listed
 // anything.
 func (c *Calendar) discover(ctx context.Context) error {
-	c.once.Do(func() { c.discErr = c.doDiscover(ctx) })
-	return c.discErr
+	c.discMu.Lock()
+	defer c.discMu.Unlock()
+	if c.discovered {
+		return nil
+	}
+	if err := c.doDiscover(ctx); err != nil {
+		return err
+	}
+	c.discovered = true
+	return nil
 }
 
 func (c *Calendar) doDiscover(ctx context.Context) error {
@@ -206,14 +217,14 @@ func (c *Calendar) doDiscover(ctx context.Context) error {
 		return p.CurrentUserPrincipal.Href
 	})
 	if err != nil {
-		return c.discoveryFallback("current-user-principal", err)
+		return c.discoveryFallback(ctx, "current-user-principal", err)
 	}
 
 	home, err := c.findHref(ctx, principal.path, propfindHomeSet, func(p msProp) string {
 		return p.CalendarHomeSet.Href
 	})
 	if err != nil {
-		return c.discoveryFallback("calendar-home-set", err)
+		return c.discoveryFallback(ctx, "calendar-home-set", err)
 	}
 
 	// The home's host wins; failing that the principal's, which is where the
@@ -237,9 +248,15 @@ func (c *Calendar) doDiscover(ctx context.Context) error {
 // credentials are always fatal — every later request would fail the same way —
 // and so is any failure at all when the vendor has no conventional home path
 // to fall back on.
-func (c *Calendar) discoveryFallback(step string, cause error) error {
+func (c *Calendar) discoveryFallback(ctx context.Context, step string, cause error) error {
 	if ae := c.probeAuth(cause); ae != nil {
 		return ae
+	}
+	// The fallback is for a server that answered without the property. When
+	// no answer came at all (no network, a cancelled request) there is
+	// nothing to conclude, and guessing now would pin the guess for good.
+	if offlineErr(cause) != nil || ctx.Err() != nil {
+		return wrapErr("discover "+step, cause)
 	}
 	fb := c.fallbackHome()
 	if fb == "" {
