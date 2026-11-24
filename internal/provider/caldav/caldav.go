@@ -253,9 +253,11 @@ func (c *Calendar) discoveryFallback(ctx context.Context, step string, cause err
 		return ae
 	}
 	// The fallback is for a server that answered without the property. When
-	// no answer came at all (no network, a cancelled request) there is
-	// nothing to conclude, and guessing now would pin the guess for good.
-	if offlineErr(cause) != nil || ctx.Err() != nil {
+	// no answer came at all (no network, a cancelled request, a timeout)
+	// there is nothing to conclude, and guessing now would pin the guess for
+	// good. The cause is what decides: http.Client.Timeout fails the request
+	// with a deadline error while the caller's own context is still live.
+	if noAnswer(cause) || ctx.Err() != nil {
 		return wrapErr("discover "+step, cause)
 	}
 	fb := c.fallbackHome()
@@ -267,6 +269,14 @@ func (c *Calendar) discoveryFallback(ctx context.Context, step string, cause err
 	c.log.Debug("caldav: "+step+" lookup failed, using the default path", "err", cause, "home", fb)
 	c.home = fb
 	return nil
+}
+
+// noAnswer reports whether err means the request got no answer from the
+// server: a transport failure, or a cancellation or deadline, whichever
+// context it came from.
+func noAnswer(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		offlineErr(err) != nil
 }
 
 func vendorLabel(v model.Vendor) string {

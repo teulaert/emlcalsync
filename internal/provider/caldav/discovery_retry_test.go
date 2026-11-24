@@ -127,3 +127,50 @@ func TestOfflineDiscoveryDoesNotPinTheFallbackPath(t *testing.T) {
 		t.Fatalf("calendars = %+v, want the discovered one at %s, not the fallback guess", cals, calPath)
 	}
 }
+
+// hangsOnce never answers its first request; it fails it only when the
+// request's own context ends, which is what http.Client.Timeout does. After
+// that the server answers normally.
+type hangsOnce struct{ seen atomic.Int32 }
+
+func (h *hangsOnce) RoundTrip(r *http.Request) (*http.Response, error) {
+	if h.seen.Add(1) == 1 {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	}
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+// A client timeout fails the request with a deadline error while the caller's
+// context is still live. That is no answer either, so it must not pin the
+// fallback guess any more than a DNS failure may (review of PR #12).
+func TestClientTimeoutDuringDiscoveryDoesNotPinTheFallbackPath(t *testing.T) {
+	srv := caldavfake.New()
+	t.Cleanup(srv.Close)
+	srv.User, srv.Password = testEmail, testPass
+	srv.Home = "/dav/elsewhere/" + testEmail + "/"
+	calPath := srv.AddCalendar(caldavfake.Calendar{Path: srv.Home + "Default/", Name: "Calendar"})
+
+	c, err := New(Options{
+		Email: testEmail, Password: testPass, Vendor: model.VendorFastmail,
+		BaseURL: srv.BaseURL(), Logger: quietLogger(),
+		HTTPClient: &http.Client{Transport: &hangsOnce{}, CheckRedirect: noRedirects, Timeout: 100 * time.Millisecond},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := c.Calendars(ctx); err == nil {
+		t.Fatal("a discovery that timed out must fail, not settle on the fallback guess")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the caller's context must still be live for this test to mean anything")
+	}
+	cals, err := c.Calendars(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cals) != 1 || cals[0].RemoteID != calPath {
+		t.Fatalf("calendars = %+v, want the discovered one at %s, not the fallback guess", cals, calPath)
+	}
+}
