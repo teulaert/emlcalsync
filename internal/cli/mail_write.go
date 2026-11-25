@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -988,7 +989,14 @@ carries it: --accept or --tentative.
 					out.EventID = res.Event.PublicID()
 				}
 				if res.EventErr != nil {
+					// The answer went; only the calendar copy failed. Say so
+					// on stderr as well as in the output, because the person
+					// will look for the meeting on the agenda. The exit code
+					// stays 0: a caller that retried on failure would send
+					// the organizer the same answer twice.
 					out.EventError = res.EventErr.Error()
+					fmt.Fprintf(app.Stderr, "emlcal: warning: the answer was sent, but the meeting "+
+						"is not on the calendar: %v\n", res.EventErr)
 				}
 			}
 			if err := app.Printer().Print(out); err != nil {
