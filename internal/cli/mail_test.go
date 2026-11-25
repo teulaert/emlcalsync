@@ -1117,6 +1117,67 @@ func seedInviteEnv(t *testing.T, env *testEnv) {
 	env.Seed("work", fake.NewMsg("m-invite", raw).WithReceived(env.Now.Add(-time.Hour)))
 }
 
+// When the calendar will not take the copy, the answer has still gone. That
+// has to reach whoever ran the command, not only sit in a JSON field: they
+// will look for the meeting on the agenda (EML-3). The exit code stays 0,
+// because a caller that retried on failure would answer the organizer twice.
+func TestMailRespondSaysLoudlyWhenTheMeetingIsNotFiled(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	seedInviteEnv(t, env)
+	env.factory.NoImport = map[string]bool{"work": true}
+
+	stdout, stderr, code := env.Run("mail", "respond", "work:m-invite", "--accept")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 (the answer was sent); stderr %q", code, stderr)
+	}
+	var out mailRespondOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, stdout)
+	}
+	if out.EventError == "" || out.EventID != "" {
+		t.Errorf("out = %+v, want an event_error and no event", out)
+	}
+	if !strings.Contains(stderr, "not on the calendar") {
+		t.Errorf("stderr = %q, want a warning that the meeting is not on the calendar", stderr)
+	}
+	if n := len(env.Mail["work"].Sent()); n != 1 {
+		t.Errorf("%d messages went out, want the one REPLY", n)
+	}
+}
+
+// Offline, the answer is queued rather than sent, and the warning must not
+// claim otherwise: the person would think the organizer has it. The exit code
+// stays the queue's 6 (review of PR #13).
+func TestMailRespondWarningSaysQueuedWhenTheAnswerIsQueued(t *testing.T) {
+	env := newTestEnv(t,
+		config.NewAccount("work", "lennert@example.com", model.VendorFastmail))
+	seedInviteEnv(t, env)
+	env.factory.NoImport = map[string]bool{"work": true}
+	env.Mail["work"].FailNext(1)
+
+	stdout, stderr, code := env.Run("mail", "respond", "work:m-invite", "--accept")
+	if code != 6 {
+		t.Fatalf("exit %d, want 6 (queued); stderr %q", code, stderr)
+	}
+	var out mailRespondOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, stdout)
+	}
+	if !out.Queued || out.EventError == "" {
+		t.Errorf("out = %+v, want queued with an event_error", out)
+	}
+	if strings.Contains(stderr, "was sent") {
+		t.Errorf("stderr = %q claims the queued answer was sent", stderr)
+	}
+	if !strings.Contains(stderr, "queued") || !strings.Contains(stderr, "not on the calendar") {
+		t.Errorf("stderr = %q, want it to say the answer is queued and the meeting not filed", stderr)
+	}
+	if n := len(env.Mail["work"].Sent()); n != 0 {
+		t.Errorf("%d messages went out, want none yet", n)
+	}
+}
+
 // An invitation no calendar holds is answered by mailing the organizer an
 // iTIP REPLY. This is the case `cal respond` could not reach at all: there is
 // no event id to name, so there was nothing to type.

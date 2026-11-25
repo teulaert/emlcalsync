@@ -23,7 +23,14 @@ import (
 type fakeFactory struct {
 	Mails map[string]*fake.Mail
 	Cals  map[string]*fake.Calendar
+	// NoImport hands out these accounts' calendars without ImportEvent, as a
+	// backend that cannot file an invited event silently.
+	NoImport map[string]bool
 }
+
+// noImportCalendar hides the fake's ImportEvent: it embeds the interface, so
+// the method is not in its method set.
+type noImportCalendar struct{ provider.CalendarProvider }
 
 func (f *fakeFactory) Mail(ctx context.Context, acct config.Account) (provider.MailProvider, error) {
 	m, ok := f.Mails[acct.Name]
@@ -36,6 +43,9 @@ func (f *fakeFactory) Calendar(ctx context.Context, acct config.Account) (provid
 	c, ok := f.Cals[acct.Name]
 	if !ok {
 		return nil, fmt.Errorf("no fake calendar for %s", acct.Name)
+	}
+	if f.NoImport[acct.Name] {
+		return noImportCalendar{c}, nil
 	}
 	return c, nil
 }

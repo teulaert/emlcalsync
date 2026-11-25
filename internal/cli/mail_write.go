@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -988,7 +989,19 @@ carries it: --accept or --tentative.
 					out.EventID = res.Event.PublicID()
 				}
 				if res.EventErr != nil {
+					// The answer is sent or queued; only the calendar copy
+					// failed. Say so on stderr as well as in the output,
+					// because the person will look for the meeting on the
+					// agenda. The exit code is the answer's own (0 sent, 6
+					// queued): a caller that retried on failure would send
+					// the organizer the same answer twice.
 					out.EventError = res.EventErr.Error()
+					answer := "the answer was sent"
+					if res.Apply.Queued {
+						answer = "the answer is queued and goes out when the account is reachable"
+					}
+					fmt.Fprintf(app.Stderr, "emlcal: warning: %s, but the meeting "+
+						"is not on the calendar: %v\n", answer, res.EventErr)
 				}
 			}
 			if err := app.Printer().Print(out); err != nil {

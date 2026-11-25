@@ -888,7 +888,11 @@ to prevent. So it goes through `provider.EventImporter`: CalDAV PUTs with
 that API's own name for "add a private copy of an existing event" and notifies
 nobody. A backend that implements neither refuses rather than falling back,
 and the refusal is reported without touching the RSVP: the organizer has been
-told, and that is the part that cannot be taken back.
+told, and that is the part that cannot be taken back. `mail respond` says so
+on stderr as well as in `event_error`, and still exits 0, because a caller
+that retried on failure would answer the organizer twice. A JMAP server is
+expected to file invitations itself on delivery (iMIP, as Fastmail does), so
+there the answer normally goes the calendar road and no import is needed.
 
 `mail respond <message-id>` picks between the two roads, so neither a person
 nor an agent has to know which applies; `cal respond <event-id>` is the same
