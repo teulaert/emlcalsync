@@ -70,6 +70,16 @@ func render(c *Config) []byte {
 	writeDirIfCustom(&b, "data_dir", c.General.DataDir, DataDir())
 	writeDirIfCustom(&b, "state_dir", c.General.StateDir, StateDir())
 
+	// [mail] is written only when sending from the command line was switched
+	// on by hand, so an `account add` afterwards keeps that choice -- and a
+	// config that never had it does not grow a switch to flip.
+	if c.Mail.CLISend {
+		b.WriteString("\n[mail]\n")
+		b.WriteString("# Lets `mail send`, `mail reply` and `mail forward` send from the command\n")
+		b.WriteString("# line. Off, they store a draft and a human sends it from the TUI.\n")
+		b.WriteString("cli_send = true\n")
+	}
+
 	for i := range c.Accounts {
 		a := &c.Accounts[i]
 		b.WriteString("\n[[accounts]]\n")

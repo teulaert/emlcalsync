@@ -84,7 +84,7 @@ func TestGenericJMAPAccount(t *testing.T) {
 
 	// Sending goes out through its EmailSubmission.
 	out := decodeObject(t, e.mustRun("mail", "send", "--account", "work",
-		"--to", "someone@example.org", "--subject", "Over generic JMAP", "--body", "hello"))
+		"--to", "someone@example.org", "--subject", "Over generic JMAP", "--body", "hello", "--allow-send"))
 	if boolean(t, out, "queued") {
 		t.Errorf("send was queued although the server is up: %v", out)
 	}

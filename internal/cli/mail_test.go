@@ -508,6 +508,7 @@ func TestMailReplyDryRun(t *testing.T) {
 
 func TestMailReplySends(t *testing.T) {
 	env := mailSeed(t)
+	env.EnableCLISend()
 	out := env.MustRun("mail", "reply", "work:m-unread", "--body", "thanks")
 
 	sent := env.Mail["work"].Sent()
@@ -577,6 +578,7 @@ func TestMailForwardNeedsNoBody(t *testing.T) {
 
 func TestMailForwardSendsAndAnswersNothing(t *testing.T) {
 	env := mailSeed(t)
+	env.EnableCLISend()
 	env.MustRun("mail", "forward", "work:m-unread", "--to", "jan@example.com")
 
 	sent := env.Mail["work"].Sent()
@@ -693,6 +695,7 @@ func TestMailReplyAll(t *testing.T) {
 
 func TestMailSendAccountResolution(t *testing.T) {
 	env := mailSeed(t)
+	env.EnableCLISend()
 
 	_, _, code := env.Run("mail", "send", "--to", "x@y.example", "--subject", "s", "--body", "b")
 	if code != 2 {
@@ -817,6 +820,7 @@ func TestMailReadHTML(t *testing.T) {
 
 func TestMailSendExistingDraft(t *testing.T) {
 	env := mailSeed(t)
+	env.EnableCLISend()
 	env.Mail["work"].Update("m-old", model.Flags{Draft: true}, nil)
 	env.Sync("work")
 	out := env.MustRun("mail", "send", "--draft", "work:m-old")
@@ -860,6 +864,7 @@ func TestMailSendExistingDraft(t *testing.T) {
 // replay, so it is queued in the outbox (exit 6) and the draft stays put.
 func TestMailSendDraftKeepsDraftWhenQueued(t *testing.T) {
 	env := mailSeed(t)
+	env.EnableCLISend()
 	env.Mail["work"].FailNext(1) // pre-request failure: no connection at all
 
 	_, errs, code := env.Run("mail", "send", "--draft", "work:m-old")
@@ -878,6 +883,7 @@ func TestMailSendDraftKeepsDraftWhenQueued(t *testing.T) {
 // engine retires it instead of retrying: exit 4, nothing queued, draft intact.
 func TestMailSendDraftKeepsDraftWhenOffline(t *testing.T) {
 	env := mailSeed(t)
+	env.EnableCLISend()
 	env.Mail["work"].FailNextAmbiguous(1)
 
 	_, errs, code := env.Run("mail", "send", "--draft", "work:m-old")
@@ -910,7 +916,7 @@ func TestMailReplyOfflineDoesNotAnswer(t *testing.T) {
 			env := mailSeed(t)
 			tc.arm(t, env)
 
-			_, errs, code := env.Run("mail", "reply", "work:m-unread", "--body", "thanks")
+			_, errs, code := env.Run("mail", "reply", "work:m-unread", "--body", "thanks", "--allow-send")
 			if code != tc.exit {
 				t.Fatalf("offline reply exit = %d, want %d\nstderr: %s", code, tc.exit, errs)
 			}
@@ -1476,6 +1482,7 @@ func TestMailSendCarriesTheAccountsDisplayName(t *testing.T) {
 	acct := config.NewAccount("work", "me@example.com", model.VendorFastmail)
 	acct.DisplayName = "Me Myself"
 	env := newTestEnv(t, acct)
+	env.EnableCLISend()
 
 	env.MustRun("mail", "send", "--account", "work", "--to", "x@y.example", "--subject", "s", "--body", "b")
 	sent := env.Mail["work"].Sent()

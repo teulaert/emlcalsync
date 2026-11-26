@@ -163,6 +163,7 @@ type Config struct {
 	General  General   `toml:"general"`
 	Accounts []Account `toml:"accounts"`
 	AI       AI        `toml:"ai"`
+	Mail     Mail      `toml:"mail"`
 
 	// Path is the file this config was loaded from (empty when it did not
 	// exist and defaults were used).
@@ -203,6 +204,17 @@ type General struct {
 
 	// SecretBackend is "file" (default) or "libsecret".
 	SecretBackend string `toml:"secret_backend"`
+}
+
+// Mail is the top-level [mail] table: how the command line may handle mail,
+// as opposed to [accounts.mail], which says where an account's mail lives.
+type Mail struct {
+	// CLISend lets `mail send`, `mail reply` and `mail forward` actually send.
+	// Off by default: agents drive the command line, and mail from the
+	// owner's accounts goes out only when a human sends it -- from the TUI,
+	// which this does not affect. Off, those commands store a draft instead
+	// and say so; --allow-send overrides it for one invocation.
+	CLISend bool `toml:"cli_send"`
 }
 
 // AI is the [ai] table: the language models the app can call on. Its

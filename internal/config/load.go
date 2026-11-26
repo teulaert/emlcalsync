@@ -21,6 +21,12 @@ type fileConfig struct {
 	General  fileGeneral   `toml:"general"`
 	Accounts []fileAccount `toml:"accounts"`
 	AI       *fileAI       `toml:"ai"`
+	Mail     *fileMail     `toml:"mail"`
+}
+
+// fileMail is the top-level [mail] table.
+type fileMail struct {
+	CLISend *bool `toml:"cli_send"`
 }
 
 // fileAI is the [ai] table.
@@ -185,6 +191,9 @@ func merge(c *Config, fc *fileConfig) error {
 			return fmt.Errorf("accounts[%d]: %w", i, err)
 		}
 		c.Accounts = append(c.Accounts, a)
+	}
+	if fc.Mail != nil && fc.Mail.CLISend != nil {
+		c.Mail.CLISend = *fc.Mail.CLISend
 	}
 	if fc.AI != nil {
 		setString(&c.AI.Default, fc.AI.Default)

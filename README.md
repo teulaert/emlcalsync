@@ -278,6 +278,12 @@ commands and gates the writes:
 "ask":   ["Bash(emlcal mail send*)", "Bash(emlcal mail trash*)", "Bash(emlcal cal create*)", "..."]
 ```
 
+Sending mail from the command line is off by default: `mail send`, `reply` and
+`forward` store a draft instead and exit 7, and a human sends it from the TUI.
+Set `cli_send = true` under `[mail]` in config.toml to allow it, or pass
+`--allow-send` to one command. This stops an agent sending by accident; it does
+not stop one that sets either on purpose.
+
 ## Where things live
 
 ```

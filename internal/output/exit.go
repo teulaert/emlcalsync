@@ -14,6 +14,7 @@ const (
 	ExitOffline  = 4 // network needed but unreachable
 	ExitProvider = 5 // the provider rejected the request
 	ExitQueued   = 6 // write accepted locally and queued in the outbox
+	ExitSendOff  = 7 // sending from the command line is off; a draft was kept
 )
 
 // Error codes used in the JSON error envelope. They are stable strings agents
@@ -25,6 +26,7 @@ const (
 	CodeOffline  = "offline"
 	CodeProvider = "provider_error"
 	CodeQueued   = "queued"
+	CodeSendOff  = "send_disabled"
 )
 
 // CodeForExit maps an exit code to the JSON error code.
@@ -40,6 +42,8 @@ func CodeForExit(exit int) string {
 		return CodeProvider
 	case ExitQueued:
 		return CodeQueued
+	case ExitSendOff:
+		return CodeSendOff
 	default:
 		return CodeGeneric
 	}
