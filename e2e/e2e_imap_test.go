@@ -183,7 +183,7 @@ func TestIMAPSendGoesOverSMTP(t *testing.T) {
 
 	e.mustRun("mail", "send", "--account", "home",
 		"--to", "someone@example.com", "--bcc", "blind@example.com",
-		"--subject", "hello", "--body", "a message")
+		"--subject", "hello", "--body", "a message", "--allow-send")
 
 	sent := e.smtp.Sent()
 	if len(sent) != 1 {

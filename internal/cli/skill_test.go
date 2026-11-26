@@ -18,7 +18,7 @@ func TestSkillPrints(t *testing.T) {
 	}
 	for _, want := range []string{
 		"emlcal mail list", "emlcal mail search", "emlcal mail read", "emlcal mail thread",
-		"emlcal cal agenda", "emlcal cal free", "emlcal mail reply", "emlcal status",
+		"emlcal cal agenda", "emlcal cal free", "emlcal mail draft", "emlcal status",
 		"emlcal contacts search",
 		"<account>:<remote>", "<account>:t:<thread>", "<account>:c:<calendar>:<event>",
 		"--dry-run", "thread_id", "my_response",

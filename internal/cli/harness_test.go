@@ -248,3 +248,18 @@ func TestHarnessSmoke(t *testing.T) {
 		t.Fatalf("unknown command exit = %d", code)
 	}
 }
+
+// EnableCLISend sets [mail] cli_send = true in the env's config, the way the
+// owner would by hand, for tests that exercise sending itself. It goes through
+// config.Save, so the switch surviving a save is exercised too.
+func (e *testEnv) EnableCLISend() {
+	e.T.Helper()
+	cfg, err := config.Load(e.Config)
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	cfg.Mail.CLISend = true
+	if err := config.Save(e.Config, cfg); err != nil {
+		e.T.Fatal(err)
+	}
+}

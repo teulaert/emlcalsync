@@ -935,7 +935,8 @@ zsh/bash/fish).
   with offset, plus `_utc` epoch fields.
 - Errors: JSON `{"error": {"code": "...", "message": "..."}}` on stderr;
   exit codes: `0` ok, `1` generic, `2` usage, `3` not found, `4` offline and
-  operation needs network, `5` provider error, `6` queued in outbox.
+  operation needs network, `5` provider error, `6` queued in outbox, `7`
+  sending from the command line is disabled (the message was kept as a draft).
 - IDs are stable and opaque: `<account>:<remote_id>` for messages
   (`work:18f3a2b9c1d4e5f6`), `<account>:t:<thread_id>` for threads,
   `<account>:c:<calendar>:<event_id>` for events. Every list output includes
@@ -985,8 +986,11 @@ emlcal mail archive <id>...
 emlcal mail trash <id>...
 emlcal mail draft  --account A --to .. [--cc ..] --subject .. (--body .. | --body-file f)
                    [--reply <id> [--all]] [--attach f]         → draft id
-emlcal mail send   --draft <id>  |  (same flags as draft) [--dry-run]
-emlcal mail reply  <id> (--body .. | --body-file f) [--all] [--dry-run]
+emlcal mail send   --draft <id>  |  (same flags as draft) [--dry-run] [--allow-send]
+emlcal mail reply  <id> (--body .. | --body-file f) [--all] [--dry-run] [--allow-send]
+emlcal mail forward <id> --to .. [--body ..] [--no-attachments] [--dry-run] [--allow-send]
+                   send, reply and forward send only when [mail] cli_send is
+                   true or --allow-send is passed; otherwise see below
 emlcal mail respond <id> --accept|--decline|--tentative [--file-only] [--dry-run]
                    RSVP to a mailed invitation, by whichever road reaches the
                    organizer once: the calendar when one holds the event, else
@@ -1028,6 +1032,21 @@ emlcal completion zsh|bash|fish
 
 `--dry-run` on every write prints exactly what would be sent (full RFC822 for
 mail) and exits 0 without touching the outbox.
+
+**Sending from the command line is off by default (EML-5).** Agents drive the
+CLI, and mail from the owner's accounts goes out only when a human sends it --
+from the TUI, which this does not touch, nor the outbox replaying what the TUI
+queued. Without `[mail] cli_send = true` (set by hand) or `--allow-send` on the
+one command, `mail send`, `reply` and `forward` store what they composed as a
+draft and exit 7 (`send_disabled`) naming it; `send --draft <id>` leaves the
+draft where it is. A send with `--bcc` makes no draft, because a draft cannot
+hold blind recipients (the built message has no Bcc header; only a submission's
+envelope does). `--dry-run` still works. The override is a flag rather than an
+environment variable so it covers one command, stays visible on that command
+line, and cannot linger in an agent's exported environment. This guards against
+an agent sending by accident, not on purpose: one that passes the flag or edits
+the config gets through. Calendar mail (`mail respond`, invitations) is
+unaffected.
 
 `--meet` on `cal create`/`cal update` asks the server to mint and attach a
 Google Meet room; the link is printed and indexed as `conference_url`. Google

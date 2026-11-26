@@ -275,6 +275,15 @@ type mailComposeFlags struct {
 	draft    string
 	forward  string
 	noFiles  bool
+	// allowSend is --allow-send: one invocation may send although [mail]
+	// cli_send is off.
+	allowSend bool
+}
+
+// registerAllowSend adds --allow-send to a command that sends.
+func (f *mailComposeFlags) registerAllowSend(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&f.allowSend, "allow-send", false,
+		"send although [mail] cli_send is off -- for a human's explicit say-so; agents never pass it")
 }
 
 func (f *mailComposeFlags) register(cmd *cobra.Command, withReply, withDraft bool) {
@@ -672,6 +681,63 @@ func mailSubmit(cmd *cobra.Command, app *App, c *mailComposed, kind sync.OpKind)
 	return nil
 }
 
+// ---------------------------------------------------------------------------
+// The send switch.
+//
+// Sending from the command line is off unless [mail] cli_send is set in the
+// config by hand, or --allow-send is passed for one invocation. Agents drive
+// the command line, and mail from the owner's accounts goes out only when a
+// human sends it -- from the TUI, which this does not touch. Off, a send keeps
+// what it was given as a draft and says where it is.
+//
+// It guards against an agent sending by accident, not on purpose: one that
+// passes --allow-send or edits the config gets through.
+
+const sendOffHint = "A human sends it from the TUI, or enables sending in the config ([mail] cli_send = true)."
+
+// cliSendAllowed reports whether this invocation may send.
+func cliSendAllowed(app *App, f *mailComposeFlags) (bool, error) {
+	if f.allowSend {
+		return true, nil
+	}
+	cfg, err := app.Config()
+	if err != nil {
+		return false, err
+	}
+	return cfg.Mail.CLISend, nil
+}
+
+// sendOff stores what a refused send/reply/forward composed as a draft, and
+// returns the refusal naming it.
+func sendOff(cmd *cobra.Command, app *App, f *mailComposeFlags, c *mailComposed) error {
+	// A draft cannot carry Bcc: the built message deliberately has no Bcc
+	// header, and the envelope that holds the blind recipients exists only
+	// for a submission. A draft without them would go out missing them, so
+	// make none.
+	if len(f.bcc) > 0 {
+		return output.Errorf(output.ExitSendOff,
+			"Sending is disabled. No draft was made: a draft cannot keep Bcc recipients. "+
+				"Draft it without --bcc and pass the Bcc on to the human. %s", sendOffHint)
+	}
+	eng, err := app.Engine()
+	if err != nil {
+		return err
+	}
+	res, err := eng.Apply(cmd.Context(), c.account.Name,
+		sync.Op{Kind: sync.OpDraft, Raw: c.raw, ThreadID: c.threadID})
+	if err != nil {
+		return output.Errorf(ExitCode(err),
+			"Sending is disabled, and the draft could not be stored either: %w", err)
+	}
+	if res.Queued {
+		return output.Errorf(output.ExitSendOff,
+			"Sending is disabled. Draft queued in the outbox; it is stored once the account is reachable. %s",
+			sendOffHint)
+	}
+	return output.Errorf(output.ExitSendOff, "Sending is disabled. Draft created: %s. %s",
+		PublicMessageID(c.account.Name, res.RemoteID), sendOffHint)
+}
+
 func mailDraftCmd(app *App) *cobra.Command {
 	var f mailComposeFlags
 	cmd := &cobra.Command{
@@ -706,6 +772,10 @@ func mailSendCmd(app *App) *cobra.Command {
 		Long: `Send a new message, a reply (--reply <id>), or an existing draft
 (--draft <id>). --dry-run prints the exact RFC 822 bytes and sends nothing.
 
+Sending from the command line is off by default: without [mail] cli_send =
+true in the config, or --allow-send on this one command, it stores the message
+as a draft instead, names it and exits 7. A human sends it from the TUI.
+
 Offline, a send is queued in the outbox (exit 6) only when the request never
 left the machine, so replaying it is safe. If the connection dropped while the
 request was in flight the send is not retried (exit 4): the provider may
@@ -723,10 +793,16 @@ already have the message, so check your sent mail before sending again.`,
 				_, err := app.Stdout.Write(c.raw)
 				return err
 			}
+			if ok, err := cliSendAllowed(app, &f); err != nil {
+				return err
+			} else if !ok {
+				return sendOff(cmd, app, &f, c)
+			}
 			return mailSubmit(cmd, app, c, sync.OpSend)
 		},
 	}
 	f.register(cmd, true, true)
+	f.registerAllowSend(cmd)
 	return cmd
 }
 
@@ -768,6 +844,12 @@ func mailSendDraft(cmd *cobra.Command, app *App, f *mailComposeFlags) error {
 		_, err := app.Stdout.Write(raw)
 		return err
 	}
+	if ok, err := cliSendAllowed(app, f); err != nil {
+		return err
+	} else if !ok {
+		return output.Errorf(output.ExitSendOff, "Sending is disabled. Draft kept: %s. %s",
+			msg.PublicID(), sendOffHint)
+	}
 	return mailSubmit(cmd, app, c, sync.OpSend)
 }
 
@@ -787,6 +869,10 @@ otherwise, and no threading headers are set, so it starts a conversation with
 the person receiving it rather than landing in one they were never in. The
 message being forwarded is not marked answered, because it has not been.
 
+Sending from the command line is off by default: without [mail] cli_send =
+true in the config, or --allow-send on this one command, it stores the message
+as a draft instead, names it and exits 7. A human sends it from the TUI.
+
 The attachments are fetched from the archive, or from the provider when the
 archive kept only the envelope. If one cannot be fetched the forward fails
 rather than going out without it; --no-attachments forwards the text alone.`,
@@ -803,10 +889,16 @@ rather than going out without it; --no-attachments forwards the text alone.`,
 				_, err := app.Stdout.Write(c.raw)
 				return err
 			}
+			if ok, err := cliSendAllowed(app, &f); err != nil {
+				return err
+			} else if !ok {
+				return sendOff(cmd, app, &f, c)
+			}
 			return mailSubmit(cmd, app, c, sync.OpSend)
 		},
 	}
 	f.register(cmd, false, false)
+	f.registerAllowSend(cmd)
 	fl := cmd.Flags()
 	fl.BoolVar(&f.noFiles, "no-attachments", false, "forward the text alone, without the original's files")
 	return cmd
@@ -820,6 +912,10 @@ func mailReplyCmd(app *App) *cobra.Command {
 		Long: `Reply to a message from the account that received it. The original is
 quoted below your text and the thread headers are set, so the reply lands in
 the same conversation. --all keeps the other recipients.
+
+Sending from the command line is off by default: without [mail] cli_send =
+true in the config, or --allow-send on this one command, it stores the message
+as a draft instead, names it and exits 7. A human sends it from the TUI.
 
 Offline the reply is queued (exit 6) when the request never left the machine,
 and not retried (exit 4) when the connection dropped mid-request, since the
@@ -835,10 +931,16 @@ once the reply has actually gone out.`,
 				_, err := app.Stdout.Write(c.raw)
 				return err
 			}
+			if ok, err := cliSendAllowed(app, &f); err != nil {
+				return err
+			} else if !ok {
+				return sendOff(cmd, app, &f, c)
+			}
 			return mailSubmit(cmd, app, c, sync.OpSend)
 		},
 	}
 	f.register(cmd, false, false)
+	f.registerAllowSend(cmd)
 	cmd.Flags().BoolVar(&f.all, "all", false, "reply to all recipients")
 	return cmd
 }

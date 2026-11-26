@@ -28,6 +28,7 @@ func sentHTML(t *testing.T, raw []byte) (text, html string) {
 
 func TestMailSendCarriesAnHTMLAlternative(t *testing.T) {
 	env := mailSeed(t)
+	env.EnableCLISend()
 	long := strings.Repeat("one long paragraph without hard breaks ", 10)
 	env.MustRun("mail", "send", "--account", "work", "--to", "x@y.example", "--subject", "s",
 		"--body", long+"\n\nsecond paragraph")
@@ -47,6 +48,7 @@ func TestMailSendCarriesAnHTMLAlternative(t *testing.T) {
 
 func TestMailReplyQuotesAsBlockquoteInHTML(t *testing.T) {
 	env := mailSeed(t)
+	env.EnableCLISend()
 	env.MustRun("mail", "reply", "work:m-unread", "--body", "thanks")
 
 	sent := env.Mail["work"].Sent()
@@ -67,6 +69,7 @@ func TestMailReplyQuotesAsBlockquoteInHTML(t *testing.T) {
 
 func TestMailForwardCarriesAnHTMLAlternativeAndTheFile(t *testing.T) {
 	env := mailSeed(t)
+	env.EnableCLISend()
 	env.MustRun("mail", "forward", "work:m-unread", "--to", "jan@example.com", "--body", "fyi")
 
 	sent := env.Mail["work"].Sent()
@@ -88,6 +91,7 @@ func TestMailForwardCarriesAnHTMLAlternativeAndTheFile(t *testing.T) {
 // outbox holds the built message.
 func TestMailSendQueuedKeepsTheHTMLAlternative(t *testing.T) {
 	env := mailSeed(t)
+	env.EnableCLISend()
 	env.Mail["work"].FailNext(1)
 	_, errs, code := env.Run("mail", "send", "--account", "work", "--to", "x@y.example", "--subject", "s", "--body", "later")
 	if code != 6 {

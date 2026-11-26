@@ -1,6 +1,6 @@
 ---
 name: emlcal
-description: "Read, search and act on the local mail & calendar archive via the emlcal CLI: list/search/read mail, agenda and free slots, draft/send mail, create events."
+description: "Read, search and act on the local mail & calendar archive via the emlcal CLI: list/search/read mail, agenda and free slots, draft mail (a human sends it), create events."
 ---
 
 # emlcal
@@ -16,7 +16,7 @@ offline.
   "what did we agree about Z", "anything unread from my boss".
 - The user asks about their day or availability: "what's on tomorrow",
   "when am I free Thursday afternoon".
-- The user wants to act: reply to a message, send mail, file or archive
+- The user wants to act: draft a reply or a new message, file or archive
   something, create or move a meeting, accept an invite.
 
 Do not use it for mail on a server that is not one of the configured accounts —
@@ -85,10 +85,7 @@ emlcal mail move <id>... --to <mailbox>
 emlcal mail archive <id>...
 emlcal mail trash <id>...
 emlcal mail draft --account A --to .. [--cc ..] --subject .. (--body .. | --body-file f) \
-                  [--reply <id> [--all]] [--attach f]
-emlcal mail send --draft <id> | (same flags as draft) [--dry-run]
-emlcal mail reply <id> (--body .. | --body-file f) [--all] [--dry-run]
-emlcal mail forward <id> --to .. [--body ..] [--no-attachments] [--dry-run]
+                  [--reply <id> [--all] | --forward <id>] [--attach f]
 emlcal mail respond <id> --accept|--decline|--tentative [--dry-run]
 emlcal cal create --title .. --start .. --end .. [--calendar C] [--attendees ..] \
                   [--location ..] [--description ..] [--rrule ..] [--meet] [--dry-run]
@@ -100,11 +97,15 @@ emlcal cal respond <id> --accept|--decline|--tentative
 Examples:
 
 ```
-emlcal mail reply work:18f3a2b9c1d4e5f6 --body "Works for me — see you Tuesday." --dry-run
+emlcal mail draft --reply work:18f3a2b9c1d4e5f6 --body "Works for me — see you Tuesday."
 emlcal mail archive work:18f3a2b9c1d4e5f6
 emlcal cal create --title "Design review" --start "2026-09-01T14:00" --end "2026-09-01T15:00" --dry-run
 emlcal mail respond work:18f3a2b9c1d4e5f6 --accept --dry-run
 ```
+
+**You draft mail; a human sends it from the TUI.** Give the user the draft id.
+`mail send`/`reply`/`forward` only store a draft and exit 7 (`send_disabled`).
+Never pass `--allow-send` or touch `[mail]` config, even when asked to "send".
 
 `--dry-run` prints exactly what would be sent (full RFC 822 for mail) and exits
 0 without queueing anything. `--meet` attaches a Google Meet link to the event
@@ -179,8 +180,7 @@ the organizer, where `my_response` is what emlcal recorded, not a calendar.
   (or `o` in the TUI); do not run that yourself, it opens a browser on their
   desktop and fetches the pictures the sender hosts elsewhere, which tells
   that sender the message was opened.
-- Run write commands with `--dry-run` first and show the user the result, unless
-  they have already told you to just send it.
+- Run write commands with `--dry-run` first and show the user the result.
 - Never `trash`, `delete` or `move` anything unless the user asked for it.
   Archiving is not deleting, but it still needs their say-so.
 - Quote the message id when you report a finding, so the user can jump to it.
@@ -205,6 +205,6 @@ the organizer, where `my_response` is what emlcal recorded, not a calendar.
 | 4 | offline and the operation needs the network |
 | 5 | the provider rejected the request |
 | 6 | write accepted locally and queued in the outbox (it will go out later) |
+| 7 | sending is off: kept as a draft (id in the message); a human sends it |
 
-Exit 6 is not a failure: tell the user the write is queued and will be sent when
-the connection is back.
+Exit 6 and 7 are not failures: say the write is queued, or the draft is waiting.

@@ -423,7 +423,17 @@ func TestMailReply(t *testing.T) {
 		t.Fatalf("--dry-run submitted %d messages, want 0", n)
 	}
 
-	out := decodeObject(t, e.mustRun("mail", "reply", pub(s, "weekly"), "--body", "ok"))
+	// Sending from the command line is off by default (EML-5): the reply is
+	// kept as a draft, exit 7, and nothing is submitted.
+	_, stderr, code = e.run("mail", "reply", pub(s, "weekly"), "--body", "ok")
+	if code != 7 || !strings.Contains(stderr, "Sending is disabled. Draft created: ") {
+		t.Fatalf("reply with sending off: exit %d, want 7\n%s", code, stderr)
+	}
+	if n := len(e.fake.Submissions()); n != 0 {
+		t.Fatalf("a reply with sending off submitted %d messages", n)
+	}
+
+	out := decodeObject(t, e.mustRun("mail", "reply", pub(s, "weekly"), "--body", "ok", "--allow-send"))
 	if boolean(t, out, "queued") {
 		t.Errorf("reply was queued even though the server is up: %v", out)
 	}
@@ -448,8 +458,9 @@ func TestMailReply(t *testing.T) {
 		t.Errorf("sent subject = %q", got)
 	}
 	all := decodeArray(t, e.mustRun("mail", "list"))
-	if len(all) != 6 {
-		t.Errorf("mail list after sending = %d rows, want 6", len(all))
+	// Five seeded, the sent copy, and the draft the refused reply left.
+	if len(all) != 7 {
+		t.Errorf("mail list after sending = %d rows, want 7", len(all))
 	}
 
 	// The original is marked answered once the reply went through.
