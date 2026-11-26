@@ -235,8 +235,9 @@ func TestBuildRoundTrip(t *testing.T) {
 	if p.TextBody != normalizeText(d.TextBody) {
 		t.Errorf("body =\n%q\nwant\n%q", p.TextBody, normalizeText(d.TextBody))
 	}
-	if p.HasHTML || len(p.Attachments) != 0 {
-		t.Errorf("unexpected html/attachments: %v %+v", p.HasHTML, p.Attachments)
+	// The HTML alternative (EML-4) is there, and it is not an attachment.
+	if !p.HasHTML || len(p.Attachments) != 0 {
+		t.Errorf("html/attachments = %v %+v, want an HTML alternative and no attachments", p.HasHTML, p.Attachments)
 	}
 }
 

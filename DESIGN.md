@@ -823,6 +823,18 @@ the message that should go the other way. When pictures are left out the
 references stay in the page, so a broken image says "there was one here", and
 the header block says which way the page was rendered.
 
+Outgoing mail (`mime.Build`: send, reply, forward, the TUI composer, the
+outbox) is written as text and stays text, but it goes out as a
+`multipart/alternative` of that text and a minimal `text/html` rendering of
+it (`mime.TextToHTML`), inside a `multipart/mixed` when files are attached.
+Apple Mail and Outlook show a text/plain-only message in a fixed narrow
+column whatever the window width, which reads as a mail wrapped by hand
+(EML-4); every mainstream client sends an HTML alternative. The HTML adds
+nothing: escaped text, `<p>` per paragraph, `<br>` per line break, linked
+http(s) URLs, `> ` quotes as nested `<blockquote type="cite">`, no fonts or
+styles. Reading is unaffected, because the parser prefers the text part. An
+iTIP answer keeps its RFC 6047 shape, text and calendar, with no HTML.
+
 ### 8.1 Invitations and RSVPs (`internal/itip`)
 
 A message that carries a `text/calendar` part carries an iTIP object (RFC
