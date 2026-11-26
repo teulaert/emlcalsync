@@ -86,8 +86,10 @@ const (
 )
 
 // Build renders d as an RFC 822 message with CRLF line endings and no line
-// longer than 998 bytes. The body is text/plain; charset=utf-8 encoded
-// quoted-printable, wrapped in multipart/mixed when there are attachments.
+// longer than 998 bytes. The body is a multipart/alternative of text/plain and
+// a minimal text/html rendering of the same text (or, for an iTIP message, of
+// the text and the text/calendar object), both utf-8; it is wrapped in a
+// multipart/mixed when there are attachments.
 func Build(d *Draft) ([]byte, error) {
 	if d == nil {
 		return nil, errors.New("mime: nil draft")
@@ -139,16 +141,6 @@ func Build(d *Draft) ([]byte, error) {
 	}
 
 	var out bytes.Buffer
-	if len(d.Attachments) == 0 && d.Calendar == nil {
-		writeHeader(&h, "Content-Type", "text/plain; charset=utf-8")
-		writeHeader(&h, "Content-Transfer-Encoding", "quoted-printable")
-		out.Write(h.Bytes())
-		out.WriteString("\r\n")
-		if err := writeQP(&out, body); err != nil {
-			return nil, err
-		}
-		return out.Bytes(), nil
-	}
 
 	// The body of an iTIP message is the text and the calendar object saying
 	// the same thing two ways, which is a multipart/alternative. Files clipped
@@ -156,50 +148,60 @@ func Build(d *Draft) ([]byte, error) {
 	// alternative becomes the first part of the mixed -- the nesting RFC 2046
 	// §5.1.7 describes, and the one a reader has to see to show the text
 	// rather than the ics.
+	var (
+		alt   []byte
+		ctype string
+		err   error
+	)
 	if d.Calendar != nil {
-		alt, ctype, err := buildAlternative(body, d.Calendar)
-		if err != nil {
-			return nil, err
-		}
-		if len(d.Attachments) == 0 {
-			writeHeader(&h, "Content-Type", ctype)
-			out.Write(h.Bytes())
-			out.WriteString("\r\n")
-			out.Write(alt)
-			return out.Bytes(), nil
-		}
-		return buildMixed(&h, &out, ctype, alt, d.Attachments)
+		alt, ctype, err = buildAlternative(body, d.Calendar)
+	} else {
+		// Any other body goes out as the text plus the same text as minimal
+		// HTML: a text/plain-only message is shown in a narrow fixed column
+		// by Apple Mail and Outlook (EML-4). See TextToHTML.
+		alt, ctype, err = buildTextHTML(body)
 	}
-
-	var parts bytes.Buffer
-	mw := multipart.NewWriter(&parts)
-	if err := mw.SetBoundary(randomBoundary()); err != nil {
-		return nil, err
-	}
-
-	tp, err := mw.CreatePart(textproto.MIMEHeader{
-		"Content-Type":              {"text/plain; charset=utf-8"},
-		"Content-Transfer-Encoding": {"quoted-printable"},
-	})
 	if err != nil {
 		return nil, err
 	}
-	if err := writeQP(tp, body); err != nil {
-		return nil, err
+	if len(d.Attachments) == 0 {
+		writeHeader(&h, "Content-Type", ctype)
+		out.Write(h.Bytes())
+		out.WriteString("\r\n")
+		out.Write(alt)
+		return out.Bytes(), nil
 	}
+	return buildMixed(&h, &out, ctype, alt, d.Attachments)
+}
 
-	if err := writeAttachments(mw, d.Attachments); err != nil {
-		return nil, err
+// buildTextHTML renders an ordinary body as a multipart/alternative of the
+// text and its HTML rendering, text first: an alternative is ordered
+// worst-to-best, and a reader that shows text only still gets the original.
+func buildTextHTML(body string) (parts []byte, contentType string, err error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	if err := mw.SetBoundary(randomBoundary()); err != nil {
+		return nil, "", err
+	}
+	for _, p := range []struct{ ctype, text string }{
+		{"text/plain; charset=utf-8", body},
+		{"text/html; charset=utf-8", TextToHTML(body)},
+	} {
+		w, err := mw.CreatePart(textproto.MIMEHeader{
+			"Content-Type":              {p.ctype},
+			"Content-Transfer-Encoding": {"quoted-printable"},
+		})
+		if err != nil {
+			return nil, "", err
+		}
+		if err := writeQP(w, p.text); err != nil {
+			return nil, "", err
+		}
 	}
 	if err := mw.Close(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-
-	writeHeader(&h, "Content-Type", "multipart/mixed; boundary="+mw.Boundary())
-	out.Write(h.Bytes())
-	out.WriteString("\r\n")
-	out.Write(parts.Bytes())
-	return out.Bytes(), nil
+	return buf.Bytes(), "multipart/alternative; boundary=" + mw.Boundary(), nil
 }
 
 // writeAttachments adds one base64 part per file.

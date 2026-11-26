@@ -86,11 +86,18 @@ func TestExportMbox(t *testing.T) {
 	env := newTestEnv(t)
 	const n = 3
 	var msgs []*fake.Msg
+	wantEscaped := 0 // every body line of the stored messages that starts "From "
 	for i := 0; i < n; i++ {
-		msgs = append(msgs, fake.NewMsg(
-			"m"+strconv.Itoa(i),
-			RawMail(t, "a@example.com", "me@example.com", "subject "+strconv.Itoa(i), "body\nFrom the top\n", env.Now.Add(-time.Duration(i)*time.Hour)),
-		))
+		raw := RawMail(t, "a@example.com", "me@example.com", "subject "+strconv.Itoa(i), "body\nFrom the top\n", env.Now.Add(-time.Duration(i)*time.Hour))
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.HasPrefix(line, "From ") {
+				wantEscaped++
+			}
+		}
+		msgs = append(msgs, fake.NewMsg("m"+strconv.Itoa(i), raw))
+	}
+	if wantEscaped < n {
+		t.Fatalf("fixture has %d body lines starting \"From \", want at least %d", wantEscaped, n)
 	}
 	env.Seed("work", msgs...)
 
@@ -118,8 +125,8 @@ func TestExportMbox(t *testing.T) {
 	if separators != n {
 		t.Errorf("mbox has %d separators, want %d", separators, n)
 	}
-	if escaped != n {
-		t.Errorf("mbox escaped %d body lines, want %d", escaped, n)
+	if escaped != wantEscaped {
+		t.Errorf("mbox escaped %d body lines, want %d", escaped, wantEscaped)
 	}
 }
 
