@@ -44,6 +44,16 @@ func TestUnflow(t *testing.T) {
 			want: "Bye\n-- \nJan\n",
 		},
 		{
+			name: "a soft line before the signature separator ends there",
+			in:   "Regards \r\n-- \r\nAlice\r\n",
+			want: "Regards\n-- \nAlice\n",
+		},
+		{
+			name: "the same inside a quote",
+			in:   "> Regards \r\n> -- \r\n> Alice\r\n",
+			want: "> Regards\n> -- \n> Alice\n",
+		},
+		{
 			name: "empty quoted line",
 			in:   "> a\r\n>\r\n> b\r\n",
 			want: "> a\n>\n> b\n",

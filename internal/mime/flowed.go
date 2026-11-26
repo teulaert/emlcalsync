@@ -47,12 +47,15 @@ func unflow(s string, delsp bool) string {
 			d++
 		}
 		rest := strings.TrimPrefix(line[d:], " ")
-		soft := strings.HasSuffix(rest, " ") && rest != "-- "
+		sigSep := rest == "-- "
+		soft := strings.HasSuffix(rest, " ") && !sigSep
 		if soft && delsp {
 			rest = rest[:len(rest)-1]
 		}
-		if open && d != depth {
-			flush() // a change of depth ends a paragraph, soft or not (§4.5)
+		if open && (d != depth || sigSep) {
+			// A change of depth ends a paragraph, soft or not (§4.5), and so
+			// does a signature separator, even after a soft line (§4.1).
+			flush()
 		}
 		depth, open = d, true
 		para.WriteString(rest)
