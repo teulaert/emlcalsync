@@ -763,7 +763,12 @@ At index time, for each raw message:
    first `text/html` → html2text (links kept as `text (url)`, tables kept as
    rows, scripts/styles dropped).
 3. Decode charset (fall back to windows-1252 on failure — real-world mail),
-   normalise line endings, collapse >2 blank lines.
+   normalise line endings, collapse >2 blank lines. A `text/plain;
+   format=flowed` body (RFC 3676, what Apple Mail and Thunderbird send in
+   plain-text mode) is unwrapped first: soft-broken lines are joined into
+   their paragraphs, space-stuffing is removed, DelSp is honoured, and quoted
+   paragraphs come back as `> ` per level. Otherwise reading, search and
+   quoting would show a 72-column text.
 4. Attachments: any part with `Content-Disposition: attachment`, or a non-text
    part with a filename, or an inline image. Store metadata; content is read
    from the blob on demand (`part_path` → re-walk).
