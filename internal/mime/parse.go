@@ -39,6 +39,8 @@ type leaf struct {
 	mediaType string
 	method    string // the Content-Type method parameter of a calendar part
 	text      []byte // retained for text/* leaves only
+	flowed    bool   // text/plain; format=flowed (RFC 3676)
+	delsp     bool   // its delsp=yes parameter
 }
 
 // Parse walks raw and extracts headers, body text and part metadata. It is
@@ -129,7 +131,11 @@ func selectBody(out *Parsed, leaves []leaf) {
 		switch {
 		case l.mediaType == "text/plain":
 			if plain == "" {
-				if s := normalizeText(decodeBytes(l.text)); strings.TrimSpace(s) != "" {
+				text := decodeBytes(l.text)
+				if l.flowed {
+					text = unflow(text, l.delsp)
+				}
+				if s := normalizeText(text); strings.TrimSpace(s) != "" {
 					plain = s
 				}
 			}
@@ -286,6 +292,8 @@ func (w *walker) addLeaf(e *message.Entity, path, mt string, params map[string]s
 		},
 		mediaType: mt,
 		method:    strings.ToUpper(strings.TrimSpace(params["method"])),
+		flowed:    mt == "text/plain" && strings.EqualFold(strings.TrimSpace(params["format"]), "flowed"),
+		delsp:     strings.EqualFold(strings.TrimSpace(params["delsp"]), "yes"),
 	}
 
 	// A multipart leaf is a container this walker could not descend into (past
